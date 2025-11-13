@@ -4,10 +4,10 @@
 @nickname: LinkNodes
 @version: 1.0.0
 @project: "https://github.com/Mister-Link/link-comfy-nodes",
-@description: Just some helpful nodes!
+@description: A collection of custom ComfyUI nodes by Mister-Link, including color parsing and utility nodes.
 """
 
-from .color_parser import ColorParserNode  # assuming your node file is color_parser.py
+from .string_to_color import ColorParserNode
 
 NODE_CLASS_MAPPINGS = {
     "Hex or 24 Bit Color": ColorParserNode,
