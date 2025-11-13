@@ -14,7 +14,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Hex or 24 Bit Color": "Hex / 24-bit Color Parser",
+    "Hex or 24 Bit Color": "Convert Color Format",
 }
 
 WEB_DIRECTORY = "./web"
