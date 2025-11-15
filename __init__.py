@@ -7,7 +7,6 @@
 @description: A collection of custom ComfyUI nodes by Mister-Link, including color parsing and utility nodes.
 """
 
-from .alpha_blend import AlphaBlendNode
 from .furthest_color import FarthestColorNode
 from .string_to_color import ColorParserNode
 from .wan_frame_calculator import WANFrameCalculatorNode
@@ -15,14 +14,12 @@ from .wan_frame_calculator import WANFrameCalculatorNode
 NODE_CLASS_MAPPINGS = {
     "Hex or 24 Bit Color": ColorParserNode,
     "Farthest Color": FarthestColorNode,
-    "Alpha Blend Replace": AlphaBlendNode,
     "WAN Frame Calculator": WANFrameCalculatorNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Hex or 24 Bit Color": "Convert Color Format",
     "Farthest Color": "Find Furthest Color",
-    "Alpha Blend Replace": "Replace Transparent with Original",
     "WAN Frame Calculator": "WAN Frame Calculator",
 }
 
