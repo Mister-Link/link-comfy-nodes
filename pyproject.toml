@@ -1,0 +1,14 @@
+[project]
+name = "link_comfy_nodes"
+description = "A collection of custom ComfyUI nodes by Mister-Link, including color parsing, frame calculation, and utility nodes for enhanced workflow capabilities."
+version = "1.0.0"
+license = {file = "LICENSE"}
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Mister-Link/link-comfy-nodes"
+
+[tool.comfy]
+PublisherId = "mister_link"
+DisplayName = "Link Comfy Nodes"
+Icon = ""
