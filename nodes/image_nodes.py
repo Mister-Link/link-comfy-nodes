@@ -79,7 +79,6 @@ class PoseImageSetupNode:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "mask": ("MASK",),
                 "fill_color": ("STRING", {"default": "#000000", "multiline": False}),
                 "width_change": (
                     "INT",
@@ -98,32 +97,40 @@ class PoseImageSetupNode:
                     {"default": 0, "min": -2048, "max": 2048, "step": 1},
                 ),
                 "only_fill": ("BOOLEAN", {"default": False}),
-            }
+            },
+            "optional": {
+                "mask": ("MASK",),
+            },
         }
 
     def setup_pose_images(
         self,
         images: torch.Tensor,
-        mask: torch.Tensor,
         fill_color: str,
         width_change: int,
         height_change: int,
         offset_x: int,
         offset_y: int,
         only_fill: bool,
+        mask: torch.Tensor = None,
     ):
         fill_rgb = parse_hex_color(fill_color)
         images_np = images.detach().cpu().numpy()
-        mask_np = mask.detach().cpu().numpy()
 
-        if mask_np.ndim == 3:
-            mask_combined = (mask_np > 0.5).any(axis=0)
+        # If no mask is provided, use the entire image
+        if mask is None:
+            img_height, img_width = images_np.shape[1:3]
+            mask_combined = np.ones((img_height, img_width), dtype=bool)
         else:
-            mask_combined = mask_np > 0.5
+            mask_np = mask.detach().cpu().numpy()
+            if mask_np.ndim == 3:
+                mask_combined = (mask_np > 0.5).any(axis=0)
+            else:
+                mask_combined = mask_np > 0.5
 
-        if not np.any(mask_combined):
-            # Nothing selected—return images unchanged
-            return (images,)
+            if not np.any(mask_combined):
+                # Nothing selected—return images unchanged
+                return (images,)
 
         mask_y_indices, mask_x_indices = np.nonzero(mask_combined)
         min_y, max_y = mask_y_indices.min(), mask_y_indices.max() + 1
