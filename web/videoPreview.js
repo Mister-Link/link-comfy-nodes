@@ -29,19 +29,92 @@ function openMaskEditor(node, previewWidget) {
     flex-direction: column;
     gap: 15px;
     color: #fff;
+    position: relative;
   `;
 
-  // Title
-  const title = document.createElement("h3");
-  title.textContent = "Set Mask Region";
-  title.style.cssText = "margin: 0; font-size: 18px;";
-  dialog.appendChild(title);
+  // Close button
+  const closeButton = document.createElement("button");
+  closeButton.textContent = "×";
+  closeButton.style.cssText = `
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: transparent;
+    color: #aaa;
+    border: none;
+    font-size: 28px;
+    line-height: 20px;
+    cursor: pointer;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 4px;
+    transition: background 0.2s, color 0.2s;
+  `;
+  closeButton.addEventListener("mouseenter", () => {
+    closeButton.style.background = "#555";
+    closeButton.style.color = "#fff";
+  });
+  closeButton.addEventListener("mouseleave", () => {
+    closeButton.style.background = "transparent";
+    closeButton.style.color = "#aaa";
+  });
+  dialog.appendChild(closeButton);
 
   // Instructions
   const instructions = document.createElement("p");
-  instructions.textContent = "Click and drag to select the mask region.";
-  instructions.style.cssText = "margin: 0; font-size: 14px; color: #aaa;";
+  instructions.textContent =
+    "Click-drag to set mask region. Right-click to erase. Scroll to set brush size.";
+  instructions.style.cssText =
+    "margin: 0; font-size: 13px; color: #aaa; padding-right: 40px;";
   dialog.appendChild(instructions);
+
+  // Mode selector and controls container
+  const controlsRow = document.createElement("div");
+  controlsRow.style.cssText = "display: flex; gap: 10px; align-items: center;";
+
+  // Mask mode selector
+  const modeLabel = document.createElement("label");
+  modeLabel.textContent = "Mode: ";
+  modeLabel.style.cssText = "font-size: 14px;";
+
+  const modeSelect = document.createElement("select");
+  modeSelect.style.cssText = `
+    padding: 4px 8px;
+    background: #333;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
+    cursor: pointer;
+  `;
+  modeSelect.innerHTML = `
+    <option value="bbox">BBox Selection</option>
+    <option value="paint">Paint Brush</option>
+  `;
+
+  let maskMode = "bbox";
+  modeSelect.addEventListener("change", (e) => {
+    const previousMode = maskMode;
+    maskMode = e.target.value;
+    canvas.style.cursor = maskMode === "paint" ? "crosshair" : "crosshair";
+
+    // Clear the frame when switching modes
+    maskRect = null;
+    paintMaskData = null;
+    lastRenderedKeyframeIndex = -1;
+
+    drawCanvas();
+  });
+
+  // Brush size (controlled by scroll wheel)
+  let brushSize = 20;
+
+  let isPlaying = true;
+
+  controlsRow.appendChild(modeLabel);
+  controlsRow.appendChild(modeSelect);
+
+  dialog.appendChild(controlsRow);
 
   // Canvas container
   const canvasContainer = document.createElement("div");
@@ -68,6 +141,18 @@ function openMaskEditor(node, previewWidget) {
     object-fit: contain;
   `;
 
+  // Brush preview cursor (only visible in paint mode)
+  const brushPreview = document.createElement("div");
+  brushPreview.style.cssText = `
+    position: absolute;
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    border-radius: 50%;
+    pointer-events: none;
+    display: none;
+    z-index: 1000;
+  `;
+  canvasContainer.appendChild(brushPreview);
+
   // Note: Do not stop propagation here - let the drawing handlers below handle it
 
   canvasContainer.appendChild(canvas);
@@ -75,8 +160,143 @@ function openMaskEditor(node, previewWidget) {
   // Add canvas container to dialog
   dialog.appendChild(canvasContainer);
 
+  // Timeline scrubber
+  const scrubberContainer = document.createElement("div");
+  scrubberContainer.style.cssText = `
+    width: 100%;
+    padding: 10px;
+    background: #2a2a2a;
+    border-radius: 4px;
+  `;
+
+  const scrubberBar = document.createElement("div");
+  scrubberBar.style.cssText = `
+    position: relative;
+    width: 100%;
+    height: 40px;
+    background: #888;
+    border-radius: 4px;
+    cursor: pointer;
+    overflow: hidden;
+  `;
+
+  const selectionMarker = document.createElement("div");
+  selectionMarker.style.cssText = `
+    position: absolute;
+    top: 0;
+    left: 0; /* Updated dynamically */
+    width: 0; /* Updated dynamically */
+    height: 100%;
+    background: rgba(80, 120, 255, 0.25);
+    border: 1px solid white;
+    z-index: 20;
+    pointer-events: none;
+    box-sizing: border-box;
+    display: none;
+  `;
+  scrubberBar.appendChild(selectionMarker);
+
+  // Add scrubber drag state
+  let isScrubberDragging = false;
+
+  const handleScrubberDrag = (e) => {
+    if (!previewWidget.frames || previewWidget.frames.length === 0) return;
+
+    const rect = scrubberBar.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(1, x / rect.width));
+    const frameIdx = Math.floor(percent * previewWidget.frames.length);
+
+    dialogFrameIndex = Math.max(
+      0,
+      Math.min(previewWidget.frames.length - 1, frameIdx),
+    );
+
+    if (isPlaying) {
+      isPlaying = false;
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "|>";
+      }
+      stopAnimation();
+    }
+
+    updateScrubber();
+    drawCanvas();
+  };
+
+  scrubberBar.addEventListener("pointerdown", (e) => {
+    isScrubberDragging = true;
+    handleScrubberDrag(e);
+
+    const onPointerMove = (e) => {
+      if (isScrubberDragging) {
+        handleScrubberDrag(e);
+      }
+    };
+
+    const onPointerUp = () => {
+      isScrubberDragging = false;
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+    };
+
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
+  });
+
+  scrubberContainer.appendChild(scrubberBar);
+
+  // Frame info display (bottom left)
+  const frameInfo = document.createElement("div");
+  frameInfo.style.cssText = "font-size: 12px; color: #aaa; margin-top: 5px;";
+  frameInfo.textContent = "Frame: 0 / 0";
+  scrubberContainer.appendChild(frameInfo);
+
+  // Transport controls container (below scrubber bar)
+  const transportControls = document.createElement("div");
+  transportControls.style.cssText = `
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    margin-top: 10px;
+  `;
+
+  const createTransportButton = (label, onClick) => {
+    const button = document.createElement("button");
+    button.textContent = label;
+    button.style.cssText = `
+      padding: 8px 14px;
+      background: #444;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      min-width: 44px;
+      font-family: monospace;
+      transition: background 0.2s;
+    `;
+    button.addEventListener("click", onClick);
+    button.addEventListener("mouseenter", () => {
+      if (!button.disabled) {
+        button.style.background = "#555";
+      }
+    });
+    button.addEventListener("mouseleave", () => {
+      if (!button.disabled) {
+        button.style.background = "#444";
+      }
+    });
+    return button;
+  };
+
+  scrubberContainer.appendChild(transportControls);
+  dialog.appendChild(scrubberContainer);
+
   // Mask selection state
   let maskRect = node.maskRegion || null;
+  const initialMaskRect = maskRect ? { ...maskRect } : null; // Store initial state for cancel
   let isDrawing = false;
   let isDragging = false;
   let isResizing = false;
@@ -86,7 +306,19 @@ function openMaskEditor(node, previewWidget) {
   let dragStartRect = null;
   let animationInterval = null;
   let dialogFrameIndex = 0; // Separate frame index for dialog to avoid interference
+  let lastRenderedKeyframeIndex = -1; // Track which keyframe we last loaded maskRect from
   const HANDLE_SIZE = 12; // Size of corner/edge handles for resizing
+
+  // Keyframe state
+  let keyframes = {}; // frame_index -> {type: "bbox"|"painted", data: ...}
+  let initialKeyframes = {}; // Store initial keyframes for cancel
+  let paintMaskData = null; // Raw ImageData buffer for painting (width * height array)
+  let paintMaskFrameIndex = -1; // Which frame the current paint data belongs to
+  let isPainting = false;
+  let lastPaintX = 0;
+  let lastPaintY = 0;
+  let currentPaintColor = 0; // 0 = black (painted), 255 = white (erased)
+  let paintRenderScheduled = false;
 
   const toCanvasCoords = (event) => {
     const rect = canvas.getBoundingClientRect();
@@ -159,6 +391,157 @@ function openMaskEditor(node, previewWidget) {
     );
   };
 
+  // Forward declare updateTransportButtons so it can be used in updateScrubber
+  let updateTransportButtons = null;
+
+  // Update scrubber position and keyframe markers
+  const updateScrubber = () => {
+    if (!previewWidget.frames || previewWidget.frames.length === 0) return;
+
+    const totalFrames = previewWidget.frames.length;
+    frameInfo.textContent = `Frame: ${dialogFrameIndex + 1} / ${totalFrames}${
+      keyframes[dialogFrameIndex] ? " (Keyframe)" : ""
+    }`;
+
+    // Update transport button states if available
+    if (updateTransportButtons) {
+      updateTransportButtons();
+    }
+
+    // Update the selection marker's position
+    if (totalFrames > 0) {
+      const frameWidthPercent = 100 / totalFrames;
+      const leftPosPercent = (dialogFrameIndex / totalFrames) * 100;
+
+      selectionMarker.style.display = "block";
+      selectionMarker.style.left = `${leftPosPercent}%`;
+      selectionMarker.style.width = `${frameWidthPercent}%`;
+    } else {
+      selectionMarker.style.display = "none";
+    }
+
+    // Remove existing frame boxes
+    const existingBoxes = scrubberBar.querySelectorAll(".frame-box");
+    existingBoxes.forEach((b) => b.remove());
+
+    // Draw frame boxes
+    const frameWidth = 100 / totalFrames;
+
+    for (let i = 0; i < totalFrames; i++) {
+      const frameBox = document.createElement("div");
+      frameBox.className = "frame-box";
+      frameBox.dataset.frameIndex = i;
+
+      const leftPos = (i / totalFrames) * 100;
+      const isCurrentFrame = i === dialogFrameIndex;
+      const isKeyframe = keyframes[i];
+
+      // Determine color and styling
+      let bgColor = "#666"; // default frame
+      let zIndex = 0;
+
+      if (isKeyframe) {
+        bgColor = "#00cc00"; // green for keyframes
+      }
+
+      if (isCurrentFrame) {
+        zIndex = 10; // bring to front so keyframe color is visible under marker
+      }
+
+      frameBox.style.cssText = `
+          position: absolute;
+          top: 0;
+          left: ${leftPos}%;
+          width: ${frameWidth}%;
+          height: 100%;
+          background: ${bgColor};
+          border-right: 1px solid #444;
+          pointer-events: auto;
+          z-index: ${zIndex};
+          box-sizing: border-box;
+          transition: background-color 0.15s ease;
+        `;
+
+      // Add hover effect
+      frameBox.addEventListener("mouseenter", () => {
+        if (i !== dialogFrameIndex) {
+          frameBox.style.filter = "brightness(1.2)";
+        }
+      });
+
+      frameBox.addEventListener("mouseleave", () => {
+        frameBox.style.filter = "none";
+      });
+
+      // Click to select frame
+      frameBox.addEventListener("click", (e) => {
+        e.stopPropagation();
+        dialogFrameIndex = i;
+        if (isPlaying) {
+          isPlaying = false;
+          if (playPauseBtnTransport) {
+            playPauseBtnTransport.textContent = "|>";
+          }
+          stopAnimation();
+        }
+        updateScrubber();
+        drawCanvas();
+      });
+
+      // Right-click to delete keyframe
+      frameBox.addEventListener("contextmenu", async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (keyframes[i]) {
+          delete keyframes[i];
+
+          try {
+            await api.fetchApi("/videomaskeditor/deletekeyframe", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                node_id: node.id,
+                frame_index: i,
+              }),
+            });
+          } catch (error) {
+            console.error(
+              "[VideoMaskEditor] Failed to delete keyframe:",
+              error,
+            );
+          }
+
+          maskRect = null;
+          paintedMaskCanvas = null;
+          lastRenderedKeyframeIndex = -1;
+          updateScrubber();
+          drawCanvas();
+        }
+      });
+
+      scrubberBar.appendChild(frameBox);
+    }
+  };
+
+  // Load keyframes from backend
+  const loadKeyframes = async () => {
+    try {
+      const response = await api.fetchApi(
+        `/videomaskeditor/getkeyframes?node_id=${node.id}`,
+      );
+      if (response.ok) {
+        const data = await response.json();
+        keyframes = data.keyframes || {};
+        // Store a deep copy of initial keyframes for cancel functionality
+        initialKeyframes = JSON.parse(JSON.stringify(keyframes));
+        updateScrubber();
+      }
+    } catch (error) {
+      console.error("[VideoMaskEditor] Failed to load keyframes:", error);
+    }
+  };
+
   // Draw current frame with mask overlay
   const drawCanvas = () => {
     if (!previewWidget.frames || previewWidget.frames.length === 0) return;
@@ -173,62 +556,156 @@ function openMaskEditor(node, previewWidget) {
     const ctx = canvas.getContext("2d");
     ctx.putImageData(frameData.imageData, 0, 0);
 
-    // Draw mask overlay only if we have a valid mask
-    if (maskRect && maskRect.width > 0 && maskRect.height > 0) {
-      if (!isDrawing && !isDragging && !isResizing) {
-        // Only show the overlay when NOT actively editing
-        // Draw soft dark overlay on the entire canvas (outside the selection)
-        ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    let activeKeyframe = null;
 
-        // Clear the selected area to show the original video with no tint
-        ctx.clearRect(maskRect.x, maskRect.y, maskRect.width, maskRect.height);
+    // Find the most recent keyframe for the current frame
+    const sortedKeyframeIndices = Object.keys(keyframes)
+      .map(Number)
+      .sort((a, b) => a - b);
 
-        // Redraw the original video content in the cleared area
-        const frameData =
-          previewWidget.frames[dialogFrameIndex % previewWidget.frames.length];
-        if (frameData) {
-          ctx.putImageData(
-            frameData.imageData,
-            0,
-            0,
-            maskRect.x,
-            maskRect.y,
-            maskRect.width,
-            maskRect.height,
+    for (let i = sortedKeyframeIndices.length - 1; i >= 0; i--) {
+      const keyframeIndex = sortedKeyframeIndices[i];
+      if (keyframeIndex <= dialogFrameIndex) {
+        activeKeyframe = keyframes[keyframeIndex];
+        break;
+      }
+    }
+
+    // Determine what to show
+    let showPaint = false;
+    let showBbox = false;
+    let paintDataToShow = null;
+
+    // By default, clear the mask unless we find a keyframe or are editing
+    if (!isDrawing && !isDragging && !isResizing) {
+      maskRect = null;
+    }
+
+    if (activeKeyframe) {
+      if (activeKeyframe.type === "bbox") {
+        showBbox = true;
+        if (!isDrawing && !isDragging && !isResizing) {
+          maskRect = activeKeyframe.bbox ? { ...activeKeyframe.bbox } : null;
+        }
+      } else if (activeKeyframe.type === "painted") {
+        showPaint = true;
+        paintDataToShow = activeKeyframe.mask_data;
+      }
+    }
+
+    // Active bbox editing always takes precedence and hides any underlying paint
+    if (isDrawing || isDragging || isResizing) {
+      showBbox = true;
+      showPaint = false;
+    }
+
+    // If a bbox is active (from a keyframe or edit), it hides paint
+    if (maskRect) {
+      showPaint = false;
+    }
+
+    // --- RENDER ---
+
+    // 1. Render Paint, if applicable
+    if (showPaint && paintDataToShow) {
+      try {
+        const binary = atob(paintDataToShow);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const maskArray = new Float32Array(bytes.buffer);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < maskArray.length; i++) {
+          if (maskArray[i] > 0.5) {
+            const idx = i * 4;
+            // Blend with red tint: 30% original + 70% red
+            imageData.data[idx] = Math.min(
+              255,
+              imageData.data[idx] * 0.3 + 255 * 0.7,
+            );
+            imageData.data[idx + 1] = Math.floor(imageData.data[idx + 1] * 0.3);
+            imageData.data[idx + 2] = Math.floor(imageData.data[idx + 2] * 0.3);
+          }
+        }
+        ctx.putImageData(imageData, 0, 0);
+      } catch (error) {
+        console.error(
+          "[VideoMaskEditor] Failed to display painted mask:",
+          error,
+        );
+      }
+    }
+
+    // 2. Render live painting buffer
+    if (
+      isPainting &&
+      paintMaskData &&
+      paintMaskFrameIndex === dialogFrameIndex
+    ) {
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      for (let i = 0; i < paintMaskData.length; i++) {
+        if (paintMaskData[i] < 128) {
+          // Black = painted/selected
+          const pixelIdx = i * 4;
+          // Blend with red tint: 30% original + 70% red
+          imageData.data[pixelIdx] = Math.min(
+            255,
+            imageData.data[pixelIdx] * 0.3 + 255 * 0.7,
+          );
+          imageData.data[pixelIdx + 1] = Math.floor(
+            imageData.data[pixelIdx + 1] * 0.3,
+          );
+          imageData.data[pixelIdx + 2] = Math.floor(
+            imageData.data[pixelIdx + 2] * 0.3,
           );
         }
       }
+      ctx.putImageData(imageData, 0, 0);
+    }
 
-      // Always draw red border around selection
+    // 3. Render Bbox, if applicable
+    if (showBbox && maskRect && maskRect.width > 0 && maskRect.height > 0) {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(maskRect.x, maskRect.y, maskRect.width, maskRect.height);
+
+      const frameData =
+        previewWidget.frames[dialogFrameIndex % previewWidget.frames.length];
+      if (frameData) {
+        ctx.putImageData(
+          frameData.imageData,
+          0,
+          0,
+          maskRect.x,
+          maskRect.y,
+          maskRect.width,
+          maskRect.height,
+        );
+      }
+
       ctx.strokeStyle = "#ff4444";
       ctx.lineWidth = 2;
       ctx.strokeRect(maskRect.x, maskRect.y, maskRect.width, maskRect.height);
-      ctx.shadowBlur = 0;
 
-      // Draw resize handles (corners and edges)
       if (!isDrawing) {
         ctx.fillStyle = "#ffffff";
-        ctx.strokeStyle = "#ff4444";
-        ctx.lineWidth = 2;
-
         const handles = [
-          { x: maskRect.x, y: maskRect.y }, // nw
-          { x: maskRect.x + maskRect.width, y: maskRect.y }, // ne
-          { x: maskRect.x, y: maskRect.y + maskRect.height }, // sw
-          { x: maskRect.x + maskRect.width, y: maskRect.y + maskRect.height }, // se
-          { x: maskRect.x + maskRect.width / 2, y: maskRect.y }, // n
+          { x: maskRect.x, y: maskRect.y },
+          { x: maskRect.x + maskRect.width, y: maskRect.y },
+          { x: maskRect.x, y: maskRect.y + maskRect.height },
+          { x: maskRect.x + maskRect.width, y: maskRect.y + maskRect.height },
+          { x: maskRect.x + maskRect.width / 2, y: maskRect.y },
           {
             x: maskRect.x + maskRect.width / 2,
             y: maskRect.y + maskRect.height,
-          }, // s
-          { x: maskRect.x, y: maskRect.y + maskRect.height / 2 }, // w
+          },
+          { x: maskRect.x, y: maskRect.y + maskRect.height / 2 },
           {
             x: maskRect.x + maskRect.width,
             y: maskRect.y + maskRect.height / 2,
-          }, // e
+          },
         ];
-
         for (const handle of handles) {
           ctx.fillRect(handle.x - 4, handle.y - 4, 8, 8);
           ctx.strokeRect(handle.x - 4, handle.y - 4, 8, 8);
@@ -244,6 +721,7 @@ function openMaskEditor(node, previewWidget) {
     animationInterval = setInterval(() => {
       dialogFrameIndex = (dialogFrameIndex + 1) % previewWidget.frames.length;
       drawCanvas();
+      updateScrubber();
     }, frameDuration);
   };
 
@@ -255,32 +733,403 @@ function openMaskEditor(node, previewWidget) {
     }
   };
 
+  // Play/Pause button handler (forward declare so we can reference it later)
+  let playPauseBtnTransport = null;
+
+  // Scrubber no longer needs click handlers since frame boxes handle selection
+
+  // Helper function to get sorted keyframe indices
+  const getSortedKeyframeIndices = () => {
+    return Object.keys(keyframes)
+      .map((k) => parseInt(k))
+      .sort((a, b) => a - b);
+  };
+
+  // Helper function to check if previous keyframe exists
+  const hasPreviousKeyframe = () => {
+    const sorted = getSortedKeyframeIndices();
+    return sorted.some((kf) => kf < dialogFrameIndex);
+  };
+
+  // Helper function to check if next keyframe exists
+  const hasNextKeyframe = () => {
+    const sorted = getSortedKeyframeIndices();
+    return sorted.some((kf) => kf > dialogFrameIndex);
+  };
+
+  // Transport control functions
+  const goToBeginning = () => {
+    dialogFrameIndex = 0;
+    if (isPlaying) {
+      isPlaying = false;
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "|>";
+      }
+      stopAnimation();
+    }
+    updateTransportButtons();
+    drawCanvas();
+    updateScrubber();
+  };
+
+  const goToEnd = () => {
+    dialogFrameIndex = previewWidget.frames.length - 1;
+    if (isPlaying) {
+      isPlaying = false;
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "|>";
+      }
+      stopAnimation();
+    }
+    updateTransportButtons();
+    drawCanvas();
+    updateScrubber();
+  };
+
+  const goToPreviousKeyframe = () => {
+    const sortedKeyframeIndices = getSortedKeyframeIndices();
+
+    // Find the previous keyframe (strictly before current frame)
+    let targetFrame = null;
+    for (let i = sortedKeyframeIndices.length - 1; i >= 0; i--) {
+      if (sortedKeyframeIndices[i] < dialogFrameIndex) {
+        targetFrame = sortedKeyframeIndices[i];
+        break;
+      }
+    }
+
+    if (targetFrame !== null) {
+      dialogFrameIndex = targetFrame;
+      if (isPlaying) {
+        isPlaying = false;
+        if (playPauseBtnTransport) {
+          playPauseBtnTransport.textContent = "|>";
+        }
+        stopAnimation();
+      }
+      updateTransportButtons();
+      drawCanvas();
+      updateScrubber();
+    }
+  };
+
+  const goToPreviousFrame = () => {
+    if (dialogFrameIndex > 0) {
+      dialogFrameIndex--;
+      if (isPlaying) {
+        isPlaying = false;
+        if (playPauseBtnTransport) {
+          playPauseBtnTransport.textContent = "|>";
+        }
+        stopAnimation();
+      }
+      updateTransportButtons();
+      drawCanvas();
+      updateScrubber();
+    }
+  };
+
+  const togglePlayPause = () => {
+    isPlaying = !isPlaying;
+    if (isPlaying) {
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "||";
+      }
+      startAnimation();
+    } else {
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "|>";
+      }
+      stopAnimation();
+    }
+  };
+
+  const goToNextFrame = () => {
+    if (dialogFrameIndex < previewWidget.frames.length - 1) {
+      dialogFrameIndex++;
+      if (isPlaying) {
+        isPlaying = false;
+        if (playPauseBtnTransport) {
+          playPauseBtnTransport.textContent = "|>";
+        }
+        stopAnimation();
+      }
+      updateTransportButtons();
+      drawCanvas();
+      updateScrubber();
+    }
+  };
+
+  const goToNextKeyframe = () => {
+    const sortedKeyframeIndices = getSortedKeyframeIndices();
+
+    // Find the next keyframe (strictly after current frame)
+    let targetFrame = null;
+    for (const kfIdx of sortedKeyframeIndices) {
+      if (kfIdx > dialogFrameIndex) {
+        targetFrame = kfIdx;
+        break;
+      }
+    }
+
+    if (targetFrame !== null) {
+      dialogFrameIndex = targetFrame;
+      if (isPlaying) {
+        isPlaying = false;
+        if (playPauseBtnTransport) {
+          playPauseBtnTransport.textContent = "|>";
+        }
+        stopAnimation();
+      }
+      updateTransportButtons();
+      drawCanvas();
+      updateScrubber();
+    }
+  };
+
+  // Create transport control buttons
+  const beginningBtn = createTransportButton("|<<", goToBeginning);
+  const prevKeyframeBtn = createTransportButton("<<", goToPreviousKeyframe);
+  const prevFrameBtn = createTransportButton("<", goToPreviousFrame);
+  playPauseBtnTransport = createTransportButton("||", togglePlayPause);
+  const nextFrameBtn = createTransportButton(">", goToNextFrame);
+  const nextKeyframeBtn = createTransportButton(">>", goToNextKeyframe);
+  const endBtn = createTransportButton(">>|", goToEnd);
+
+  // Update button states based on keyframe availability
+  updateTransportButtons = () => {
+    const hasPrev = hasPreviousKeyframe();
+    const hasNext = hasNextKeyframe();
+
+    prevKeyframeBtn.disabled = !hasPrev;
+    prevKeyframeBtn.style.opacity = hasPrev ? "1" : "0.4";
+    prevKeyframeBtn.style.cursor = hasPrev ? "pointer" : "not-allowed";
+    prevKeyframeBtn.style.background = hasPrev ? "#444" : "#333";
+
+    nextKeyframeBtn.disabled = !hasNext;
+    nextKeyframeBtn.style.opacity = hasNext ? "1" : "0.4";
+    nextKeyframeBtn.style.cursor = hasNext ? "pointer" : "not-allowed";
+    nextKeyframeBtn.style.background = hasNext ? "#444" : "#333";
+  };
+
+  transportControls.appendChild(beginningBtn);
+  transportControls.appendChild(prevKeyframeBtn);
+  transportControls.appendChild(prevFrameBtn);
+  transportControls.appendChild(playPauseBtnTransport);
+  transportControls.appendChild(nextFrameBtn);
+  transportControls.appendChild(nextKeyframeBtn);
+  transportControls.appendChild(endBtn);
+
+  // Initial button state update
+  updateTransportButtons();
+
+  // Initialize paint mask data buffer
+  const initPaintMask = () => {
+    // Return if we're already painting on this frame
+    if (paintMaskData && paintMaskFrameIndex === dialogFrameIndex) {
+      return;
+    }
+
+    const size = canvas.width * canvas.height;
+    paintMaskData = new Uint8ClampedArray(size);
+    paintMaskFrameIndex = dialogFrameIndex;
+
+    // Find the most recent keyframe to see if we can inherit its paint
+    let activeKeyframe = null;
+    const sortedKeyframeIndices = Object.keys(keyframes)
+      .map(Number)
+      .sort((a, b) => a - b);
+    for (let i = sortedKeyframeIndices.length - 1; i >= 0; i--) {
+      const keyframeIndex = sortedKeyframeIndices[i];
+      if (keyframeIndex <= dialogFrameIndex) {
+        activeKeyframe = keyframes[keyframeIndex];
+        break;
+      }
+    }
+
+    // If the active keyframe is painted, start with its data
+    if (activeKeyframe && activeKeyframe.type === "painted") {
+      try {
+        const binary = atob(activeKeyframe.mask_data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const maskArray = new Float32Array(bytes.buffer);
+        // Convert from Float32Array (0.0 to 1.0) to Uint8ClampedArray (255 to 0)
+        for (let i = 0; i < maskArray.length; i++) {
+          paintMaskData[i] = maskArray[i] > 0.5 ? 0 : 255;
+        }
+      } catch (e) {
+        console.error(
+          "Failed to decode previous paint mask, starting fresh.",
+          e,
+        );
+        paintMaskData.fill(255); // Fallback to a blank mask on error
+      }
+    } else {
+      // Otherwise, start with a blank mask
+      paintMaskData.fill(255);
+    }
+  };
+
+  // Draw a circle into the paint mask buffer
+  const paintCircle = (centerX, centerY, radius, color) => {
+    if (!paintMaskData) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const radiusSq = radius * radius;
+
+    const y_min = Math.max(0, Math.floor(centerY - radius));
+    const y_max = Math.min(height - 1, Math.ceil(centerY + radius));
+
+    for (let j = y_min; j <= y_max; j++) {
+      const dy = j - centerY;
+      const dx_sq = radiusSq - dy * dy;
+      if (dx_sq < 0) continue;
+      const dx = Math.sqrt(dx_sq);
+
+      const x_min = Math.max(0, Math.ceil(centerX - dx));
+      const x_max = Math.min(width - 1, Math.floor(centerX + dx));
+
+      let idx = j * width + x_min;
+      for (let i = x_min; i <= x_max; i++) {
+        paintMaskData[idx++] = color;
+      }
+    }
+  };
+
+  // Draw a line of circles between two points
+  const paintLine = (x0, y0, x1, y1, radius, color) => {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    if (distance === 0) {
+      paintCircle(x0, y0, radius, color);
+      return;
+    }
+
+    // Calculate number of steps based on radius for smooth line
+    const steps = Math.max(1, Math.ceil(distance / (radius * 0.5)));
+
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps;
+      const x = x0 + dx * t;
+      const y = y0 + dy * t;
+      paintCircle(x, y, radius, color);
+    }
+  };
+
   // Mouse event handlers
   const handlePointerDown = (e) => {
     e.preventDefault();
     e.stopPropagation();
+
+    // Pause the player when clicking on canvas
+    if (isPlaying) {
+      isPlaying = false;
+      if (playPauseBtnTransport) {
+        playPauseBtnTransport.textContent = "|>";
+      }
+      stopAnimation();
+    }
+
     const coords = toCanvasCoords(e);
     startX = coords.x;
     startY = coords.y;
 
-    // Check if clicking on a handle (for resizing)
-    const handle = getHandleAt(startX, startY);
-    if (handle) {
-      isResizing = true;
-      resizeHandle = handle;
-      dragStartRect = { ...maskRect };
-      canvas.style.cursor = getCursorForHandle(handle);
-    }
-    // Check if clicking inside mask (for dragging)
-    else if (isInsideMask(startX, startY)) {
-      isDragging = true;
-      dragStartRect = { ...maskRect };
-      canvas.style.cursor = "move";
-    }
-    // Otherwise start drawing a new mask
-    else {
-      isDrawing = true;
-      maskRect = { x: startX, y: startY, width: 0, height: 0 };
+    const isRightClick = e.button === 2;
+
+    if (maskMode === "paint") {
+      // If a bbox keyframe exists on this frame, delete it as painting overrides it.
+      if (
+        keyframes[dialogFrameIndex] &&
+        keyframes[dialogFrameIndex].type === "bbox"
+      ) {
+        delete keyframes[dialogFrameIndex];
+        // Fire-and-forget deletion on the backend
+        api
+          .fetchApi("/videomaskeditor/deletekeyframe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: node.id,
+              frame_index: dialogFrameIndex,
+            }),
+          })
+          .catch((err) => console.error("Failed to delete bbox keyframe", err));
+      }
+
+      // In paint mode - clear bbox immediately on any click
+      if (maskRect) {
+        maskRect = null;
+        lastRenderedKeyframeIndex = -1;
+      }
+      // Paint mode - start painting or erasing
+      isPainting = true;
+      initPaintMask();
+
+      currentPaintColor = isRightClick ? 255 : 0; // 255 = erase (white), 0 = paint (black)
+      lastPaintX = startX;
+      lastPaintY = startY;
+
+      paintCircle(startX, startY, brushSize, currentPaintColor);
+      drawCanvas();
+    } else {
+      // BBox mode
+      if (isRightClick) {
+        // Right-click: delete the bbox if clicking inside it
+        if (isInsideMask(startX, startY)) {
+          maskRect = null;
+          drawCanvas();
+          return;
+        }
+      } else {
+        // Left-click: normal bbox operations
+        // Check if clicking on a handle (for resizing)
+        const handle = getHandleAt(startX, startY);
+        if (handle) {
+          isResizing = true;
+          resizeHandle = handle;
+          dragStartRect = { ...maskRect };
+          canvas.style.cursor = getCursorForHandle(handle);
+        }
+        // Check if clicking inside mask (for dragging)
+        else if (isInsideMask(startX, startY)) {
+          isDragging = true;
+          dragStartRect = { ...maskRect };
+          canvas.style.cursor = "move";
+        }
+        // Otherwise start drawing a new mask
+        else {
+          // If a painted keyframe exists, clear it. Bbox drawing takes precedence.
+          if (
+            keyframes[dialogFrameIndex] &&
+            keyframes[dialogFrameIndex].type === "painted"
+          ) {
+            delete keyframes[dialogFrameIndex];
+            api
+              .fetchApi("/videomaskeditor/deletekeyframe", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  node_id: node.id,
+                  frame_index: dialogFrameIndex,
+                }),
+              })
+              .catch((err) =>
+                console.error("Failed to delete painted keyframe", err),
+              );
+            // Redraw to remove the old painted mask before starting to draw the bbox
+            drawCanvas();
+          }
+
+          isDrawing = true;
+          maskRect = { x: startX, y: startY, width: 0, height: 0 };
+        }
+      }
     }
 
     // Attach document-level listeners so dragging works even outside the canvas
@@ -292,7 +1141,43 @@ function openMaskEditor(node, previewWidget) {
 
   canvas.addEventListener("pointerdown", handlePointerDown);
 
+  const updateBrushPreview = (e) => {
+    if (maskMode === "paint") {
+      const canvasRect = canvas.getBoundingClientRect();
+      const containerRect = canvasContainer.getBoundingClientRect();
+      const scaleFactor = canvasRect.width / canvas.width;
+      const visualBrushSize = brushSize * 2 * scaleFactor;
+
+      brushPreview.style.display = "block";
+      brushPreview.style.left = `${e.clientX - containerRect.left - visualBrushSize / 2}px`;
+      brushPreview.style.top = `${e.clientY - containerRect.top - visualBrushSize / 2}px`;
+      brushPreview.style.width = `${visualBrushSize}px`;
+      brushPreview.style.height = `${visualBrushSize}px`;
+    } else {
+      brushPreview.style.display = "none";
+    }
+  };
+
+  // Update brush preview position and visibility
+  canvasContainer.addEventListener("pointermove", updateBrushPreview);
+
+  // Hide brush preview when mouse leaves canvas container
+  canvasContainer.addEventListener("pointerleave", () => {
+    brushPreview.style.display = "none";
+  });
+
+  // Show brush preview when mouse enters canvas container (if in paint mode)
+  canvasContainer.addEventListener("pointerenter", () => {
+    if (maskMode === "paint") {
+      brushPreview.style.display = "block";
+    }
+  });
+
   const handlePointerMove = (e) => {
+    // Always update brush preview in paint mode
+    if (maskMode === "paint") {
+      updateBrushPreview(e);
+    }
     const coords = toCanvasCoords(e);
     let currentX = coords.x;
     let currentY = coords.y;
@@ -300,8 +1185,35 @@ function openMaskEditor(node, previewWidget) {
     // Don't clamp coordinates during active operations - let them extend beyond canvas
     // This allows smooth dragging when cursor goes outside the video area
 
+    // Handle painting - draw directly to mask buffer
+    if (isPainting && paintMaskData) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Draw line from last position to current
+      paintLine(
+        lastPaintX,
+        lastPaintY,
+        currentX,
+        currentY,
+        brushSize,
+        currentPaintColor,
+      );
+
+      lastPaintX = currentX;
+      lastPaintY = currentY;
+
+      // Schedule render only once per frame
+      if (!paintRenderScheduled) {
+        paintRenderScheduled = true;
+        requestAnimationFrame(() => {
+          drawCanvas();
+          paintRenderScheduled = false;
+        });
+      }
+    }
     // Handle drawing new mask
-    if (isDrawing) {
+    else if (isDrawing) {
       e.preventDefault();
       e.stopPropagation();
       // Clamp for drawing to keep rectangle within bounds
@@ -396,14 +1308,107 @@ function openMaskEditor(node, previewWidget) {
     }
   };
 
-  const handlePointerUp = (e) => {
-    if (isDrawing || isDragging || isResizing) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
+  const handlePointerUp = async (e) => {
+    const wasPainting = isPainting;
+    const wasDrawing = isDrawing;
+    const wasDragging = isDragging;
+    const wasResizing = isResizing;
+
+    // Stop all actions immediately to prevent stray events
     isDrawing = false;
     isDragging = false;
     isResizing = false;
+    isPainting = false;
+
+    if (wasDrawing || wasDragging || wasResizing || wasPainting) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Save keyframe when user finishes drawing/painting
+      if (
+        maskMode === "bbox" &&
+        maskRect &&
+        (wasDrawing || wasDragging || wasResizing)
+      ) {
+        // Save bbox keyframe
+        keyframes[dialogFrameIndex] = {
+          type: "bbox",
+          bbox: { ...maskRect },
+        };
+
+        // Send to backend
+        try {
+          await api.fetchApi("/videomaskeditor/setkeyframe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: node.id,
+              frame_index: dialogFrameIndex,
+              type: "bbox",
+              mask_data: maskRect,
+            }),
+          });
+        } catch (error) {
+          console.error(
+            "[VideoMaskEditor] Failed to save bbox keyframe:",
+            error,
+          );
+        }
+
+        // Reset tracking so mask will reload properly when navigating
+        lastRenderedKeyframeIndex = dialogFrameIndex;
+        updateScrubber();
+        drawCanvas(); // Redraw to finalize bbox
+      } else if (maskMode === "paint" && wasPainting && paintMaskData) {
+        // Save painted keyframe
+        // Convert to float array (0 = painted/selected = 1.0, 255 = not painted = 0.0)
+        const maskData = new Float32Array(paintMaskData.length);
+        for (let i = 0; i < paintMaskData.length; i++) {
+          // Invert: 0 (black/painted) -> 1.0, 255 (white/not painted) -> 0.0
+          maskData[i] = 1.0 - paintMaskData[i] / 255.0;
+        }
+
+        // Encode to base64
+        const buffer = maskData.buffer;
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const base64 = btoa(binary);
+
+        keyframes[dialogFrameIndex] = {
+          type: "painted",
+          mask_data: base64,
+        };
+
+        // Send to backend
+        try {
+          await api.fetchApi("/videomaskeditor/setkeyframe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: node.id,
+              frame_index: dialogFrameIndex,
+              type: "painted",
+              mask_data: base64,
+            }),
+          });
+        } catch (error) {
+          console.error(
+            "[VideoMaskEditor] Failed to save painted keyframe:",
+            error,
+          );
+        }
+
+        // Reset tracking so mask will reload properly when navigating
+        lastRenderedKeyframeIndex = dialogFrameIndex;
+        updateScrubber();
+        // Redraw to clear live painting buffer and show final saved mask
+        drawCanvas();
+      }
+    }
+
     resizeHandle = null;
     dragStartRect = null;
     canvas.style.cursor = "crosshair";
@@ -422,10 +1427,63 @@ function openMaskEditor(node, previewWidget) {
     e.stopPropagation();
   });
 
+  // Scroll wheel to adjust brush size in paint mode
+  canvas.addEventListener("wheel", (e) => {
+    if (maskMode === "paint") {
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Scroll up = larger brush, scroll down = smaller brush
+      if (e.deltaY < 0) {
+        brushSize = Math.min(100, brushSize + 2);
+      } else {
+        brushSize = Math.max(5, brushSize - 2);
+      }
+
+      // Update brush preview size with proper scaling
+      const canvasRect = canvas.getBoundingClientRect();
+      const scaleFactor = canvasRect.width / canvas.width;
+      const visualBrushSize = brushSize * 2 * scaleFactor;
+      brushPreview.style.width = `${visualBrushSize}px`;
+      brushPreview.style.height = `${visualBrushSize}px`;
+
+      // Show brush size indicator temporarily
+      console.log(`[VideoMaskEditor] Brush size: ${brushSize}px`);
+    }
+  });
+
+  // Keyboard shortcuts - use capture phase to intercept before other handlers
+  const handleKeyDown = (e) => {
+    // Space: play/pause
+    if (e.code === "Space") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      togglePlayPause();
+    }
+    // Arrow left: previous frame
+    else if (e.code === "ArrowLeft") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      goToPreviousFrame();
+    }
+    // Arrow right: next frame
+    else if (e.code === "ArrowRight") {
+      e.preventDefault();
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      goToNextFrame();
+    }
+  };
+
+  // Use capture phase (true) to intercept keys before other listeners
+  document.addEventListener("keydown", handleKeyDown, true);
+
   // Buttons container
   const buttonsContainer = document.createElement("div");
   buttonsContainer.style.cssText =
-    "display: flex; gap: 10px; justify-content: flex-end;";
+    "display: flex; gap: 10px; justify-content: space-between;";
 
   const createActionButton = (label, background, onClick) => {
     const button = document.createElement("button");
@@ -445,16 +1503,102 @@ function openMaskEditor(node, previewWidget) {
     return button;
   };
 
-  // Clear button
-  const clearButton = createActionButton("Clear Mask", "#555", () => {
-    maskRect = null;
-    drawCanvas();
-  });
-  buttonsContainer.appendChild(clearButton);
+  // Left-side button group
+  const leftButtonGroup = document.createElement("div");
+  leftButtonGroup.style.cssText = "display: flex; gap: 10px;";
 
-  // Cancel button
-  const cancelButton = createActionButton("Cancel", "#555", null);
-  buttonsContainer.appendChild(cancelButton);
+  // Clear button - clears mask for current frame
+  const clearButton = createActionButton("Clear", "#555", async () => {
+    // If there's a keyframe at the current frame, delete it
+    if (keyframes[dialogFrameIndex]) {
+      delete keyframes[dialogFrameIndex];
+
+      try {
+        await api.fetchApi("/videomaskeditor/deletekeyframe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: node.id,
+            frame_index: dialogFrameIndex,
+          }),
+        });
+      } catch (error) {
+        console.error("[VideoMaskEditor] Failed to delete keyframe:", error);
+      }
+
+      // Clear current state
+      maskRect = null;
+      paintMaskData = null;
+      lastRenderedKeyframeIndex = -1;
+      updateScrubber();
+      drawCanvas();
+    } else {
+      // If no keyframe at current frame, create an empty keyframe to override any previous masks
+      // This ensures the frame shows "no mask" instead of inheriting from a previous keyframe
+      keyframes[dialogFrameIndex] = {
+        type: "empty",
+        bbox: null,
+      };
+
+      try {
+        await api.fetchApi("/videomaskeditor/setkeyframe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            node_id: node.id,
+            frame_index: dialogFrameIndex,
+            type: "empty",
+            mask_data: null,
+          }),
+        });
+      } catch (error) {
+        console.error("[VideoMaskEditor] Failed to set empty keyframe:", error);
+      }
+
+      maskRect = null;
+      paintMaskData = null;
+      lastRenderedKeyframeIndex = dialogFrameIndex;
+      updateScrubber();
+      drawCanvas();
+    }
+  });
+  leftButtonGroup.appendChild(clearButton);
+
+  // Clear All button - clears all keyframes
+  const clearAllButton = createActionButton("Clear All", "#555", async () => {
+    const allKeyframeIndices = Object.keys(keyframes).map((k) => parseInt(k));
+
+    if (allKeyframeIndices.length > 0) {
+      // Clear local keyframes
+      keyframes = {};
+
+      // Delete all keyframes from backend
+      for (const kfIdx of allKeyframeIndices) {
+        try {
+          await api.fetchApi("/videomaskeditor/deletekeyframe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              node_id: node.id,
+              frame_index: kfIdx,
+            }),
+          });
+        } catch (error) {
+          console.error("[VideoMaskEditor] Failed to delete keyframe:", error);
+        }
+      }
+
+      maskRect = null;
+      paintMaskData = null;
+      lastRenderedKeyframeIndex = -1;
+      updateScrubber();
+      drawCanvas();
+    }
+  });
+  leftButtonGroup.appendChild(clearAllButton);
+
+  // Add left button group to container
+  buttonsContainer.appendChild(leftButtonGroup);
 
   // Apply button
   const applyButton = createActionButton("Apply", "#0066cc", null);
@@ -465,16 +1609,46 @@ function openMaskEditor(node, previewWidget) {
   document.body.appendChild(overlay);
 
   // Initial draw and start animation
-  drawCanvas();
-  startAnimation();
+  loadKeyframes().then(() => {
+    drawCanvas();
+    updateScrubber();
+    startAnimation();
+  });
 
   // Helper function to close dialog
   const closeDialog = () => {
     stopAnimation();
+    document.removeEventListener("keydown", handleKeyDown, true);
     document.body.removeChild(overlay);
   };
 
-  cancelButton.addEventListener("click", closeDialog);
+  const handleCancel = async () => {
+    // Restore initial state
+    maskRect = initialMaskRect ? { ...initialMaskRect } : null;
+    node.maskRegion = maskRect;
+
+    // Clear all keyframes that were added/modified during this session
+    // by restoring the backend state to what it was when we opened the dialog
+    try {
+      await api.fetchApi("/videomaskeditor/restorekeyframes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: node.id,
+          keyframes: initialKeyframes,
+        }),
+      });
+    } catch (error) {
+      console.error(
+        "[VideoMaskEditor] Failed to restore keyframes on cancel:",
+        error,
+      );
+    }
+
+    closeDialog();
+  };
+
+  closeButton.addEventListener("click", handleCancel);
 
   applyButton.addEventListener("click", async () => {
     // Store mask region on node
@@ -482,8 +1656,8 @@ function openMaskEditor(node, previewWidget) {
 
     // Send mask data to backend
     if (maskRect) {
-      const videoWidget = node.widgets?.find((w) => w.name === "video");
-      if (videoWidget && videoWidget.value) {
+      const sourceWidget = node.widgets?.find((w) => w.name === "source");
+      if (sourceWidget && sourceWidget.value) {
         try {
           const response = await api.fetchApi("/videomaskeditor/setmask", {
             method: "POST",
@@ -492,7 +1666,7 @@ function openMaskEditor(node, previewWidget) {
             },
             body: JSON.stringify({
               node_id: node.id,
-              video: videoWidget.value,
+              video: sourceWidget.value,
               mask_region: maskRect,
             }),
           });
@@ -764,8 +1938,8 @@ app.registerExtension({
 
       const loadInputPreview = async () => {
         previewState.pendingTimeout = null;
-        const videoValue = getWidgetValue("video", null);
-        if (!videoValue) {
+        const sourceValue = getWidgetValue("source", null);
+        if (!sourceValue) {
           stopAnimation();
           previewWidget.parentEl.hidden = true;
           previewWidget.frames = [];
@@ -773,7 +1947,7 @@ app.registerExtension({
         }
 
         const params = new URLSearchParams({
-          video: videoValue,
+          video: sourceValue,
           framerate: getWidgetValue("framerate", 0) || 0,
           custom_width: getWidgetValue("custom_width", 0) || 0,
           custom_height: getWidgetValue("custom_height", 0) || 0,
@@ -995,16 +2169,16 @@ app.registerExtension({
 
     // Add upload widget
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
-      const videoWidget = this.widgets?.find((w) => w.name === "video");
+      const sourceWidget = this.widgets?.find((w) => w.name === "source");
       const triggerPreviewUpdate = () => {
         if (this._vmeScheduleInputPreview) {
           this._vmeScheduleInputPreview();
         }
       };
 
-      if (videoWidget) {
-        const originalVideoCallback = videoWidget.callback;
-        videoWidget.callback = function (value) {
+      if (sourceWidget) {
+        const originalVideoCallback = sourceWidget.callback;
+        sourceWidget.callback = function (value) {
           if (originalVideoCallback) originalVideoCallback.call(this, value);
           triggerPreviewUpdate();
           return value;
@@ -1033,39 +2207,110 @@ app.registerExtension({
 
       const fileInput = document.createElement("input");
       fileInput.type = "file";
-      fileInput.accept = "video/*,.webm,.mp4,.mkv,.gif,.mov";
+      fileInput.accept = "video/*,.webm,.mp4,.mkv,.gif,.mov,image/*";
+      fileInput.setAttribute("webkitdirectory", "");
+      fileInput.setAttribute("directory", "");
+      fileInput.setAttribute("multiple", "");
       fileInput.style.display = "none";
 
       fileInput.addEventListener("change", async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
+        const files = Array.from(e.target.files);
+        if (!files || files.length === 0) return;
+
+        const button = this.widgets[this.widgets.length - 1];
 
         try {
-          const formData = new FormData();
-          formData.append("image", file);
-          formData.append("type", "input");
+          // Handle single video file upload
+          if (files.length === 1 && files[0].type.startsWith("video/")) {
+            button.label = "Uploading...";
+            const formData = new FormData();
+            formData.append("image", files[0]);
+            formData.append("type", "input");
 
-          const response = await api.fetchApi("/upload/image", {
-            method: "POST",
-            body: formData,
-          });
+            const response = await api.fetchApi("/upload/image", {
+              method: "POST",
+              body: formData,
+            });
 
-          if (response.ok) {
-            const data = await response.json();
-            if (videoWidget) {
-              videoWidget.value = data.name;
-              if (videoWidget.callback) {
-                videoWidget.callback(data.name);
+            if (response.ok) {
+              const data = await response.json();
+              if (sourceWidget) {
+                sourceWidget.value = data.name;
+                if (sourceWidget.callback) {
+                  sourceWidget.callback(data.name);
+                }
+              }
+            } else {
+              throw new Error(
+                `Failed to upload video: ${await response.text()}`,
+              );
+            }
+          }
+          // Handle folder of images upload
+          else {
+            button.label = "Uploading...";
+            const sortedFiles = files.sort((a, b) =>
+              a.webkitRelativePath.localeCompare(b.webkitRelativePath),
+            );
+
+            let subfolder = "video_mask_upload";
+            const topLevelDir = sortedFiles[0].webkitRelativePath.split("/")[0];
+            if (topLevelDir) {
+              subfolder = topLevelDir;
+            }
+            subfolder = `${subfolder}_${Date.now()}`;
+
+            for (const [i, file] of sortedFiles.entries()) {
+              button.label = `Uploading... (${i + 1}/${sortedFiles.length})`;
+              const formData = new FormData();
+
+              let filename = file.name;
+              if (
+                topLevelDir &&
+                file.webkitRelativePath.startsWith(topLevelDir + "/")
+              ) {
+                filename = file.webkitRelativePath
+                  .substring(topLevelDir.length + 1)
+                  .replace(/\//g, "_");
+              }
+              if (!filename) {
+                filename = file.name;
+              }
+
+              formData.append("image", file, filename);
+              formData.append("subfolder", subfolder);
+              formData.append("overwrite", "true");
+
+              const response = await api.fetchApi("/upload/image", {
+                method: "POST",
+                body: formData,
+              });
+
+              if (!response.ok) {
+                throw new Error(
+                  `Failed to upload ${file.name}: ${await response.text()}`,
+                );
+              }
+            }
+
+            if (sourceWidget) {
+              sourceWidget.value = subfolder;
+              if (sourceWidget.callback) {
+                sourceWidget.callback(subfolder);
               }
             }
           }
         } catch (error) {
           console.error("Upload failed:", error);
+          alert("Upload failed: " + error.message);
+        } finally {
+          button.label = "choose video or folder";
+          fileInput.value = "";
         }
       });
       document.body.appendChild(fileInput);
 
-      this.addWidget("button", "choose video to upload", "upload", () => {
+      this.addWidget("button", "choose video or folder", "upload", () => {
         app.canvas.node_widget = null;
         fileInput.click();
       }).options.serialize = false;

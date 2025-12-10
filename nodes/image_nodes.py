@@ -67,7 +67,7 @@ class ImageRotatorNode:
 
 
 class PoseImageSetupNode:
-    """Expand an image around a mask and fill uncovered regions."""
+    """Expand an image around a bbox region and fill uncovered areas."""
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("images",)
@@ -79,6 +79,7 @@ class PoseImageSetupNode:
         return {
             "required": {
                 "images": ("IMAGE",),
+                "fill_with_color": ("BOOLEAN", {"default": True}),
                 "fill_color": ("STRING", {"default": "#000000", "multiline": False}),
                 "width_change": (
                     "INT",
@@ -96,64 +97,55 @@ class PoseImageSetupNode:
                     "INT",
                     {"default": 0, "min": -2048, "max": 2048, "step": 1},
                 ),
-                "only_fill": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "mask": ("MASK",),
+                "bbox": ("BBOX", {"forceInput": True}),
             },
         }
 
     def setup_pose_images(
         self,
         images: torch.Tensor,
+        fill_with_color: bool,
         fill_color: str,
         width_change: int,
         height_change: int,
         offset_x: int,
         offset_y: int,
-        only_fill: bool,
-        mask: torch.Tensor = None,
+        bbox: dict = None,
     ):
         fill_rgb = parse_hex_color(fill_color)
         images_np = images.detach().cpu().numpy()
+        img_height, img_width = images_np.shape[1:3]
 
-        # If no mask is provided, use the entire image
-        if mask is None:
-            img_height, img_width = images_np.shape[1:3]
-            mask_combined = np.ones((img_height, img_width), dtype=bool)
-        else:
-            mask_np = mask.detach().cpu().numpy()
-            if mask_np.ndim == 3:
-                mask_combined = (mask_np > 0.5).any(axis=0)
-            else:
-                mask_combined = mask_np > 0.5
+        # If no bbox is provided, use full image dimensions
+        if bbox is None:
+            bbox = {
+                "x": 0,
+                "y": 0,
+                "width": img_width,
+                "height": img_height,
+            }
 
-            if not np.any(mask_combined):
-                # Nothing selected—return images unchanged
-                return (images,)
+        bbox_x = bbox.get("x", 0)
+        bbox_y = bbox.get("y", 0)
+        bbox_width = bbox.get("width", img_width)
+        bbox_height = bbox.get("height", img_height)
 
-        mask_y_indices, mask_x_indices = np.nonzero(mask_combined)
-        min_y, max_y = mask_y_indices.min(), mask_y_indices.max() + 1
-        min_x, max_x = mask_x_indices.min(), mask_x_indices.max() + 1
+        # Calculate final canvas size by expanding the bbox dimensions
+        final_width = max(1, bbox_width + width_change)
+        final_height = max(1, bbox_height + height_change)
 
-        base_width = max_x - min_x
-        base_height = max_y - min_y
+        # Calculate padding amounts (split evenly on each side)
+        left_pad = width_change // 2
+        right_pad = width_change - left_pad
+        top_pad = height_change // 2
+        bottom_pad = height_change - top_pad
 
-        # Determine symmetric expansion based on combined width/height adjustments
-        left_expand = width_change // 2
-        top_expand = height_change // 2
-
-        expanded_width = max(1, base_width + width_change)
-        expanded_height = max(1, base_height + height_change)
-
-        # Determine source crop bounds in the original frame
-        start_x = int(min_x - left_expand - offset_x)
-        start_y = int(min_y - top_expand - offset_y)
-        end_x = start_x + expanded_width
-        end_y = start_y + expanded_height
-
+        # Process images
         result_images = []
-        for img_data in images_np:
+
+        for img_idx, img_data in enumerate(images_np):
             img_255 = (img_data * 255).astype(np.uint8)
             if img_255.ndim == 2:
                 img_255 = img_255[:, :, None]
@@ -169,44 +161,56 @@ class PoseImageSetupNode:
             else:
                 fill_values = fill_values[:channels]
 
-            canvas = np.empty(
-                (expanded_height, expanded_width, channels), dtype=np.uint8
+            # Create canvas filled with background color
+            canvas = np.full(
+                (final_height, final_width, channels), fill_values, dtype=np.uint8
             )
-            canvas[...] = fill_values
 
-            if only_fill:
-                # Copy only the masked pixels; everything else stays filled.
-                valid_mask = (
-                    (mask_x_indices >= start_x)
-                    & (mask_x_indices < end_x)
-                    & (mask_y_indices >= start_y)
-                    & (mask_y_indices < end_y)
-                )
-                if np.any(valid_mask):
-                    src_x = mask_x_indices[valid_mask]
-                    src_y = mask_y_indices[valid_mask]
-                    dst_x = src_x - start_x
-                    dst_y = src_y - start_y
-                    canvas[dst_y, dst_x] = img_255[src_y, src_x]
-            else:
-                # Clamp crop bounds to original frame and determine placement on canvas
-                src_x0 = max(0, start_x)
-                src_y0 = max(0, start_y)
-                src_x1 = min(img_255.shape[1], end_x)
-                src_y1 = min(img_255.shape[0], end_y)
+            # Calculate where the bbox region should be placed on the canvas
+            # The bbox expands equally in all directions, so we add padding
+            canvas_bbox_x = left_pad + offset_x
+            canvas_bbox_y = top_pad + offset_y
 
-                if src_x0 < src_x1 and src_y0 < src_y1:
-                    dst_x0 = max(0, -start_x)
-                    dst_y0 = max(0, -start_y)
-                    dst_x1 = dst_x0 + (src_x1 - src_x0)
-                    dst_y1 = dst_y0 + (src_y1 - src_y0)
+            # Extract the bbox region from the original image
+            # Clamp to image boundaries
+            src_x0 = max(0, bbox_x)
+            src_y0 = max(0, bbox_y)
+            src_x1 = min(img_width, bbox_x + bbox_width)
+            src_y1 = min(img_height, bbox_y + bbox_height)
 
-                    canvas[dst_y0:dst_y1, dst_x0:dst_x1] = img_255[
-                        src_y0:src_y1, src_x0:src_x1
-                    ]
+            # Calculate destination position on canvas
+            dst_x0 = canvas_bbox_x
+            dst_y0 = canvas_bbox_y
+            dst_x1 = dst_x0 + (src_x1 - src_x0)
+            dst_y1 = dst_y0 + (src_y1 - src_y0)
+
+            # Clamp destination to canvas boundaries
+            if dst_x0 < 0:
+                src_x0 -= dst_x0
+                dst_x0 = 0
+            if dst_y0 < 0:
+                src_y0 -= dst_y0
+                dst_y0 = 0
+            if dst_x1 > final_width:
+                src_x1 -= dst_x1 - final_width
+                dst_x1 = final_width
+            if dst_y1 > final_height:
+                src_y1 -= dst_y1 - final_height
+                dst_y1 = final_height
+
+            # Place the bbox region on the canvas
+            if (
+                src_x1 > src_x0
+                and src_y1 > src_y0
+                and dst_x1 > dst_x0
+                and dst_y1 > dst_y0
+            ):
+                canvas[dst_y0:dst_y1, dst_x0:dst_x1] = img_255[
+                    src_y0:src_y1, src_x0:src_x1
+                ]
 
             result_images.append(canvas.astype(np.float32) / 255.0)
 
-        result = torch.from_numpy(np.stack(result_images))
+        result_tensor = torch.from_numpy(np.stack(result_images))
 
-        return (result,)
+        return (result_tensor,)

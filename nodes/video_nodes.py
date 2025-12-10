@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - ComfyUI runtime handles availability
     web = None
 
 VIDEO_EXTENSIONS = ["webm", "mp4", "mkv", "gif", "mov"]
+IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"]
 BIGMAX = 2**53 - 1
 DIMMAX = 8192
 DEFAULT_PREVIEW_FRAME_LIMIT = 48
@@ -64,6 +65,7 @@ class MaskRegion:
 _mask_regions: Dict[str, MaskRegion] = {}
 _mask_regions_by_video: Dict[str, MaskRegion] = {}
 _mask_versions: Dict[str, int] = {}
+_mask_keyframes: Dict[str, Dict] = {}  # node_id -> {frame_index: mask_data}
 
 
 def _clear_stale_masks():
@@ -71,7 +73,8 @@ def _clear_stale_masks():
     _mask_regions.clear()
     _mask_regions_by_video.clear()
     _mask_versions.clear()
-    _log("Cleared all mask regions")
+    _mask_keyframes.clear()
+    _log("Cleared all mask regions and keyframes")
 
 
 def _increment_mask_version(node_id: str) -> int:
@@ -88,6 +91,92 @@ def _get_mask_version(node_id: Optional[str]) -> int:
     if not node_id:
         return 0
     return _mask_versions.get(str(node_id), 0)
+
+
+def _generate_masks_from_keyframes(
+    node_id: str, frame_count: int, width: int, height: int
+) -> np.ndarray:
+    """Generate masks for all frames based on keyframe data.
+
+    Keyframe propagation logic:
+    - Frames before the first keyframe use the first keyframe's mask
+    - Frames at or after a keyframe use that keyframe's mask until the next keyframe
+    - Each keyframe's mask applies forward until another keyframe is encountered
+    """
+    if not node_id or str(node_id) not in _mask_keyframes:
+        # No keyframes, return all-white masks
+        return np.ones((frame_count, height, width), dtype=np.float32)
+
+    keyframes = _mask_keyframes[str(node_id)]
+    if not keyframes:
+        return np.ones((frame_count, height, width), dtype=np.float32)
+
+    # Sort keyframes by frame index
+    sorted_keyframes = sorted(keyframes.items(), key=lambda x: int(x[0]))
+    keyframe_indices = [int(kf[0]) for kf in sorted_keyframes]
+
+    masks = np.zeros((frame_count, height, width), dtype=np.float32)
+
+    # Process each frame
+    for frame_idx in range(frame_count):
+        # Find the active keyframe for this frame:
+        # - If before first keyframe, use first keyframe
+        # - Otherwise, use the most recent keyframe at or before current frame
+        active_keyframe = None
+
+        if frame_idx < keyframe_indices[0]:
+            # Before the first keyframe - use the first keyframe's mask
+            active_keyframe = sorted_keyframes[0][1]
+        else:
+            # Find the most recent keyframe at or before this frame
+            for kf_idx, kf_data in sorted_keyframes:
+                kf_idx = int(kf_idx)
+                if kf_idx <= frame_idx:
+                    active_keyframe = kf_data
+                else:
+                    break
+
+        if not active_keyframe:
+            # Fallback - should not happen with the logic above
+            masks[frame_idx] = np.ones((height, width), dtype=np.float32)
+            continue
+
+        mask_type = active_keyframe.get("type", "bbox")
+
+        if mask_type == "bbox":
+            # Create mask from bbox
+            bbox = active_keyframe.get("bbox", {})
+            x = int(bbox.get("x", 0))
+            y = int(bbox.get("y", 0))
+            w = int(bbox.get("width", width))
+            h = int(bbox.get("height", height))
+
+            # Clamp to bounds
+            x = max(0, min(x, width - 1))
+            y = max(0, min(y, height - 1))
+            w = max(0, min(w, width - x))
+            h = max(0, min(h, height - y))
+
+            masks[frame_idx, y : y + h, x : x + w] = 1.0
+
+        elif mask_type == "painted":
+            # Decode painted mask from base64
+            import base64
+
+            mask_data = active_keyframe.get("mask_data", "")
+            if mask_data:
+                try:
+                    decoded = base64.b64decode(mask_data)
+                    mask_array = np.frombuffer(decoded, dtype=np.float32)
+                    mask_array = mask_array.reshape((height, width))
+                    masks[frame_idx] = mask_array
+                except Exception as e:
+                    _log(f"Failed to decode painted mask: {e}")
+                    masks[frame_idx] = np.ones((height, width), dtype=np.float32)
+            else:
+                masks[frame_idx] = np.ones((height, width), dtype=np.float32)
+
+    return masks
 
 
 def _calculate_target_size(
@@ -111,6 +200,107 @@ def _calculate_target_size(
     target_width = int(target_width / downscale_ratio + 0.5) * downscale_ratio
     target_height = int(target_height / downscale_ratio + 0.5) * downscale_ratio
     return target_width, target_height
+
+
+def _load_frames_from_folder(
+    folder_path: str,
+    framerate: int,
+    custom_width: int,
+    custom_height: int,
+    frame_load_cap: int,
+    skip_first_frames: int,
+    select_every_nth: int,
+    preview_max_frames: Optional[int] = None,
+):
+    """Load frames from a folder of images."""
+    if not os.path.isdir(folder_path):
+        raise ValueError(f"Not a directory: {folder_path}")
+
+    # Get all image files
+    image_files = []
+    for fname in os.listdir(folder_path):
+        if fname.split(".")[-1].lower() in IMAGE_EXTENSIONS:
+            image_files.append(os.path.join(folder_path, fname))
+
+    if not image_files:
+        raise ValueError(f"No image files found in folder: {folder_path}")
+
+    # Sort files by name
+    image_files.sort()
+
+    # Get dimensions from first image
+    first_img = Image.open(image_files[0])
+    width, height = first_img.size
+    first_img.close()
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Could not determine image dimensions")
+
+    target_width, target_height = _calculate_target_size(
+        width, height, custom_width, custom_height
+    )
+
+    frames_list: List[np.ndarray] = []
+    selected_frame_indices: List[int] = []
+
+    max_frames = frame_load_cap if frame_load_cap > 0 else None
+    if preview_max_frames is not None and preview_max_frames > 0:
+        max_frames = (
+            min(max_frames, preview_max_frames)
+            if max_frames is not None
+            else preview_max_frames
+        )
+
+    # Process images
+    for frame_index, img_path in enumerate(image_files):
+        if frame_index < skip_first_frames:
+            continue
+
+        relative_index = frame_index - skip_first_frames
+        if relative_index % select_every_nth != 0:
+            continue
+
+        try:
+            img = Image.open(img_path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            if target_width != width or target_height != height:
+                img = img.resize((target_width, target_height), Image.LANCZOS)
+
+            frame = np.array(img, dtype=np.float32) / 255.0
+            if frame.ndim == 2:
+                frame = np.expand_dims(frame, axis=2)
+
+            frames_list.append(frame)
+            selected_frame_indices.append(frame_index)
+            img.close()
+
+            if max_frames is not None and len(frames_list) >= max_frames:
+                break
+        except Exception as e:
+            _log(f"Failed to load image {img_path}: {e}")
+            continue
+
+    if not frames_list:
+        raise RuntimeError("No frames loaded from folder")
+
+    # For image sequences, we don't have a native FPS, so use a sensible default
+    # If framerate is 0 or not specified, default to 18 fps for image folders
+    base_fps = framerate if framerate > 0 else 18
+    effective_fps = base_fps / max(1, select_every_nth)
+
+    return {
+        "frames": frames_list,
+        "selected_indices": selected_frame_indices,
+        "target_width": target_width,
+        "target_height": target_height,
+        "original_fps": base_fps,  # Use specified or default FPS
+        "effective_fps": effective_fps,
+        "total_frames": len(image_files),
+        "frame_step": 1,
+        "combined_step": select_every_nth,
+    }
 
 
 def _load_video_frames(
@@ -226,27 +416,34 @@ def _load_video_frames(
 
 
 class VideoMaskEditor:
-    """Load a video, create masks for each frame, and expose preview endpoints."""
+    """Load a video, create bbox for regions, and expose preview endpoints."""
 
     CATEGORY = "Video/Masking"
-    RETURN_TYPES = ("IMAGE", "MASK", "INT")
-    RETURN_NAMES = ("frames", "masks", "frame_count")
+    RETURN_TYPES = ("IMAGE", "BBOX", "INT", "MASK")
+    RETURN_NAMES = ("frames", "bbox", "frame_count", "masks")
     FUNCTION = "load_video"
     OUTPUT_NODE = False
 
     @classmethod
     def INPUT_TYPES(cls):
         input_dir = folder_paths.get_input_directory()
-        files = [
-            f
-            for f in os.listdir(input_dir)
-            if os.path.isfile(os.path.join(input_dir, f))
-            and f.split(".")[-1].lower() in VIDEO_EXTENSIONS
-        ]
+        items = []
+
+        # Add video files
+        for f in os.listdir(input_dir):
+            full_path = os.path.join(input_dir, f)
+            if (
+                os.path.isfile(full_path)
+                and f.split(".")[-1].lower() in VIDEO_EXTENSIONS
+            ):
+                items.append(f)
+            # Add directories (potential image folders)
+            elif os.path.isdir(full_path):
+                items.append(f)
 
         return {
             "required": {
-                "video": (sorted(files),),
+                "source": (sorted(items),),
                 "framerate": (
                     "INT",
                     {"default": 0, "min": 0, "max": 60, "step": 1, "disable": 0},
@@ -278,7 +475,7 @@ class VideoMaskEditor:
 
     def load_video(
         self,
-        video: str,
+        source: str,
         framerate: int,
         custom_width: int,
         custom_height: int,
@@ -289,16 +486,49 @@ class VideoMaskEditor:
         force_size: str = "",
         unique_id: Optional[str] = None,
     ):
-        video_path = folder_paths.get_annotated_filepath(video)
-        processing_result = _load_video_frames(
-            video_path,
-            framerate,
-            custom_width,
-            custom_height,
-            frame_load_cap,
-            skip_first_frames,
-            select_every_nth,
-        )
+        video_path = folder_paths.get_annotated_filepath(source)
+
+        # Detect if it's a directory (image folder) or file (video)
+        if os.path.isdir(video_path):
+            # Validate it's an image folder
+            image_files = [
+                f
+                for f in os.listdir(video_path)
+                if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
+            ]
+            if not image_files:
+                raise ValueError(f"Folder contains no image files: {source}")
+
+            _log(f"Loading frames from image folder: {source}")
+            processing_result = _load_frames_from_folder(
+                video_path,
+                framerate,
+                custom_width,
+                custom_height,
+                frame_load_cap,
+                skip_first_frames,
+                select_every_nth,
+            )
+        elif os.path.isfile(video_path):
+            # Validate it's a video file
+            ext = source.split(".")[-1].lower()
+            if ext not in VIDEO_EXTENSIONS:
+                raise ValueError(f"Not a valid video file: {source}")
+
+            _log(f"Loading frames from video file: {source}")
+            processing_result = _load_video_frames(
+                video_path,
+                framerate,
+                custom_width,
+                custom_height,
+                frame_load_cap,
+                skip_first_frames,
+                select_every_nth,
+            )
+        else:
+            raise ValueError(
+                f"Input is neither a valid video file nor a folder: {source}"
+            )
 
         frames_list = processing_result["frames"]
         target_width = processing_result["target_width"]
@@ -330,9 +560,6 @@ class VideoMaskEditor:
         _log(f"Available mask regions: {list(_mask_regions.keys())}")
         _log(f"_mask_regions dict id: {id(_mask_regions)}")
 
-        masks = torch.zeros(
-            (frames_tensor.shape[0], target_height, target_width), dtype=torch.float32
-        )
         region = None
         if unique_id and str(unique_id) in _mask_regions:
             region = _mask_regions[str(unique_id)]
@@ -340,16 +567,22 @@ class VideoMaskEditor:
         else:
             _log(f"No mask region found for unique_id: {unique_id}")
 
+        bbox = {
+            "x": 0,
+            "y": 0,
+            "width": target_width,
+            "height": target_height,
+        }
+
         if region:
             region = region.clamp(target_width, target_height)
             if region.width and region.height:
-                masks[
-                    :,
-                    region.y : region.y + region.height,
-                    region.x : region.x + region.width,
-                ] = 1.0
+                bbox["x"] = region.x
+                bbox["y"] = region.y
+                bbox["width"] = region.width
+                bbox["height"] = region.height
                 _log(
-                    f"Applied mask region: x={region.x}, y={region.y}, w={region.width}, h={region.height}"
+                    f"Set bbox: x={bbox['x']}, y={bbox['y']}, w={bbox['width']}, h={bbox['height']}"
                 )
 
                 # Crop frames if enabled
@@ -361,13 +594,13 @@ class VideoMaskEditor:
                         region.x : region.x + region.width,
                         :,
                     ]
-                    # When cropping, create new masks that are all white (the entire output is the selected region)
-                    masks = torch.ones(
-                        (frames_tensor.shape[0], region.height, region.width),
-                        dtype=torch.float32,
-                    )
+                    # When cropping, the bbox becomes the full frame
+                    bbox["x"] = 0
+                    bbox["y"] = 0
+                    bbox["width"] = region.width
+                    bbox["height"] = region.height
                     _log(
-                        f"Cropped frames to mask region. New shape: {frames_tensor.shape}"
+                        f"Cropped frames to bbox region. New shape: {frames_tensor.shape}"
                     )
             else:
                 _log(
@@ -386,20 +619,42 @@ class VideoMaskEditor:
         )
         json.dumps(selected_frame_indices)  # backward compatibility noop
 
-        return frames_tensor, masks, frames_tensor.shape[0]
+        # Generate masks from keyframes
+        masks_array = _generate_masks_from_keyframes(
+            unique_id, frames_tensor.shape[0], target_width, target_height
+        )
+
+        # Apply cropping to masks if enabled
+        if region and region.width and region.height and mask_crops_frames:
+            masks_array = masks_array[
+                :,
+                region.y : region.y + region.height,
+                region.x : region.x + region.width,
+            ]
+
+        masks_tensor = torch.from_numpy(masks_array)
+        _log(f"Masks tensor shape: {masks_tensor.shape}, dtype: {masks_tensor.dtype}")
+
+        return frames_tensor, bbox, frames_tensor.shape[0], masks_tensor
 
     @classmethod
-    def IS_CHANGED(cls, video, **kwargs):
-        video_path = folder_paths.get_annotated_filepath(video)
-        mask_version = _get_mask_version(kwargs.get("unique_id"))
+    def IS_CHANGED(cls, source, **kwargs):
+        video_path = folder_paths.get_annotated_filepath(source)
+        unique_id = kwargs.get("unique_id")
+
+        # Increment version when video file changes to trigger re-execution
+        if unique_id:
+            _increment_mask_version(unique_id)
+
+        mask_version = _get_mask_version(unique_id)
         if os.path.exists(video_path):
             return f"{os.path.getmtime(video_path)}_{mask_version}"
         return f"missing_{mask_version}"
 
     @classmethod
-    def VALIDATE_INPUTS(cls, video, **kwargs):
-        if not folder_paths.exists_annotated_filepath(video):
-            return f"Invalid video file: {video}"
+    def VALIDATE_INPUTS(cls, source, **kwargs):
+        if not folder_paths.exists_annotated_filepath(source):
+            return f"Invalid video file: {source}"
         return True
 
 
@@ -457,16 +712,31 @@ def _register_preview_route():
         )
 
         try:
-            processing_result = _load_video_frames(
-                folder_paths.get_annotated_filepath(video_name),
-                framerate,
-                custom_width,
-                custom_height,
-                frame_load_cap,
-                skip_first_frames,
-                select_every_nth,
-                preview_max_frames=max_preview_frames,
-            )
+            video_path = folder_paths.get_annotated_filepath(video_name)
+
+            # Detect if it's a directory or file
+            if os.path.isdir(video_path):
+                processing_result = _load_frames_from_folder(
+                    video_path,
+                    framerate,
+                    custom_width,
+                    custom_height,
+                    frame_load_cap,
+                    skip_first_frames,
+                    select_every_nth,
+                    preview_max_frames=max_preview_frames,
+                )
+            else:
+                processing_result = _load_video_frames(
+                    video_path,
+                    framerate,
+                    custom_width,
+                    custom_height,
+                    frame_load_cap,
+                    skip_first_frames,
+                    select_every_nth,
+                    preview_max_frames=max_preview_frames,
+                )
         except Exception as exc:  # pragma: no cover - surfaced in UI
             return web.json_response({"error": str(exc)}, status=400)
 
@@ -560,9 +830,134 @@ def _register_clear_mask_route():
             return web.json_response({"error": str(exc)}, status=500)
 
 
+def _register_keyframe_routes():
+    """Register routes for keyframe-based masking."""
+    if PromptServer is None or web is None:
+        return
+
+    @PromptServer.instance.routes.post("/videomaskeditor/setkeyframe")
+    async def video_mask_editor_setkeyframe(request):
+        """Set a mask keyframe for a specific frame."""
+        try:
+            data = await request.json()
+            node_id = data.get("node_id")
+            frame_index = data.get("frame_index")
+            mask_type = data.get("type", "bbox")  # "bbox" or "painted"
+            mask_data = data.get("mask_data")  # bbox dict or base64 painted mask
+
+            if node_id is None or frame_index is None:
+                return web.json_response(
+                    {"error": "Missing node_id or frame_index"}, status=400
+                )
+
+            node_id = str(node_id)
+            if node_id not in _mask_keyframes:
+                _mask_keyframes[node_id] = {}
+
+            _mask_keyframes[node_id][str(frame_index)] = {
+                "type": mask_type,
+                "bbox": mask_data if mask_type == "bbox" else None,
+                "mask_data": mask_data if mask_type == "painted" else None,
+            }
+
+            _log(
+                f"Set keyframe for node {node_id}, frame {frame_index}, type {mask_type}"
+            )
+            _increment_mask_version(node_id)
+
+            # Notify frontend
+            PromptServer.instance.send_sync(
+                "videomaskeditor.mask_updated", {"node_id": node_id}
+            )
+
+            return web.json_response({"success": True})
+        except Exception as exc:
+            _log(f"Error setting keyframe: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post("/videomaskeditor/deletekeyframe")
+    async def video_mask_editor_deletekeyframe(request):
+        """Delete a specific keyframe."""
+        try:
+            data = await request.json()
+            node_id = data.get("node_id")
+            frame_index = data.get("frame_index")
+
+            if node_id is None or frame_index is None:
+                return web.json_response(
+                    {"error": "Missing node_id or frame_index"}, status=400
+                )
+
+            node_id = str(node_id)
+            if (
+                node_id in _mask_keyframes
+                and str(frame_index) in _mask_keyframes[node_id]
+            ):
+                del _mask_keyframes[node_id][str(frame_index)]
+                _log(f"Deleted keyframe for node {node_id}, frame {frame_index}")
+                _increment_mask_version(node_id)
+
+                PromptServer.instance.send_sync(
+                    "videomaskeditor.mask_updated", {"node_id": node_id}
+                )
+
+            return web.json_response({"success": True})
+        except Exception as exc:
+            _log(f"Error deleting keyframe: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.get("/videomaskeditor/getkeyframes")
+    async def video_mask_editor_getkeyframes(request):
+        """Get all keyframes for a node."""
+        try:
+            params = request.rel_url.query
+            node_id = params.get("node_id")
+
+            if not node_id:
+                return web.json_response({"error": "Missing node_id"}, status=400)
+
+            node_id = str(node_id)
+            keyframes = _mask_keyframes.get(node_id, {})
+
+            return web.json_response({"keyframes": keyframes})
+        except Exception as exc:
+            _log(f"Error getting keyframes: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.post("/videomaskeditor/restorekeyframes")
+    async def video_mask_editor_restorekeyframes(request):
+        """Restore keyframes to a previous state (used for cancel functionality)."""
+        try:
+            data = await request.json()
+            node_id = data.get("node_id")
+            keyframes = data.get("keyframes", {})
+
+            if node_id is None:
+                return web.json_response({"error": "Missing node_id"}, status=400)
+
+            node_id = str(node_id)
+
+            # Restore the keyframes to the provided state
+            _mask_keyframes[node_id] = keyframes
+
+            _log(f"Restored keyframes for node {node_id} (count: {len(keyframes)})")
+            _increment_mask_version(node_id)
+
+            # Notify frontend
+            PromptServer.instance.send_sync(
+                "videomaskeditor.mask_updated", {"node_id": node_id}
+            )
+
+            return web.json_response({"success": True})
+        except Exception as exc:
+            _log(f"Error restoring keyframes: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+
 _register_preview_route()
 _register_mask_route()
 _register_clear_mask_route()
+_register_keyframe_routes()
 
 
 class WANFrameCalculatorNode:
@@ -586,20 +981,28 @@ class WANFrameCalculatorNode:
                         "step": 1,
                         "display": "number",
                     },
+                ),
+                "rounding_mode": (
+                    ["nearest", "max", "min"],
                     {
-                        "default": 1,
-                        "min": 1,
-                        "max": 10000,
-                        "step": 1,
-                        "display": "number",
+                        "default": "nearest",
                     },
                 ),
             }
         }
 
-    def calculate_wan_frames(self, frame_count: int):
+    def calculate_wan_frames(self, frame_count: int, rounding_mode: str):
         if frame_count <= 1:
             return (1,)
-        wan_frames = 1 + (int(np.ceil((frame_count - 1) / 4)) * 4)
-        _log(f"Input frames: {frame_count} → WAN frames: {wan_frames}")
+
+        if rounding_mode == "max":
+            wan_frames = 1 + (int(np.ceil((frame_count - 1) / 4)) * 4)
+        elif rounding_mode == "min":
+            wan_frames = 1 + (int(np.floor((frame_count - 1) / 4)) * 4)
+        else:  # nearest
+            wan_frames = 1 + (round((frame_count - 1) / 4) * 4)
+
+        _log(
+            f"Input frames: {frame_count} → WAN frames ({rounding_mode}): {wan_frames}"
+        )
         return (wan_frames,)
