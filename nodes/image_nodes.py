@@ -98,9 +98,6 @@ class PoseImageSetupNode:
                     {"default": 0, "min": -2048, "max": 2048, "step": 1},
                 ),
             },
-            "optional": {
-                "bbox": ("BBOX", {"forceInput": True}),
-            },
         }
 
     def setup_pose_images(
@@ -112,25 +109,16 @@ class PoseImageSetupNode:
         height_change: int,
         offset_x: int,
         offset_y: int,
-        bbox: dict = None,
     ):
         fill_rgb = parse_hex_color(fill_color)
         images_np = images.detach().cpu().numpy()
         img_height, img_width = images_np.shape[1:3]
 
-        # If no bbox is provided, use full image dimensions
-        if bbox is None:
-            bbox = {
-                "x": 0,
-                "y": 0,
-                "width": img_width,
-                "height": img_height,
-            }
-
-        bbox_x = bbox.get("x", 0)
-        bbox_y = bbox.get("y", 0)
-        bbox_width = bbox.get("width", img_width)
-        bbox_height = bbox.get("height", img_height)
+        # Use full image dimensions
+        bbox_x = 0
+        bbox_y = 0
+        bbox_width = img_width
+        bbox_height = img_height
 
         # Calculate final canvas size by expanding the bbox dimensions
         final_width = max(1, bbox_width + width_change)

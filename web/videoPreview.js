@@ -599,6 +599,12 @@ function openMaskEditor(node, previewWidget) {
       showPaint = false;
     }
 
+    // If actively painting, hide bbox completely
+    if (isPainting) {
+      showBbox = false;
+      maskRect = null;
+    }
+
     // If a bbox is active (from a keyframe or edit), it hides paint
     if (maskRect) {
       showPaint = false;
@@ -1043,6 +1049,12 @@ function openMaskEditor(node, previewWidget) {
     const isRightClick = e.button === 2;
 
     if (maskMode === "paint") {
+      // In paint mode - clear bbox immediately on any click FIRST
+      if (maskRect) {
+        maskRect = null;
+        lastRenderedKeyframeIndex = -1;
+      }
+
       // If a bbox keyframe exists on this frame, delete it as painting overrides it.
       if (
         keyframes[dialogFrameIndex] &&
@@ -1062,11 +1074,6 @@ function openMaskEditor(node, previewWidget) {
           .catch((err) => console.error("Failed to delete bbox keyframe", err));
       }
 
-      // In paint mode - clear bbox immediately on any click
-      if (maskRect) {
-        maskRect = null;
-        lastRenderedKeyframeIndex = -1;
-      }
       // Paint mode - start painting or erasing
       isPainting = true;
       initPaintMask();
@@ -1955,7 +1962,7 @@ app.registerExtension({
           skip_first_frames: getWidgetValue("skip_first_frames", 0) || 0,
           select_every_nth: getWidgetValue("select_every_nth", 1) || 1,
           format: getWidgetValue("format", "None") || "None",
-          max_preview_frames: 48,
+          max_preview_frames: 120,
         });
 
         const requestId = ++previewState.requestId;

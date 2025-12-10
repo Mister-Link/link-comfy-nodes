@@ -26,7 +26,7 @@ VIDEO_EXTENSIONS = ["webm", "mp4", "mkv", "gif", "mov"]
 IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"]
 BIGMAX = 2**53 - 1
 DIMMAX = 8192
-DEFAULT_PREVIEW_FRAME_LIMIT = 48
+DEFAULT_PREVIEW_FRAME_LIMIT = 120
 
 
 def _log(message: str):
@@ -99,17 +99,17 @@ def _generate_masks_from_keyframes(
     """Generate masks for all frames based on keyframe data.
 
     Keyframe propagation logic:
-    - Frames before the first keyframe use the first keyframe's mask
+    - Frames before the first keyframe have blank masks (all zeros)
     - Frames at or after a keyframe use that keyframe's mask until the next keyframe
     - Each keyframe's mask applies forward until another keyframe is encountered
     """
     if not node_id or str(node_id) not in _mask_keyframes:
-        # No keyframes, return all-white masks
-        return np.ones((frame_count, height, width), dtype=np.float32)
+        # No keyframes, return all-zero masks (blank)
+        return np.zeros((frame_count, height, width), dtype=np.float32)
 
     keyframes = _mask_keyframes[str(node_id)]
     if not keyframes:
-        return np.ones((frame_count, height, width), dtype=np.float32)
+        return np.zeros((frame_count, height, width), dtype=np.float32)
 
     # Sort keyframes by frame index
     sorted_keyframes = sorted(keyframes.items(), key=lambda x: int(x[0]))
@@ -120,13 +120,13 @@ def _generate_masks_from_keyframes(
     # Process each frame
     for frame_idx in range(frame_count):
         # Find the active keyframe for this frame:
-        # - If before first keyframe, use first keyframe
+        # - If before first keyframe, leave as blank (zero mask)
         # - Otherwise, use the most recent keyframe at or before current frame
         active_keyframe = None
 
         if frame_idx < keyframe_indices[0]:
-            # Before the first keyframe - use the first keyframe's mask
-            active_keyframe = sorted_keyframes[0][1]
+            # Before the first keyframe - leave mask as blank (zeros)
+            continue
         else:
             # Find the most recent keyframe at or before this frame
             for kf_idx, kf_data in sorted_keyframes:
@@ -137,8 +137,7 @@ def _generate_masks_from_keyframes(
                     break
 
         if not active_keyframe:
-            # Fallback - should not happen with the logic above
-            masks[frame_idx] = np.ones((height, width), dtype=np.float32)
+            # No active keyframe, leave as blank (zeros)
             continue
 
         mask_type = active_keyframe.get("type", "bbox")
@@ -419,8 +418,8 @@ class VideoMaskEditor:
     """Load a video, create bbox for regions, and expose preview endpoints."""
 
     CATEGORY = "Video/Masking"
-    RETURN_TYPES = ("IMAGE", "BBOX", "INT", "MASK")
-    RETURN_NAMES = ("frames", "bbox", "frame_count", "masks")
+    RETURN_TYPES = ("IMAGE", "INT", "MASK")
+    RETURN_NAMES = ("frames", "frame_count", "masks")
     FUNCTION = "load_video"
     OUTPUT_NODE = False
 
@@ -635,7 +634,7 @@ class VideoMaskEditor:
         masks_tensor = torch.from_numpy(masks_array)
         _log(f"Masks tensor shape: {masks_tensor.shape}, dtype: {masks_tensor.dtype}")
 
-        return frames_tensor, bbox, frames_tensor.shape[0], masks_tensor
+        return frames_tensor, frames_tensor.shape[0], masks_tensor
 
     @classmethod
     def IS_CHANGED(cls, source, **kwargs):
