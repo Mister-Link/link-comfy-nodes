@@ -467,7 +467,7 @@ class VideoMaskEditor:
                     "INT",
                     {"default": 1, "min": 1, "max": BIGMAX, "step": 1},
                 ),
-                "mask_crops_frames": ("BOOLEAN", {"default": False}),
+                "is_wan": ("BOOLEAN", {"default": False}),
             },
             "hidden": {"force_size": "STRING", "unique_id": "UNIQUE_ID"},
         }
@@ -481,11 +481,51 @@ class VideoMaskEditor:
         frame_load_cap: int,
         skip_first_frames: int,
         select_every_nth: int,
-        mask_crops_frames: bool,
+        is_wan: bool,
         force_size: str = "",
         unique_id: Optional[str] = None,
     ):
         video_path = folder_paths.get_annotated_filepath(source)
+        source_total_frames = 0
+
+        # Determine total frames for WAN snapping logic
+        if os.path.isdir(video_path):
+            image_files = [
+                f
+                for f in os.listdir(video_path)
+                if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
+            ]
+            source_total_frames = len(image_files)
+        elif os.path.isfile(video_path):
+            try:
+                video_cap = cv2.VideoCapture(video_path)
+                if not video_cap.isOpened():
+                    raise ValueError(
+                        f"Could not open video for frame count: {video_path}"
+                    )
+                source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            finally:
+                if video_cap:
+                    video_cap.release()
+
+        if is_wan and frame_load_cap > 0 and source_total_frames > 0:
+            original_cap = frame_load_cap
+            # Snap to nearest WAN count
+            snapped_cap = 1 + (round((frame_load_cap - 1) / 4) * 4)
+            if snapped_cap <= 0:
+                snapped_cap = 1
+
+            # If snapped cap is more than we have, snap down to max possible WAN count
+            if snapped_cap > source_total_frames:
+                snapped_cap = 1 + (int(np.floor((source_total_frames - 1) / 4)) * 4)
+                if snapped_cap <= 0:
+                    snapped_cap = 1
+
+            if frame_load_cap != snapped_cap:
+                _log(
+                    f"WAN mode enabled. Snapped frame_load_cap from {original_cap} to {snapped_cap} (total frames: {source_total_frames})"
+                )
+                frame_load_cap = snapped_cap
 
         # Detect if it's a directory (image folder) or file (video)
         if os.path.isdir(video_path):
@@ -554,7 +594,7 @@ class VideoMaskEditor:
 
         frames_tensor = torch.from_numpy(frames_array)
 
-        _log(f"mask_crops_frames setting: {mask_crops_frames}")
+        _log(f"is_wan setting: {is_wan}")
         _log(f"unique_id: {unique_id}")
         _log(f"Available mask regions: {list(_mask_regions.keys())}")
         _log(f"_mask_regions dict id: {id(_mask_regions)}")
@@ -583,24 +623,6 @@ class VideoMaskEditor:
                 _log(
                     f"Set bbox: x={bbox['x']}, y={bbox['y']}, w={bbox['width']}, h={bbox['height']}"
                 )
-
-                # Crop frames if enabled
-                if mask_crops_frames:
-                    _log(f"Original frames shape: {frames_tensor.shape}")
-                    frames_tensor = frames_tensor[
-                        :,
-                        region.y : region.y + region.height,
-                        region.x : region.x + region.width,
-                        :,
-                    ]
-                    # When cropping, the bbox becomes the full frame
-                    bbox["x"] = 0
-                    bbox["y"] = 0
-                    bbox["width"] = region.width
-                    bbox["height"] = region.height
-                    _log(
-                        f"Cropped frames to bbox region. New shape: {frames_tensor.shape}"
-                    )
             else:
                 _log(
                     f"Region has zero width or height: w={region.width}, h={region.height}"
@@ -622,14 +644,6 @@ class VideoMaskEditor:
         masks_array = _generate_masks_from_keyframes(
             unique_id, frames_tensor.shape[0], target_width, target_height
         )
-
-        # Apply cropping to masks if enabled
-        if region and region.width and region.height and mask_crops_frames:
-            masks_array = masks_array[
-                :,
-                region.y : region.y + region.height,
-                region.x : region.x + region.width,
-            ]
 
         masks_tensor = torch.from_numpy(masks_array)
         _log(f"Masks tensor shape: {masks_tensor.shape}, dtype: {masks_tensor.dtype}")

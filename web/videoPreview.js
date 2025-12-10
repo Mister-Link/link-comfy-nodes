@@ -271,12 +271,12 @@ function openMaskEditor(node, previewWidget) {
       color: #fff;
       border: none;
       border-radius: 4px;
-      cursor: pointer;
       font-size: 16px;
       min-width: 44px;
       font-family: monospace;
       transition: background 0.2s;
     `;
+    button.style.cursor = "pointer";
     button.addEventListener("click", onClick);
     button.addEventListener("mouseenter", () => {
       if (!button.disabled) {
@@ -641,33 +641,6 @@ function openMaskEditor(node, previewWidget) {
           error,
         );
       }
-    }
-
-    // 2. Render live painting buffer
-    if (
-      isPainting &&
-      paintMaskData &&
-      paintMaskFrameIndex === dialogFrameIndex
-    ) {
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      for (let i = 0; i < paintMaskData.length; i++) {
-        if (paintMaskData[i] < 128) {
-          // Black = painted/selected
-          const pixelIdx = i * 4;
-          // Blend with red tint: 30% original + 70% red
-          imageData.data[pixelIdx] = Math.min(
-            255,
-            imageData.data[pixelIdx] * 0.3 + 255 * 0.7,
-          );
-          imageData.data[pixelIdx + 1] = Math.floor(
-            imageData.data[pixelIdx + 1] * 0.3,
-          );
-          imageData.data[pixelIdx + 2] = Math.floor(
-            imageData.data[pixelIdx + 2] * 0.3,
-          );
-        }
-      }
-      ctx.putImageData(imageData, 0, 0);
     }
 
     // 3. Render Bbox, if applicable
@@ -1489,8 +1462,13 @@ function openMaskEditor(node, previewWidget) {
 
   // Buttons container
   const buttonsContainer = document.createElement("div");
-  buttonsContainer.style.cssText =
-    "display: flex; gap: 10px; justify-content: space-between;";
+  buttonsContainer.style.cssText = `
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    position: relative;
+    z-index: 10;
+  `;
 
   const createActionButton = (label, background, onClick) => {
     const button = document.createElement("button");
@@ -1501,9 +1479,9 @@ function openMaskEditor(node, previewWidget) {
       color: #fff;
       border: none;
       border-radius: 4px;
-      cursor: pointer;
       font-size: 14px;
     `;
+    button.style.cursor = "pointer";
     if (onClick) {
       button.addEventListener("click", onClick);
     }
@@ -1657,41 +1635,12 @@ function openMaskEditor(node, previewWidget) {
 
   closeButton.addEventListener("click", handleCancel);
 
-  applyButton.addEventListener("click", async () => {
-    // Store mask region on node
-    node.maskRegion = maskRect;
-
-    // Send mask data to backend
-    if (maskRect) {
-      const sourceWidget = node.widgets?.find((w) => w.name === "source");
-      if (sourceWidget && sourceWidget.value) {
-        try {
-          const response = await api.fetchApi("/videomaskeditor/setmask", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              node_id: node.id,
-              video: sourceWidget.value,
-              mask_region: maskRect,
-            }),
-          });
-
-          if (!response.ok) {
-            console.error(
-              "[VideoMaskEditor] Failed to set mask:",
-              await response.text(),
-            );
-          } else {
-            console.log("[VideoMaskEditor] Mask set successfully");
-          }
-        } catch (error) {
-          console.error("[VideoMaskEditor] Error setting mask:", error);
-        }
-      }
+  applyButton.addEventListener("click", () => {
+    // Manually trigger a refresh of the main node's preview to ensure
+    // it reflects the final state from the editor.
+    if (node.refreshPreview) {
+      node.refreshPreview();
     }
-
     closeDialog();
   });
 
@@ -1716,6 +1665,78 @@ app.registerExtension({
     // Add preview widget
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
       const previewNode = this;
+
+      // --- WAN Frame Snapping Logic ---
+      const isWanWidget = this.widgets.find((w) => w.name === "is_wan");
+      const frameLoadCapWidget = this.widgets.find(
+        (w) => w.name === "frame_load_cap",
+      );
+
+      if (isWanWidget && frameLoadCapWidget) {
+        let lastKnownValue = Number(frameLoadCapWidget.value);
+
+        const snapLogic = () => {
+          if (!isWanWidget.value) {
+            // When WAN is off, just track the value.
+            lastKnownValue = Number(frameLoadCapWidget.value);
+            return;
+          }
+
+          const currentValue = Number(frameLoadCapWidget.value);
+          if (isNaN(currentValue)) return;
+
+          let snappedValue;
+          const delta = currentValue - lastKnownValue;
+
+          // Heuristic: A change of exactly +1 or -1 indicates an arrow click.
+          if (delta === 1) {
+            // Incrementing: find next WAN count up from the last valid number.
+            const n = Math.floor((lastKnownValue - 1) / 4);
+            snappedValue = 1 + (n + 1) * 4;
+          } else if (delta === -1) {
+            // Decrementing: find next WAN count down.
+            const n = Math.ceil((lastKnownValue - 1) / 4);
+            snappedValue = 1 + (n - 1) * 4;
+          } else {
+            // Typing or other direct change: snap to nearest valid value.
+            snappedValue =
+              currentValue <= 1
+                ? 1
+                : 1 + Math.round((currentValue - 1) / 4) * 4;
+          }
+
+          snappedValue = Math.max(1, snappedValue);
+
+          // Update widget value and internal state
+          frameLoadCapWidget.value = snappedValue;
+          if (frameLoadCapWidget.inputEl) {
+            frameLoadCapWidget.inputEl.value = snappedValue;
+          }
+          lastKnownValue = snappedValue;
+        };
+
+        // Monkey-patch callbacks to inject our logic
+        const originalIsWanCallback = isWanWidget.callback;
+        isWanWidget.callback = function (value) {
+          originalIsWanCallback?.apply(this, arguments);
+          if (value) {
+            // When turning WAN on, snap the current value immediately.
+            snapLogic();
+          }
+        };
+
+        const originalFrameCapCallback = frameLoadCapWidget.callback;
+        frameLoadCapWidget.callback = function (value) {
+          originalFrameCapCallback?.apply(this, arguments);
+          snapLogic();
+        };
+
+        // Perform an initial check in case the node loads with is_wan enabled.
+        if (isWanWidget.value) {
+          snapLogic();
+        }
+      }
+      // --- End WAN Frame Snapping Logic ---
 
       // Clear any stale mask data for this node
       api
@@ -1746,6 +1767,40 @@ app.registerExtension({
         },
       );
 
+      previewNode.keyframes = {}; // Initialize keyframes store
+
+      const getKeyframes = async () => {
+        try {
+          const response = await api.fetchApi(
+            `/videomaskeditor/getkeyframes?node_id=${previewNode.id}`,
+          );
+          if (response.ok) {
+            const data = await response.json();
+            previewNode.keyframes = data.keyframes || {};
+          }
+        } catch (error) {
+          console.error("[VideoMaskEditor] Failed to get keyframes:", error);
+        }
+      };
+
+      // Create a dedicated refresh function and attach it to the node instance
+      const refreshPreview = async () => {
+        await getKeyframes();
+        if (previewWidget.frames && previewWidget.frames.length > 0) {
+          // Redraw the current frame of the main preview
+          drawFrame(previewWidget.frameIndex % previewWidget.frames.length);
+        }
+      };
+      previewNode.refreshPreview = refreshPreview;
+
+      api.addEventListener("videomaskeditor.mask_updated", async (e) => {
+        if (e.detail.node_id === previewNode.id) {
+          await refreshPreview();
+        }
+      });
+
+      // Initial fetch
+      getKeyframes();
       previewWidget.computeSize = function (width) {
         if (this.aspectRatio && this.parentEl.style.display !== "none") {
           let height = (previewNode.size[0] - 20) / this.aspectRatio + 10;
@@ -1840,52 +1895,99 @@ app.registerExtension({
         const ctx = previewWidget.canvasEl.getContext("2d");
         ctx.putImageData(frameData.imageData, 0, 0);
 
-        // Draw mask region overlay if it exists
-        if (
-          previewNode.maskRegion &&
-          previewNode.maskRegion.width > 0 &&
-          previewNode.maskRegion.height > 0
-        ) {
-          const maskRect = previewNode.maskRegion;
+        // --- MASK DRAWING ---
+        let activeKeyframe = null;
 
-          // Draw soft dark overlay on entire canvas
-          ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-          ctx.fillRect(
-            0,
-            0,
-            previewWidget.canvasEl.width,
-            previewWidget.canvasEl.height,
-          );
-
-          // Clear the selected area to show original video
-          ctx.clearRect(
-            maskRect.x,
-            maskRect.y,
-            maskRect.width,
-            maskRect.height,
-          );
-
-          // Redraw the original video content in the cleared area
-          ctx.putImageData(
-            frameData.imageData,
-            0,
-            0,
-            maskRect.x,
-            maskRect.y,
-            maskRect.width,
-            maskRect.height,
-          );
-
-          // Draw red border around selection
-          ctx.strokeStyle = "#ff4444";
-          ctx.lineWidth = 2;
-          ctx.strokeRect(
-            maskRect.x,
-            maskRect.y,
-            maskRect.width,
-            maskRect.height,
-          );
+        if (previewNode.keyframes) {
+          const sortedKeyframeIndices = Object.keys(previewNode.keyframes)
+            .map(Number)
+            .sort((a, b) => a - b);
+          for (let i = sortedKeyframeIndices.length - 1; i >= 0; i--) {
+            const keyframeIndex = sortedKeyframeIndices[i];
+            if (keyframeIndex <= idx) {
+              activeKeyframe = previewNode.keyframes[keyframeIndex];
+              break;
+            }
+          }
         }
+
+        if (activeKeyframe) {
+          if (
+            activeKeyframe.type === "bbox" &&
+            activeKeyframe.bbox &&
+            activeKeyframe.bbox.width > 0 &&
+            activeKeyframe.bbox.height > 0
+          ) {
+            const maskRect = activeKeyframe.bbox;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+            ctx.fillRect(
+              0,
+              0,
+              previewWidget.canvasEl.width,
+              previewWidget.canvasEl.height,
+            );
+            ctx.clearRect(
+              maskRect.x,
+              maskRect.y,
+              maskRect.width,
+              maskRect.height,
+            );
+            ctx.putImageData(
+              frameData.imageData,
+              0,
+              0,
+              maskRect.x,
+              maskRect.y,
+              maskRect.width,
+              maskRect.height,
+            );
+            ctx.strokeStyle = "#ff4444";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(
+              maskRect.x,
+              maskRect.y,
+              maskRect.width,
+              maskRect.height,
+            );
+          } else if (
+            activeKeyframe.type === "painted" &&
+            activeKeyframe.mask_data
+          ) {
+            try {
+              const binary = atob(activeKeyframe.mask_data);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+              }
+              const maskArray = new Float32Array(bytes.buffer);
+              const imageData = ctx.getImageData(
+                0,
+                0,
+                frameData.width,
+                frameData.height,
+              );
+              for (let i = 0; i < maskArray.length; i++) {
+                if (maskArray[i] > 0.5) {
+                  const pixelIdx = i * 4;
+                  imageData.data[pixelIdx] = Math.min(
+                    255,
+                    imageData.data[pixelIdx] * 0.3 + 255 * 0.7,
+                  );
+                  imageData.data[pixelIdx + 1] = Math.floor(
+                    imageData.data[pixelIdx + 1] * 0.3,
+                  );
+                  imageData.data[pixelIdx + 2] = Math.floor(
+                    imageData.data[pixelIdx + 2] * 0.3,
+                  );
+                }
+              }
+              ctx.putImageData(imageData, 0, 0);
+            } catch (e) {
+              console.error("Failed to draw painted mask", e);
+            }
+          }
+        }
+        // --- END MASK DRAWING ---
 
         // Update aspect ratio if it changed (only on first frame or size change)
         if (
