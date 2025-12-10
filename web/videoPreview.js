@@ -1666,6 +1666,146 @@ app.registerExtension({
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
       const previewNode = this;
 
+      // Create preview container
+      const element = document.createElement("div");
+      const previewWidget = this.addDOMWidget(
+        "videopreview",
+        "preview",
+        element,
+        {
+          serialize: false,
+          hideOnZoom: false,
+          getValue() {
+            return element.value;
+          },
+          setValue(v) {
+            element.value = v;
+          },
+        },
+      );
+
+      previewWidget.computeSize = function (width) {
+        if (this.aspectRatio && this.parentEl.style.display !== "none") {
+          let height = (previewNode.size[0] - 20) / this.aspectRatio + 10;
+          if (!(height > 0)) {
+            height = 0;
+          }
+          this.computedHeight = height + 10;
+          return [width, height];
+        }
+        return [width, -4];
+      };
+
+      previewWidget.value = { hidden: false, paused: false, params: {} };
+
+      previewWidget.parentEl = document.createElement("div");
+      previewWidget.parentEl.className = "vhs_preview";
+      previewWidget.parentEl.style.cssText = `
+        width: 100%;
+        background-color: #000;
+        margin-bottom: 8px;
+        display: none;
+      `;
+      element.appendChild(previewWidget.parentEl);
+
+      previewWidget.canvasEl = document.createElement("canvas");
+      previewWidget.canvasEl.style.width = "100%";
+      previewWidget.canvasEl.style.height = "auto";
+      previewWidget.canvasEl.style.display = "block";
+
+      const getWidgetValue = (name, fallback) => {
+        const widget = previewNode.widgets?.find((w) => w.name === name);
+        return widget && widget.value !== undefined ? widget.value : fallback;
+      };
+
+      const previewState = {
+        pendingTimeout: null,
+        requestId: 0,
+      };
+
+      // Define loadInputPreview early so it can be used by refresh logic
+      const loadInputPreview = async () => {
+        previewState.pendingTimeout = null;
+        const sourceValue = getWidgetValue("source", null);
+        if (!sourceValue) {
+          stopAnimation();
+          previewWidget.parentEl.hidden = true;
+          previewWidget.frames = [];
+          return;
+        }
+
+        const params = new URLSearchParams({
+          video: sourceValue,
+          node_id: previewNode.id, // Pass node_id for server-side masking
+          framerate: getWidgetValue("framerate", 0) || 0,
+          custom_width: getWidgetValue("custom_width", 0) || 0,
+          custom_height: getWidgetValue("custom_height", 0) || 0,
+          frame_load_cap: getWidgetValue("frame_load_cap", 0) || 0,
+          skip_first_frames: getWidgetValue("skip_first_frames", 0) || 0,
+          select_every_nth: getWidgetValue("select_every_nth", 1) || 1,
+          format: getWidgetValue("format", "None") || "None",
+          max_preview_frames: 120,
+        });
+
+        const requestId = ++previewState.requestId;
+        stopAnimation();
+        previewWidget.frames = [];
+        previewWidget.frameIndex = 0;
+        previewWidget.parentEl.style.display = "none";
+
+        try {
+          const response = await api.fetchApi(
+            `/videomaskeditor/preview?${params.toString()}`,
+          );
+          if (!response.ok) {
+            const message = await response.text();
+            throw new Error(message || "Failed to load preview");
+          }
+
+          const data = await response.json();
+          const frames = data.frames || [];
+          if (!frames.length || requestId !== previewState.requestId) {
+            return;
+          }
+
+          previewWidget.frameDuration = data.fps > 0 ? 1000 / data.fps : 100;
+          previewWidget.frames = new Array(frames.length);
+
+          console.log(
+            `[VideoPreview] Loaded ${frames.length} frames at ${data.fps} fps (frame duration: ${previewWidget.frameDuration}ms)`,
+          );
+
+          let loadedCount = 0;
+          frames.forEach((frameInfo, idx) => {
+            const img = new Image();
+            img.src = "data:image/png;base64," + frameInfo.data;
+            img.onload = () => {
+              const canvas = document.createElement("canvas");
+              canvas.width = img.width;
+              canvas.height = img.height;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img, 0, 0);
+              previewWidget.frames[idx] = {
+                imageData: ctx.getImageData(0, 0, img.width, img.height),
+                width: img.width,
+                height: img.height,
+              };
+
+              loadedCount++;
+              if (loadedCount === frames.length) {
+                previewWidget.parentEl.style.display = "block";
+                startAnimation();
+              }
+            };
+          });
+        } catch (error) {
+          console.error("[VideoMaskEditor] Error loading preview:", error);
+          stopAnimation();
+          previewWidget.parentEl.style.display = "none";
+          previewWidget.frames = [];
+        }
+      };
+
       // --- WAN Frame Snapping Logic ---
       const isWanWidget = this.widgets.find((w) => w.name === "is_wan");
       const frameLoadCapWidget = this.widgets.find(
@@ -1738,36 +1878,16 @@ app.registerExtension({
       }
       // --- End WAN Frame Snapping Logic ---
 
-      // Clear any stale mask data for this node
-      api
-        .fetchApi("/videomaskeditor/clearmask", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ node_id: previewNode.id }),
-        })
-        .catch((err) =>
-          console.error("[VideoMaskEditor] Failed to clear mask:", err),
-        );
-
-      // Create preview container
-      const element = document.createElement("div");
-      const previewWidget = this.addDOMWidget(
-        "videopreview",
-        "preview",
-        element,
-        {
-          serialize: false,
-          hideOnZoom: false,
-          getValue() {
-            return element.value;
-          },
-          setValue(v) {
-            element.value = v;
-          },
-        },
-      );
-
       previewNode.keyframes = {}; // Initialize keyframes store
+
+      const scheduleLoad = () => {
+        if (previewState.pendingTimeout) {
+          clearTimeout(previewState.pendingTimeout);
+        }
+        previewState.pendingTimeout = setTimeout(() => {
+          loadInputPreview();
+        }, 200);
+      };
 
       const getKeyframes = async () => {
         try {
@@ -1783,52 +1903,44 @@ app.registerExtension({
         }
       };
 
-      // Create a dedicated refresh function and attach it to the node instance
       const refreshPreview = async () => {
         await getKeyframes();
-        if (previewWidget.frames && previewWidget.frames.length > 0) {
-          // Redraw the current frame of the main preview
-          drawFrame(previewWidget.frameIndex % previewWidget.frames.length);
-        }
+        await loadInputPreview();
       };
       previewNode.refreshPreview = refreshPreview;
 
       api.addEventListener("videomaskeditor.mask_updated", async (e) => {
         if (e.detail.node_id === previewNode.id) {
-          await refreshPreview();
+          await getKeyframes();
         }
       });
 
-      // Initial fetch
-      getKeyframes();
-      previewWidget.computeSize = function (width) {
-        if (this.aspectRatio && this.parentEl.style.display !== "none") {
-          let height = (previewNode.size[0] - 20) / this.aspectRatio + 10;
-          if (!(height > 0)) {
-            height = 0;
-          }
-          this.computedHeight = height + 10;
-          return [width, height];
+      // When a widget that affects the preview changes, schedule a reload
+      const widgetsToWatch = [
+        "source",
+        "framerate",
+        "custom_width",
+        "custom_height",
+        "frame_load_cap",
+        "skip_first_frames",
+        "select_every_nth",
+      ];
+      for (const widgetName of widgetsToWatch) {
+        const widget = previewNode.widgets.find((w) => w.name === widgetName);
+        if (widget) {
+          const originalCallback = widget.callback;
+          widget.callback = function () {
+            if (originalCallback) {
+              originalCallback.apply(this, arguments);
+            }
+            scheduleLoad();
+          };
         }
-        return [width, -4];
-      };
+      }
 
-      previewWidget.value = { hidden: false, paused: false, params: {} };
-
-      previewWidget.parentEl = document.createElement("div");
-      previewWidget.parentEl.className = "vhs_preview";
-      previewWidget.parentEl.style.cssText = `
-        width: 100%;
-        background-color: #000;
-        margin-bottom: 8px;
-        display: none;
-      `;
-      element.appendChild(previewWidget.parentEl);
-
-      previewWidget.canvasEl = document.createElement("canvas");
-      previewWidget.canvasEl.style.width = "100%";
-      previewWidget.canvasEl.style.height = "auto";
-      previewWidget.canvasEl.style.display = "block";
+      // Initial fetch of keyframes for the editor and initial preview load
+      getKeyframes();
+      scheduleLoad();
 
       // Forward all mouse events to ComfyUI canvas to enable proper context menu and interactions
       previewWidget.canvasEl.addEventListener(
@@ -1895,100 +2007,6 @@ app.registerExtension({
         const ctx = previewWidget.canvasEl.getContext("2d");
         ctx.putImageData(frameData.imageData, 0, 0);
 
-        // --- MASK DRAWING ---
-        let activeKeyframe = null;
-
-        if (previewNode.keyframes) {
-          const sortedKeyframeIndices = Object.keys(previewNode.keyframes)
-            .map(Number)
-            .sort((a, b) => a - b);
-          for (let i = sortedKeyframeIndices.length - 1; i >= 0; i--) {
-            const keyframeIndex = sortedKeyframeIndices[i];
-            if (keyframeIndex <= idx) {
-              activeKeyframe = previewNode.keyframes[keyframeIndex];
-              break;
-            }
-          }
-        }
-
-        if (activeKeyframe) {
-          if (
-            activeKeyframe.type === "bbox" &&
-            activeKeyframe.bbox &&
-            activeKeyframe.bbox.width > 0 &&
-            activeKeyframe.bbox.height > 0
-          ) {
-            const maskRect = activeKeyframe.bbox;
-            ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
-            ctx.fillRect(
-              0,
-              0,
-              previewWidget.canvasEl.width,
-              previewWidget.canvasEl.height,
-            );
-            ctx.clearRect(
-              maskRect.x,
-              maskRect.y,
-              maskRect.width,
-              maskRect.height,
-            );
-            ctx.putImageData(
-              frameData.imageData,
-              0,
-              0,
-              maskRect.x,
-              maskRect.y,
-              maskRect.width,
-              maskRect.height,
-            );
-            ctx.strokeStyle = "#ff4444";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(
-              maskRect.x,
-              maskRect.y,
-              maskRect.width,
-              maskRect.height,
-            );
-          } else if (
-            activeKeyframe.type === "painted" &&
-            activeKeyframe.mask_data
-          ) {
-            try {
-              const binary = atob(activeKeyframe.mask_data);
-              const bytes = new Uint8Array(binary.length);
-              for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-              }
-              const maskArray = new Float32Array(bytes.buffer);
-              const imageData = ctx.getImageData(
-                0,
-                0,
-                frameData.width,
-                frameData.height,
-              );
-              for (let i = 0; i < maskArray.length; i++) {
-                if (maskArray[i] > 0.5) {
-                  const pixelIdx = i * 4;
-                  imageData.data[pixelIdx] = Math.min(
-                    255,
-                    imageData.data[pixelIdx] * 0.3 + 255 * 0.7,
-                  );
-                  imageData.data[pixelIdx + 1] = Math.floor(
-                    imageData.data[pixelIdx + 1] * 0.3,
-                  );
-                  imageData.data[pixelIdx + 2] = Math.floor(
-                    imageData.data[pixelIdx + 2] * 0.3,
-                  );
-                }
-              }
-              ctx.putImageData(imageData, 0, 0);
-            } catch (e) {
-              console.error("Failed to draw painted mask", e);
-            }
-          }
-        }
-        // --- END MASK DRAWING ---
-
         // Update aspect ratio if it changed (only on first frame or size change)
         if (
           !previewWidget.aspectRatio ||
@@ -2033,114 +2051,6 @@ app.registerExtension({
 
         advanceFrame();
         previewWidget.playInterval = setInterval(advanceFrame, frameDuration);
-      };
-
-      const getWidgetValue = (name, fallback) => {
-        const widget = previewNode.widgets?.find((w) => w.name === name);
-        return widget && widget.value !== undefined ? widget.value : fallback;
-      };
-
-      const previewState = {
-        pendingTimeout: null,
-        requestId: 0,
-      };
-
-      const loadInputPreview = async () => {
-        previewState.pendingTimeout = null;
-        const sourceValue = getWidgetValue("source", null);
-        if (!sourceValue) {
-          stopAnimation();
-          previewWidget.parentEl.hidden = true;
-          previewWidget.frames = [];
-          return;
-        }
-
-        const params = new URLSearchParams({
-          video: sourceValue,
-          framerate: getWidgetValue("framerate", 0) || 0,
-          custom_width: getWidgetValue("custom_width", 0) || 0,
-          custom_height: getWidgetValue("custom_height", 0) || 0,
-          frame_load_cap: getWidgetValue("frame_load_cap", 0) || 0,
-          skip_first_frames: getWidgetValue("skip_first_frames", 0) || 0,
-          select_every_nth: getWidgetValue("select_every_nth", 1) || 1,
-          format: getWidgetValue("format", "None") || "None",
-          max_preview_frames: 120,
-        });
-
-        const requestId = ++previewState.requestId;
-        stopAnimation();
-        previewWidget.frames = [];
-        previewWidget.frameIndex = 0;
-        previewWidget.parentEl.style.display = "none";
-
-        try {
-          const response = await api.fetchApi(
-            `/videomaskeditor/preview?${params.toString()}`,
-          );
-          if (!response.ok) {
-            const message = await response.text();
-            throw new Error(message || "Failed to load preview");
-          }
-
-          const data = await response.json();
-          const frames = data.frames || [];
-          if (!frames.length || requestId !== previewState.requestId) {
-            return;
-          }
-
-          // Calculate frame duration based on the effective fps (the target framerate)
-          // This represents how fast the selected frames should play back
-          previewWidget.frameDuration = data.fps > 0 ? 1000 / data.fps : 100;
-          previewWidget.frames = new Array(frames.length);
-
-          console.log(
-            `[VideoPreview] Loaded ${frames.length} frames at ${data.fps} fps (frame duration: ${previewWidget.frameDuration}ms)`,
-          );
-
-          let loadedCount = 0;
-          frames.forEach((frameInfo, idx) => {
-            const img = new Image();
-            img.onload = () => {
-              if (requestId !== previewState.requestId) {
-                return;
-              }
-              const canvas = document.createElement("canvas");
-              canvas.width = img.width;
-              canvas.height = img.height;
-              const ctx = canvas.getContext("2d");
-              ctx.drawImage(img, 0, 0);
-              const imageData = ctx.getImageData(0, 0, img.width, img.height);
-              previewWidget.frames[idx] = {
-                imageData,
-                width: img.width,
-                height: img.height,
-              };
-
-              loadedCount++;
-              if (
-                loadedCount === frames.length &&
-                requestId === previewState.requestId
-              ) {
-                previewWidget.parentEl.style.display = "block";
-                startAnimation();
-              }
-            };
-
-            img.onerror = (e) => {
-              console.error(
-                `[VideoPreview] Failed to decode preview frame ${idx}:`,
-                e,
-              );
-            };
-
-            img.src = `data:image/png;base64,${frameInfo.data}`;
-          });
-        } catch (err) {
-          if (requestId === previewState.requestId) {
-            console.error("[VideoPreview] Preview load failed", err);
-            previewWidget.parentEl.style.display = "none";
-          }
-        }
       };
 
       const scheduleInputPreview = () => {

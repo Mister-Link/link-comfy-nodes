@@ -699,6 +699,8 @@ def _register_preview_route():
     async def video_mask_editor_preview(request):  # pylint: disable=unused-variable
         params = request.rel_url.query
         video_name = params.get("video")
+        node_id = params.get("node_id")  # Added to get keyframes for this node
+
         if not video_name:
             return web.json_response({"error": "Missing video parameter"}, status=400)
 
@@ -753,9 +755,41 @@ def _register_preview_route():
         except Exception as exc:  # pragma: no cover - surfaced in UI
             return web.json_response({"error": str(exc)}, status=400)
 
+        # --- Generate masks and apply overlays ---
+        masks_array = None
+        if node_id:
+            try:
+                masks_array = _generate_masks_from_keyframes(
+                    node_id,
+                    len(processing_result["frames"]),
+                    processing_result["target_width"],
+                    processing_result["target_height"],
+                )
+            except Exception as e:
+                _log(f"Could not generate masks for preview: {e}")
+        # --- End mask generation ---
+
         frames_payload = []
         for idx, frame_data in enumerate(processing_result["frames"]):
             frame_255 = np.clip(frame_data * 255.0, 0, 255).astype(np.uint8)
+
+            # --- Apply mask overlay if available ---
+            if masks_array is not None and idx < len(masks_array):
+                mask = masks_array[idx]
+                if np.any(mask > 0.5):
+                    red_overlay = np.zeros_like(frame_255)
+                    red_overlay[:, :, 0] = 255  # Red channel
+                    mask_3d = np.expand_dims(mask, axis=-1)
+
+                    # Blend frame with red overlay using 0.6 alpha
+                    alpha = 0.6
+                    frame_255 = np.where(
+                        mask_3d > 0.5,
+                        cv2.addWeighted(frame_255, 1 - alpha, red_overlay, alpha, 0),
+                        frame_255,
+                    ).astype(np.uint8)
+            # --- End overlay ---
+
             if frame_255.ndim == 3 and frame_255.shape[2] == 1:
                 frame_255 = frame_255[:, :, 0]
 
