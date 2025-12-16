@@ -114,10 +114,11 @@ function openMaskEditor(node, previewWidget) {
       interpolateCheckboxContainer.style.display = "none";
     }
 
-    // Clear the frame when switching modes
-    maskRect = null;
-    paintMaskData = null;
-    lastRenderedKeyframeIndex = -1;
+    // Don't clear anything when switching modes - allow coexistence
+    // maskRect = null;
+    // paintMaskData = null;
+    // Don't reset lastRenderedKeyframeIndex to preserve current mask state
+    // lastRenderedKeyframeIndex = -1;
 
     drawCanvas();
   });
@@ -628,12 +629,20 @@ function openMaskEditor(node, previewWidget) {
     let paintDataToShow = null;
 
     // By default, clear the mask unless we find a keyframe or are editing
-    if (!isDrawing && !isDragging && !isResizing) {
+    // Don't clear if we're actively painting either, or if we have paint data for this frame
+    if (
+      !isDrawing &&
+      !isDragging &&
+      !isResizing &&
+      !isPainting &&
+      !(paintMaskData && paintMaskFrameIndex === dialogFrameIndex)
+    ) {
       maskRect = null;
     }
 
     if (activeKeyframe) {
-      if (activeKeyframe.type === "bbox") {
+      // Support hybrid keyframes with both bbox and painted data
+      if (activeKeyframe.type === "bbox" || activeKeyframe.bbox) {
         showBbox = true;
         if (!isDrawing && !isDragging && !isResizing) {
           // Apply interpolation if enabled and there's a next bbox keyframe
@@ -694,28 +703,31 @@ function openMaskEditor(node, previewWidget) {
             maskRect = activeKeyframe.bbox ? { ...activeKeyframe.bbox } : null;
           }
         }
-      } else if (activeKeyframe.type === "painted") {
+      }
+
+      // Also check for painted data (can coexist with bbox)
+      if (activeKeyframe.type === "painted" || activeKeyframe.mask_data) {
         showPaint = true;
         paintDataToShow = activeKeyframe.mask_data;
       }
     }
 
-    // Active bbox editing always takes precedence and hides any underlying paint
+    // Active bbox editing takes precedence but doesn't hide paint
     if (isDrawing || isDragging || isResizing) {
       showBbox = true;
-      showPaint = false;
+      // showPaint remains as-is, allowing both to show
     }
 
-    // If actively painting, hide bbox completely
+    // If actively painting, don't hide bbox
     if (isPainting) {
-      showBbox = false;
-      maskRect = null;
+      // showBbox remains as-is
+      // maskRect remains as-is
     }
 
-    // If a bbox is active (from a keyframe or edit), it hides paint
-    if (maskRect) {
-      showPaint = false;
-    }
+    // Both bbox and paint can be visible simultaneously
+    // if (maskRect) {
+    //   showPaint = false;
+    // }
 
     // --- RENDER ---
 
@@ -1147,30 +1159,30 @@ function openMaskEditor(node, previewWidget) {
     const isRightClick = e.button === 2;
 
     if (maskMode === "paint") {
-      // In paint mode - clear bbox immediately on any click FIRST
-      if (maskRect) {
-        maskRect = null;
-        lastRenderedKeyframeIndex = -1;
-      }
+      // In paint mode - don't clear bbox, allow coexistence
+      // if (maskRect) {
+      //   maskRect = null;
+      //   lastRenderedKeyframeIndex = -1;
+      // }
 
-      // If a bbox keyframe exists on this frame, delete it as painting overrides it.
-      if (
-        keyframes[dialogFrameIndex] &&
-        keyframes[dialogFrameIndex].type === "bbox"
-      ) {
-        delete keyframes[dialogFrameIndex];
-        // Fire-and-forget deletion on the backend
-        api
-          .fetchApi("/videomaskeditor/deletekeyframe", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              node_id: node.id,
-              frame_index: dialogFrameIndex,
-            }),
-          })
-          .catch((err) => console.error("Failed to delete bbox keyframe", err));
-      }
+      // Don't delete bbox keyframe - allow both to exist
+      // if (
+      //   keyframes[dialogFrameIndex] &&
+      //   keyframes[dialogFrameIndex].type === "bbox"
+      // ) {
+      //   delete keyframes[dialogFrameIndex];
+      //   // Fire-and-forget deletion on the backend
+      //   api
+      //     .fetchApi("/videomaskeditor/deletekeyframe", {
+      //       method: "POST",
+      //       headers: { "Content-Type": "application/json" },
+      //       body: JSON.stringify({
+      //         node_id: node.id,
+      //         frame_index: dialogFrameIndex,
+      //       }),
+      //     })
+      //     .catch((err) => console.error("Failed to delete bbox keyframe", err));
+      // }
 
       // Paint mode - start painting or erasing
       isPainting = true;
@@ -1209,27 +1221,27 @@ function openMaskEditor(node, previewWidget) {
         }
         // Otherwise start drawing a new mask
         else {
-          // If a painted keyframe exists, clear it. Bbox drawing takes precedence.
-          if (
-            keyframes[dialogFrameIndex] &&
-            keyframes[dialogFrameIndex].type === "painted"
-          ) {
-            delete keyframes[dialogFrameIndex];
-            api
-              .fetchApi("/videomaskeditor/deletekeyframe", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  node_id: node.id,
-                  frame_index: dialogFrameIndex,
-                }),
-              })
-              .catch((err) =>
-                console.error("Failed to delete painted keyframe", err),
-              );
-            // Redraw to remove the old painted mask before starting to draw the bbox
-            drawCanvas();
-          }
+          // Don't delete painted keyframe - allow both to exist
+          // if (
+          //   keyframes[dialogFrameIndex] &&
+          //   keyframes[dialogFrameIndex].type === "painted"
+          // ) {
+          //   delete keyframes[dialogFrameIndex];
+          //   api
+          //     .fetchApi("/videomaskeditor/deletekeyframe", {
+          //       method: "POST",
+          //       headers: { "Content-Type": "application/json" },
+          //       body: JSON.stringify({
+          //         node_id: node.id,
+          //         frame_index: dialogFrameIndex,
+          //       }),
+          //     })
+          //     .catch((err) =>
+          //       console.error("Failed to delete painted keyframe", err),
+          //     );
+          //   // Redraw to remove the old painted mask before starting to draw the bbox
+          //   drawCanvas();
+          // }
 
           isDrawing = true;
           maskRect = { x: startX, y: startY, width: 0, height: 0 };
@@ -1435,10 +1447,13 @@ function openMaskEditor(node, previewWidget) {
         maskRect &&
         (wasDrawing || wasDragging || wasResizing)
       ) {
-        // Save bbox keyframe
+        // Get or create keyframe, preserving any existing painted data
+        const existingKeyframe = keyframes[dialogFrameIndex] || {};
+
         keyframes[dialogFrameIndex] = {
-          type: "bbox",
+          type: existingKeyframe.mask_data ? "hybrid" : "bbox",
           bbox: { ...maskRect },
+          mask_data: existingKeyframe.mask_data || null,
         };
 
         // Send to backend
@@ -1449,8 +1464,9 @@ function openMaskEditor(node, previewWidget) {
             body: JSON.stringify({
               node_id: node.id,
               frame_index: dialogFrameIndex,
-              type: "bbox",
-              mask_data: maskRect,
+              type: keyframes[dialogFrameIndex].type,
+              bbox: keyframes[dialogFrameIndex].bbox,
+              mask_data: keyframes[dialogFrameIndex].mask_data,
             }),
           });
         } catch (error) {
@@ -1482,8 +1498,12 @@ function openMaskEditor(node, previewWidget) {
         }
         const base64 = btoa(binary);
 
+        // Get or create keyframe, preserving any existing bbox data
+        const existingKeyframe = keyframes[dialogFrameIndex] || {};
+
         keyframes[dialogFrameIndex] = {
-          type: "painted",
+          type: existingKeyframe.bbox ? "hybrid" : "painted",
+          bbox: existingKeyframe.bbox || null,
           mask_data: base64,
         };
 
@@ -1495,8 +1515,9 @@ function openMaskEditor(node, previewWidget) {
             body: JSON.stringify({
               node_id: node.id,
               frame_index: dialogFrameIndex,
-              type: "painted",
-              mask_data: base64,
+              type: keyframes[dialogFrameIndex].type,
+              bbox: keyframes[dialogFrameIndex].bbox,
+              mask_data: keyframes[dialogFrameIndex].mask_data,
             }),
           });
         } catch (error) {

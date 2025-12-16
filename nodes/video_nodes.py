@@ -131,6 +131,7 @@ def _generate_masks_from_keyframes(
     - Frames before the first keyframe have blank masks (all zeros)
     - Frames at or after a keyframe use that keyframe's mask until the next keyframe
     - Each keyframe's mask applies forward until another keyframe is encountered
+    - Hybrid keyframes combine both bbox and painted masks (union)
     """
     if not node_id or str(node_id) not in _mask_keyframes:
         # No keyframes, return all-zero masks (blank)
@@ -143,6 +144,14 @@ def _generate_masks_from_keyframes(
     # Sort keyframes by frame index
     sorted_keyframes = sorted(keyframes.items(), key=lambda x: int(x[0]))
     keyframe_indices = [int(kf[0]) for kf in sorted_keyframes]
+
+    _log(
+        f"Generating masks for node {node_id}: {len(keyframes)} keyframes, {frame_count} frames"
+    )
+    for kf_idx, kf_data in sorted_keyframes:
+        _log(
+            f"  Keyframe {kf_idx}: type={kf_data.get('type')}, has_bbox={bool(kf_data.get('bbox'))}, has_mask_data={bool(kf_data.get('mask_data'))}"
+        )
 
     masks = np.zeros((frame_count, height, width), dtype=np.float32)
 
@@ -177,15 +186,16 @@ def _generate_masks_from_keyframes(
 
         mask_type = prev_kf_data.get("type", "bbox")
 
-        if mask_type == "bbox":
+        # Skip empty keyframes
+        if mask_type == "empty":
+            continue
+
+        # Handle bbox mask (including hybrid)
+        if mask_type in ("bbox", "hybrid") and prev_kf_data.get("bbox"):
             # Interpolate bbox position between keyframes
             prev_bbox = prev_kf_data.get("bbox", {})
 
-            if (
-                next_kf_data
-                and next_kf_data.get("type") == "bbox"
-                and next_kf_idx is not None
-            ):
+            if next_kf_data and next_kf_data.get("bbox") and next_kf_idx is not None:
                 # Interpolate between two bbox keyframes
                 next_bbox = next_kf_data.get("bbox", {})
 
@@ -222,22 +232,31 @@ def _generate_masks_from_keyframes(
 
             masks[frame_idx, y : y + h, x : x + w] = 1.0
 
-        elif mask_type == "painted":
+        # Handle painted mask (including hybrid)
+        if mask_type in ("painted", "hybrid") and prev_kf_data.get("mask_data"):
             # Decode painted mask from base64
-            import base64
-
-            mask_data = active_keyframe.get("mask_data", "")
+            mask_data = prev_kf_data.get("mask_data", "")
             if mask_data:
                 try:
+                    _log(
+                        f"Processing painted mask for frame {frame_idx}, type={mask_type}, data_len={len(mask_data)}"
+                    )
                     decoded = base64.b64decode(mask_data)
                     mask_array = np.frombuffer(decoded, dtype=np.float32)
+                    _log(
+                        f"Decoded mask array shape would be: {len(mask_array)} -> ({height}, {width}) = {height * width}"
+                    )
                     mask_array = mask_array.reshape((height, width))
-                    masks[frame_idx] = mask_array
+                    # Union with existing mask (take maximum)
+                    masks[frame_idx] = np.maximum(masks[frame_idx], mask_array)
+                    _log(
+                        f"Applied painted mask, non-zero pixels: {np.count_nonzero(mask_array > 0.5)}"
+                    )
                 except Exception as e:
                     _log(f"Failed to decode painted mask: {e}")
-                    masks[frame_idx] = np.ones((height, width), dtype=np.float32)
-            else:
-                masks[frame_idx] = np.ones((height, width), dtype=np.float32)
+                    import traceback
+
+                    _log(traceback.format_exc())
 
     return masks
 
@@ -1028,8 +1047,9 @@ def _register_keyframe_routes():
             data = await request.json()
             node_id = data.get("node_id")
             frame_index = data.get("frame_index")
-            mask_type = data.get("type", "bbox")  # "bbox" or "painted"
-            mask_data = data.get("mask_data")  # bbox dict or base64 painted mask
+            mask_type = data.get("type", "bbox")  # "bbox", "painted", or "hybrid"
+            bbox_data = data.get("bbox")  # bbox dict
+            mask_data = data.get("mask_data")  # base64 painted mask
 
             if node_id is None or frame_index is None:
                 return web.json_response(
@@ -1040,10 +1060,11 @@ def _register_keyframe_routes():
             if node_id not in _mask_keyframes:
                 _mask_keyframes[node_id] = {}
 
+            # Support hybrid keyframes with both bbox and painted data
             _mask_keyframes[node_id][str(frame_index)] = {
                 "type": mask_type,
-                "bbox": mask_data if mask_type == "bbox" else None,
-                "mask_data": mask_data if mask_type == "painted" else None,
+                "bbox": bbox_data,
+                "mask_data": mask_data,
             }
 
             _log(
