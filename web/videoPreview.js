@@ -1804,13 +1804,15 @@ function openMaskEditor(node, previewWidget) {
         `[VideoMaskEditor] Loaded ${frames.length} unmasked frames at ${data.fps} fps`,
       );
 
-      let loadedCount = 0;
-      for (let idx = 0; idx < frames.length; idx++) {
-        const frameInfo = frames[idx];
-        const img = new Image();
-        img.src = "data:image/png;base64," + frameInfo.data;
+      // Progressive loading: load first 8 frames immediately, then load rest in parallel chunks
+      const INITIAL_FRAMES = Math.min(8, frames.length);
+      const CHUNK_SIZE = 8;
 
-        await new Promise((resolve) => {
+      const decodeFrame = (frameInfo, idx) => {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.src = "data:image/webp;base64," + frameInfo.data;
+
           img.onload = () => {
             const tempCanvas = document.createElement("canvas");
             tempCanvas.width = img.width;
@@ -1822,32 +1824,71 @@ function openMaskEditor(node, previewWidget) {
               width: img.width,
               height: img.height,
             };
-            loadedCount++;
-            resolve();
+            resolve(true);
           };
+
           img.onerror = () => {
             console.error(`[VideoMaskEditor] Failed to load frame ${idx}`);
-            resolve();
+            resolve(false);
           };
         });
+      };
+
+      // Load first frames to show something quickly
+      for (let idx = 0; idx < INITIAL_FRAMES; idx++) {
+        await decodeFrame(frames[idx], idx);
       }
 
+      // Start animation with initial frames
       dialogFrames.loading = false;
+      drawCanvas();
+      updateScrubber();
+      startAnimation();
+
       console.log(
-        `[VideoMaskEditor] Loaded ${loadedCount}/${frames.length} frames`,
+        `[VideoMaskEditor] Initial ${INITIAL_FRAMES} frames loaded, loading rest...`,
       );
+
+      // Load remaining frames in parallel chunks (non-blocking)
+      if (frames.length > INITIAL_FRAMES) {
+        const loadRemainingFrames = async () => {
+          for (
+            let chunkStart = INITIAL_FRAMES;
+            chunkStart < frames.length;
+            chunkStart += CHUNK_SIZE
+          ) {
+            const chunkEnd = Math.min(chunkStart + CHUNK_SIZE, frames.length);
+            const chunkPromises = [];
+
+            for (let idx = chunkStart; idx < chunkEnd; idx++) {
+              chunkPromises.push(decodeFrame(frames[idx], idx));
+            }
+
+            await Promise.all(chunkPromises);
+          }
+
+          const loadedCount = dialogFrames.frames.filter(Boolean).length;
+          console.log(
+            `[VideoMaskEditor] All frames loaded: ${loadedCount}/${frames.length}`,
+          );
+        };
+
+        // Load rest in background
+        loadRemainingFrames().catch((err) => {
+          console.error(
+            "[VideoMaskEditor] Error loading remaining frames:",
+            err,
+          );
+        });
+      }
     } catch (error) {
       console.error("[VideoMaskEditor] Error loading unmasked frames:", error);
       dialogFrames.loading = false;
     }
   };
 
-  // Initial draw and start animation
-  Promise.all([loadKeyframes(), loadUnmaskedFrames()]).then(() => {
-    drawCanvas();
-    updateScrubber();
-    startAnimation();
-  });
+  // Initial load - keyframes and progressive frame loading
+  Promise.all([loadKeyframes(), loadUnmaskedFrames()]);
 
   // Helper function to close dialog
   const closeDialog = () => {
@@ -2035,7 +2076,7 @@ app.registerExtension({
           let loadedCount = 0;
           frames.forEach((frameInfo, idx) => {
             const img = new Image();
-            img.src = "data:image/png;base64," + frameInfo.data;
+            img.src = "data:image/webp;base64," + frameInfo.data;
             img.onload = () => {
               const canvas = document.createElement("canvas");
               canvas.width = img.width;

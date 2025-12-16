@@ -5,6 +5,7 @@ import json
 import os
 import random
 import zipfile
+from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
@@ -29,6 +30,8 @@ IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"]
 BIGMAX = 2**53 - 1
 DIMMAX = 8192
 DEFAULT_PREVIEW_FRAME_LIMIT = 120
+PREVIEW_CACHE_MAX_ITEMS = 5  # Increased since WebP is smaller
+PREVIEW_CACHE_MAX_BYTES = 20_000_000  # Reduced since WebP is more efficient
 
 
 def _log(message: str):
@@ -68,6 +71,7 @@ _mask_regions: Dict[str, MaskRegion] = {}
 _mask_regions_by_video: Dict[str, MaskRegion] = {}
 _mask_versions: Dict[str, int] = {}
 _mask_keyframes: Dict[str, Dict] = {}  # node_id -> {frame_index: mask_data}
+_preview_cache: "OrderedDict[str, Dict]" = OrderedDict()
 
 # Persistence file path
 _KEYFRAMES_CACHE_FILE = os.path.join(
@@ -104,6 +108,7 @@ def _clear_stale_masks():
     _mask_keyframes.clear()
     _save_keyframes_to_disk()
     _log("Cleared all mask regions and keyframes")
+    _preview_cache.clear()
 
 
 def _increment_mask_version(node_id: str) -> int:
@@ -113,6 +118,7 @@ def _increment_mask_version(node_id: str) -> int:
     node_id = str(node_id)
     _mask_versions[node_id] = _mask_versions.get(node_id, 0) + 1
     _log(f"Mask version for node {node_id} -> {_mask_versions[node_id]}")
+    _preview_cache.clear()  # Avoid serving stale cached previews
     return _mask_versions[node_id]
 
 
@@ -120,6 +126,58 @@ def _get_mask_version(node_id: Optional[str]) -> int:
     if not node_id:
         return 0
     return _mask_versions.get(str(node_id), 0)
+
+
+def _preview_cache_key(
+    video_path: str,
+    video_mtime: float,
+    framerate: int,
+    custom_width: int,
+    custom_height: int,
+    frame_load_cap: int,
+    skip_first_frames: int,
+    select_every_nth: int,
+    max_preview_frames: int,
+    skip_mask: bool,
+    mask_version: int,
+) -> str:
+    """Create a stable cache key for preview responses."""
+    key_tuple = (
+        video_path,
+        round(video_mtime, 3),
+        framerate,
+        custom_width,
+        custom_height,
+        frame_load_cap,
+        skip_first_frames,
+        select_every_nth,
+        max_preview_frames,
+        skip_mask,
+        mask_version,
+    )
+    return json.dumps(key_tuple, separators=(",", ":"))
+
+
+def _maybe_cache_preview(key: str, payload: Dict):
+    """Cache preview payload when it is reasonably small."""
+    try:
+        total_bytes = sum(
+            len(frame.get("data", "")) for frame in payload.get("frames", [])
+        )
+    except Exception:
+        total_bytes = PREVIEW_CACHE_MAX_BYTES + 1
+
+    if total_bytes > PREVIEW_CACHE_MAX_BYTES:
+        _log(
+            f"Skipping preview cache (payload too large: {total_bytes} bytes, limit {PREVIEW_CACHE_MAX_BYTES})"
+        )
+        return
+
+    _preview_cache[key] = payload
+    _preview_cache.move_to_end(key)
+
+    while len(_preview_cache) > PREVIEW_CACHE_MAX_ITEMS:
+        _preview_cache.popitem(last=False)
 
 
 def _generate_masks_from_keyframes(
@@ -243,10 +301,39 @@ def _generate_masks_from_keyframes(
                     )
                     decoded = base64.b64decode(mask_data)
                     mask_array = np.frombuffer(decoded, dtype=np.float32)
+
+                    # Get stored mask dimensions (from when it was painted)
+                    stored_width = prev_kf_data.get("mask_width", width)
+                    stored_height = prev_kf_data.get("mask_height", height)
+
                     _log(
-                        f"Decoded mask array shape would be: {len(mask_array)} -> ({height}, {width}) = {height * width}"
+                        f"Mask dimensions: stored=({stored_height}, {stored_width}), target=({height}, {width})"
                     )
-                    mask_array = mask_array.reshape((height, width))
+
+                    # Reshape to original dimensions
+                    expected_size = stored_height * stored_width
+                    if len(mask_array) != expected_size:
+                        _log(
+                            f"WARNING: Mask size mismatch. Expected {expected_size}, got {len(mask_array)}"
+                        )
+                        # Try to use the mask data length to infer dimensions
+                        stored_height = int(np.sqrt(len(mask_array)))
+                        stored_width = len(mask_array) // stored_height
+
+                    mask_array = mask_array.reshape((stored_height, stored_width))
+
+                    # Resize mask if dimensions don't match target
+                    if stored_width != width or stored_height != height:
+                        _log(
+                            f"Resizing mask from ({stored_height}, {stored_width}) to ({height}, {width})"
+                        )
+                        # Use OpenCV to resize the mask
+                        mask_array = cv2.resize(
+                            mask_array,
+                            (width, height),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+
                     # Union with existing mask (take maximum)
                     masks[frame_idx] = np.maximum(masks[frame_idx], mask_array)
                     _log(
@@ -830,12 +917,47 @@ def _register_preview_route():
         frame_load_cap = _int_param("frame_load_cap", 0, 0)
         skip_first_frames = _int_param("skip_first_frames", 0, 0)
         select_every_nth = _int_param("select_every_nth", 1, 1)
-        max_preview_frames = min(
-            _int_param("max_preview_frames", DEFAULT_PREVIEW_FRAME_LIMIT, 1), 120
+        max_preview_frames = _int_param(
+            "max_preview_frames", DEFAULT_PREVIEW_FRAME_LIMIT, 1
         )
+        skip_mask = params.get("skip_mask", "false").lower() == "true"
+
+        # Performance optimization: aggressive downscaling for dialog previews
+        preview_downscale = 2 if skip_mask else 1
+        if preview_downscale > 1:
+            if custom_width > 0:
+                custom_width = max(64, custom_width // preview_downscale)
+            if custom_height > 0:
+                custom_height = max(64, custom_height // preview_downscale)
+
+        mask_version = _get_mask_version(node_id)
+        cache_key = None
 
         try:
             video_path = folder_paths.get_annotated_filepath(video_name)
+            video_mtime = os.path.getmtime(video_path)
+
+            cache_key = _preview_cache_key(
+                video_path,
+                video_mtime,
+                framerate,
+                custom_width,
+                custom_height,
+                frame_load_cap,
+                skip_first_frames,
+                select_every_nth,
+                max_preview_frames,
+                skip_mask,
+                0 if skip_mask else mask_version,
+            )
+
+            if cache_key in _preview_cache:
+                cached_payload = _preview_cache[cache_key]
+                _preview_cache.move_to_end(cache_key)
+                _log(
+                    f"Preview cache HIT for {video_name} ({len(cached_payload.get('frames', []))} frames)"
+                )
+                return web.json_response(cached_payload)
 
             # Detect if it's a directory or file
             if os.path.isdir(video_path):
@@ -865,7 +987,6 @@ def _register_preview_route():
 
         # --- Generate masks and apply overlays ---
         masks_array = None
-        skip_mask = params.get("skip_mask", "false").lower() == "true"
         if node_id and not skip_mask:
             try:
                 masks_array = _generate_masks_from_keyframes(
@@ -953,7 +1074,9 @@ def _register_preview_route():
                 pil_img = Image.fromarray(frame_255)
 
             buffer = BytesIO()
-            pil_img.save(buffer, format="PNG")
+            # Use WebP for better compression and faster transfer
+            # Quality 80 provides good balance between size and quality
+            pil_img.save(buffer, format="WEBP", quality=80, method=4)
             encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
             frames_payload.append(
                 {
@@ -964,15 +1087,18 @@ def _register_preview_route():
                 }
             )
 
-        return web.json_response(
-            {
-                "frames": frames_payload,
-                "fps": processing_result["effective_fps"],
-                "original_fps": processing_result["original_fps"],
-                "selected_frame_indices": processing_result["selected_indices"],
-                "frame_count": processing_result["total_frames"],
-            }
-        )
+        response_payload = {
+            "frames": frames_payload,
+            "fps": processing_result["effective_fps"],
+            "original_fps": processing_result["original_fps"],
+            "selected_frame_indices": processing_result["selected_indices"],
+            "frame_count": processing_result["total_frames"],
+        }
+
+        if cache_key:
+            _maybe_cache_preview(cache_key, response_payload)
+
+        return web.json_response(response_payload)
 
 
 def _register_mask_route():
@@ -1065,6 +1191,8 @@ def _register_keyframe_routes():
                 "type": mask_type,
                 "bbox": bbox_data,
                 "mask_data": mask_data,
+                "mask_width": data.get("mask_width"),
+                "mask_height": data.get("mask_height"),
             }
 
             _log(
