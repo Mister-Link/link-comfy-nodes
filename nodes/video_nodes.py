@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
+import zipfile
 from dataclasses import dataclass
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
@@ -67,6 +69,32 @@ _mask_regions_by_video: Dict[str, MaskRegion] = {}
 _mask_versions: Dict[str, int] = {}
 _mask_keyframes: Dict[str, Dict] = {}  # node_id -> {frame_index: mask_data}
 
+# Persistence file path
+_KEYFRAMES_CACHE_FILE = os.path.join(
+    folder_paths.get_output_directory(), "video_mask_keyframes.json"
+)
+
+
+def _save_keyframes_to_disk():
+    """Save keyframes to disk for persistence."""
+    try:
+        with open(_KEYFRAMES_CACHE_FILE, "w") as f:
+            json.dump(_mask_keyframes, f)
+    except Exception as e:
+        _log(f"Failed to save keyframes to disk: {e}")
+
+
+def _load_keyframes_from_disk():
+    """Load keyframes from disk."""
+    global _mask_keyframes
+    try:
+        if os.path.exists(_KEYFRAMES_CACHE_FILE):
+            with open(_KEYFRAMES_CACHE_FILE, "r") as f:
+                _mask_keyframes = json.load(f)
+            _log(f"Loaded keyframes from disk: {len(_mask_keyframes)} nodes")
+    except Exception as e:
+        _log(f"Failed to load keyframes from disk: {e}")
+
 
 def _clear_stale_masks():
     """Clear mask regions to prevent stale data."""
@@ -74,6 +102,7 @@ def _clear_stale_masks():
     _mask_regions_by_video.clear()
     _mask_versions.clear()
     _mask_keyframes.clear()
+    _save_keyframes_to_disk()
     _log("Cleared all mask regions and keyframes")
 
 
@@ -121,34 +150,69 @@ def _generate_masks_from_keyframes(
     for frame_idx in range(frame_count):
         # Find the active keyframe for this frame:
         # - If before first keyframe, leave as blank (zero mask)
-        # - Otherwise, use the most recent keyframe at or before current frame
-        active_keyframe = None
+        # - Otherwise, interpolate between keyframes or use the most recent one
 
         if frame_idx < keyframe_indices[0]:
             # Before the first keyframe - leave mask as blank (zeros)
             continue
-        else:
-            # Find the most recent keyframe at or before this frame
-            for kf_idx, kf_data in sorted_keyframes:
-                kf_idx = int(kf_idx)
-                if kf_idx <= frame_idx:
-                    active_keyframe = kf_data
-                else:
-                    break
 
-        if not active_keyframe:
-            # No active keyframe, leave as blank (zeros)
+        # Find surrounding keyframes for interpolation
+        prev_kf_idx = None
+        next_kf_idx = None
+        prev_kf_data = None
+        next_kf_data = None
+
+        for i, kf_idx in enumerate(keyframe_indices):
+            if kf_idx <= frame_idx:
+                prev_kf_idx = kf_idx
+                prev_kf_data = keyframes[str(kf_idx)]
+            if kf_idx > frame_idx and next_kf_idx is None:
+                next_kf_idx = kf_idx
+                next_kf_data = keyframes[str(kf_idx)]
+                break
+
+        if prev_kf_data is None:
+            # No previous keyframe, leave as blank
             continue
 
-        mask_type = active_keyframe.get("type", "bbox")
+        mask_type = prev_kf_data.get("type", "bbox")
 
         if mask_type == "bbox":
-            # Create mask from bbox
-            bbox = active_keyframe.get("bbox", {})
-            x = int(bbox.get("x", 0))
-            y = int(bbox.get("y", 0))
-            w = int(bbox.get("width", width))
-            h = int(bbox.get("height", height))
+            # Interpolate bbox position between keyframes
+            prev_bbox = prev_kf_data.get("bbox", {})
+
+            if (
+                next_kf_data
+                and next_kf_data.get("type") == "bbox"
+                and next_kf_idx is not None
+            ):
+                # Interpolate between two bbox keyframes
+                next_bbox = next_kf_data.get("bbox", {})
+
+                # Calculate interpolation factor (0.0 at prev, 1.0 at next)
+                total_frames = next_kf_idx - prev_kf_idx
+                if total_frames > 0:
+                    t = (frame_idx - prev_kf_idx) / total_frames
+                else:
+                    t = 0.0
+
+                # Linear interpolation for all bbox properties
+                x = int(prev_bbox.get("x", 0) * (1 - t) + next_bbox.get("x", 0) * t)
+                y = int(prev_bbox.get("y", 0) * (1 - t) + next_bbox.get("y", 0) * t)
+                w = int(
+                    prev_bbox.get("width", width) * (1 - t)
+                    + next_bbox.get("width", width) * t
+                )
+                h = int(
+                    prev_bbox.get("height", height) * (1 - t)
+                    + next_bbox.get("height", height) * t
+                )
+            else:
+                # No next keyframe or different type, just use previous bbox
+                x = int(prev_bbox.get("x", 0))
+                y = int(prev_bbox.get("y", 0))
+                w = int(prev_bbox.get("width", width))
+                h = int(prev_bbox.get("height", height))
 
             # Clamp to bounds
             x = max(0, min(x, width - 1))
@@ -261,7 +325,11 @@ def _load_frames_from_folder(
 
         try:
             img = Image.open(img_path)
-            if img.mode != "RGB":
+            # Preserve alpha channel if present, otherwise convert to RGB
+            if img.mode == "RGBA":
+                # Keep RGBA mode to preserve alpha channel
+                pass
+            elif img.mode != "RGB":
                 img = img.convert("RGB")
 
             if target_width != width or target_height != height:
@@ -271,6 +339,7 @@ def _load_frames_from_folder(
             if frame.ndim == 2:
                 frame = np.expand_dims(frame, axis=2)
 
+            # Keep all channels for now, will separate RGB/alpha later
             frames_list.append(frame)
             selected_frame_indices.append(frame_index)
             img.close()
@@ -418,8 +487,8 @@ class VideoMaskEditor:
     """Load a video, create bbox for regions, and expose preview endpoints."""
 
     CATEGORY = "Video/Masking"
-    RETURN_TYPES = ("IMAGE", "INT", "MASK")
-    RETURN_NAMES = ("frames", "frame_count", "masks")
+    RETURN_TYPES = ("IMAGE", "INT", "MASK", "MASK")
+    RETURN_NAMES = ("frames", "frame_count", "masks", "alpha_channel")
     FUNCTION = "load_video"
     OUTPUT_NODE = False
 
@@ -592,7 +661,25 @@ class VideoMaskEditor:
             frames_array = np.expand_dims(frames_array, axis=3)
         frames_array = np.clip(frames_array, 0.0, 1.0)
 
-        frames_tensor = torch.from_numpy(frames_array)
+        # Separate RGB and alpha channels
+        if frames_array.shape[-1] == 4:
+            # Has alpha - split into RGB (3 channels) and alpha (1 channel)
+            rgb_array = frames_array[:, :, :, :3]
+            alpha_array = frames_array[:, :, :, 3]  # Shape: (N, H, W)
+        else:
+            # No alpha - use RGB as-is, create full opacity alpha
+            rgb_array = frames_array
+            if rgb_array.shape[-1] == 1:
+                # Grayscale - convert to RGB
+                rgb_array = np.repeat(rgb_array, 3, axis=3)
+            # Create full alpha (all ones)
+            alpha_array = np.ones(
+                (frames_array.shape[0], frames_array.shape[1], frames_array.shape[2]),
+                dtype=np.float32,
+            )
+
+        frames_tensor = torch.from_numpy(rgb_array)
+        alpha_tensor = torch.from_numpy(alpha_array)
 
         _log(f"is_wan setting: {is_wan}")
         _log(f"unique_id: {unique_id}")
@@ -629,9 +716,10 @@ class VideoMaskEditor:
                 )
 
         output_dir = folder_paths.get_output_directory()
-        for idx, frame_data in enumerate(frames_list):
-            frame_255 = (frame_data * 255).astype(np.uint8)
-            pil_img = Image.fromarray(frame_255)
+        for idx in range(rgb_array.shape[0]):
+            # Save RGB frames only (alpha saved separately)
+            frame_rgb = (rgb_array[idx] * 255).astype(np.uint8)
+            pil_img = Image.fromarray(frame_rgb)
             preview_name = f"vme_frame_{unique_id}_{idx:04d}.png"
             pil_img.save(os.path.join(output_dir, preview_name))
 
@@ -647,8 +735,9 @@ class VideoMaskEditor:
 
         masks_tensor = torch.from_numpy(masks_array)
         _log(f"Masks tensor shape: {masks_tensor.shape}, dtype: {masks_tensor.dtype}")
+        _log(f"Alpha tensor shape: {alpha_tensor.shape}, dtype: {alpha_tensor.dtype}")
 
-        return frames_tensor, frames_tensor.shape[0], masks_tensor
+        return frames_tensor, frames_tensor.shape[0], masks_tensor, alpha_tensor
 
     @classmethod
     def IS_CHANGED(cls, source, **kwargs):
@@ -757,7 +846,8 @@ def _register_preview_route():
 
         # --- Generate masks and apply overlays ---
         masks_array = None
-        if node_id:
+        skip_mask = params.get("skip_mask", "false").lower() == "true"
+        if node_id and not skip_mask:
             try:
                 masks_array = _generate_masks_from_keyframes(
                     node_id,
@@ -771,29 +861,78 @@ def _register_preview_route():
 
         frames_payload = []
         for idx, frame_data in enumerate(processing_result["frames"]):
+            # Keep RGBA if present, otherwise use RGB
+            has_alpha = frame_data.shape[-1] == 4
             frame_255 = np.clip(frame_data * 255.0, 0, 255).astype(np.uint8)
 
             # --- Apply mask overlay if available ---
             if masks_array is not None and idx < len(masks_array):
                 mask = masks_array[idx]
                 if np.any(mask > 0.5):
-                    red_overlay = np.zeros_like(frame_255)
-                    red_overlay[:, :, 0] = 255  # Red channel
                     mask_3d = np.expand_dims(mask, axis=-1)
 
-                    # Blend frame with red overlay using 0.6 alpha
-                    alpha = 0.6
-                    frame_255 = np.where(
-                        mask_3d > 0.5,
-                        cv2.addWeighted(frame_255, 1 - alpha, red_overlay, alpha, 0),
-                        frame_255,
-                    ).astype(np.uint8)
+                    if has_alpha and frame_255.shape[-1] == 4:
+                        # For RGBA images, add red tint to show mask while preserving transparency
+                        # Use vectorized operations for speed
+
+                        # Get the alpha channel
+                        alpha_channel = frame_255[:, :, 3].astype(np.float32)
+
+                        # Convert RGB channels to float for blending
+                        frame_float = frame_255[:, :, :3].astype(np.float32)
+
+                        # Blend red tint where mask is active
+                        red_mix = 0.5
+                        red = np.array([255.0, 0.0, 0.0], dtype=np.float32)
+
+                        # Add red tint to RGB
+                        frame_float = np.where(
+                            mask_3d > 0.5,
+                            np.clip(
+                                frame_float + (red - frame_float) * red_mix, 0, 255
+                            ),
+                            frame_float,
+                        )
+
+                        # For transparent areas in the mask, boost alpha to make red visible
+                        alpha_channel = np.where(
+                            (mask[:, :] > 0.5) & (alpha_channel < 128),
+                            np.maximum(alpha_channel, 128),
+                            alpha_channel,
+                        )
+
+                        # Update the frame
+                        frame_255[:, :, :3] = np.clip(frame_float, 0, 255).astype(
+                            np.uint8
+                        )
+                        frame_255[:, :, 3] = np.clip(alpha_channel, 0, 255).astype(
+                            np.uint8
+                        )
+                    else:
+                        # For RGB images, use simple addWeighted
+                        red_overlay = np.zeros_like(frame_255)
+                        red_overlay[:, :, 0] = 255  # Red channel
+
+                        # Blend frame with red overlay using 0.5 alpha (50% transparency)
+                        alpha = 0.5
+                        frame_255 = np.where(
+                            mask_3d > 0.5,
+                            cv2.addWeighted(
+                                frame_255, 1 - alpha, red_overlay, alpha, 0
+                            ),
+                            frame_255,
+                        ).astype(np.uint8)
             # --- End overlay ---
 
             if frame_255.ndim == 3 and frame_255.shape[2] == 1:
                 frame_255 = frame_255[:, :, 0]
 
-            pil_img = Image.fromarray(frame_255)
+            # Create PIL image with proper mode
+            if has_alpha and frame_255.shape[-1] == 4:
+                pil_img = Image.fromarray(frame_255, mode="RGBA")
+            else:
+                pil_img = Image.fromarray(frame_255)
+
             buffer = BytesIO()
             pil_img.save(buffer, format="PNG")
             encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -911,6 +1050,7 @@ def _register_keyframe_routes():
                 f"Set keyframe for node {node_id}, frame {frame_index}, type {mask_type}"
             )
             _increment_mask_version(node_id)
+            _save_keyframes_to_disk()
 
             # Notify frontend
             PromptServer.instance.send_sync(
@@ -943,6 +1083,7 @@ def _register_keyframe_routes():
                 del _mask_keyframes[node_id][str(frame_index)]
                 _log(f"Deleted keyframe for node {node_id}, frame {frame_index}")
                 _increment_mask_version(node_id)
+                _save_keyframes_to_disk()
 
                 PromptServer.instance.send_sync(
                     "videomaskeditor.mask_updated", {"node_id": node_id}
@@ -989,6 +1130,7 @@ def _register_keyframe_routes():
 
             _log(f"Restored keyframes for node {node_id} (count: {len(keyframes)})")
             _increment_mask_version(node_id)
+            _save_keyframes_to_disk()
 
             # Notify frontend
             PromptServer.instance.send_sync(
@@ -1005,6 +1147,9 @@ _register_preview_route()
 _register_mask_route()
 _register_clear_mask_route()
 _register_keyframe_routes()
+
+# Load keyframes from disk on startup
+_load_keyframes_from_disk()
 
 
 class WANFrameCalculatorNode:
@@ -1053,3 +1198,273 @@ class WANFrameCalculatorNode:
             f"Input frames: {frame_count} → WAN frames ({rounding_mode}): {wan_frames}"
         )
         return (wan_frames,)
+
+
+class ReplaceAlpha:
+    """Replace alpha channel with a color in masked regions."""
+
+    CATEGORY = "Video/Masking"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("frames", "alpha")
+    FUNCTION = "replace_alpha"
+    OUTPUT_NODE = False
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "alpha": ("MASK",),
+                "mask": ("MASK",),
+                "color": ("STRING", {"default": "#FFFFFF"}),
+            }
+        }
+
+    def replace_alpha(
+        self,
+        frames: torch.Tensor,
+        alpha: torch.Tensor,
+        mask: torch.Tensor,
+        color: str,
+    ):
+        """Replace alpha with color in masked regions.
+
+        Args:
+            frames: RGB frames tensor (N, H, W, 3)
+            alpha: Alpha channel tensor (N, H, W)
+            mask: Mask defining regions to process (N, H, W)
+            color: Hex color string (e.g., "#FFFFFF")
+
+        Returns:
+            RGB frames with alpha replaced by color in masked regions
+        """
+        # Parse hex color to RGB (0-1 range)
+        color = color.strip()
+        if color.startswith("#"):
+            color = color[1:]
+
+        try:
+            r = int(color[0:2], 16) / 255.0
+            g = int(color[2:4], 16) / 255.0
+            b = int(color[4:6], 16) / 255.0
+        except (ValueError, IndexError):
+            _log(f"Invalid color format: {color}, using white")
+            r, g, b = 1.0, 1.0, 1.0
+
+        # Convert to numpy for processing
+        frames_np = frames.cpu().numpy()  # Shape: (N, H, W, 3)
+        alpha_np = alpha.cpu().numpy()  # Shape: (N, H, W)
+        mask_np = mask.cpu().numpy()  # Shape: (N, H, W)
+
+        # Ensure shapes match
+        if (
+            frames_np.shape[0] != alpha_np.shape[0]
+            or frames_np.shape[0] != mask_np.shape[0]
+        ):
+            raise ValueError(
+                f"Frame count mismatch: frames={frames_np.shape[0]}, alpha={alpha_np.shape[0]}, mask={mask_np.shape[0]}"
+            )
+
+        if (
+            frames_np.shape[1:3] != alpha_np.shape[1:3]
+            or frames_np.shape[1:3] != mask_np.shape[1:3]
+        ):
+            raise ValueError(
+                f"Frame size mismatch: frames={frames_np.shape[1:3]}, alpha={alpha_np.shape[1:3]}, mask={mask_np.shape[1:3]}"
+            )
+
+        result = frames_np.copy()
+        result_alpha = alpha_np.copy()
+
+        # Process each frame
+        for i in range(frames_np.shape[0]):
+            frame_rgb = frames_np[i]  # (H, W, 3)
+            frame_alpha = alpha_np[i]  # (H, W)
+            frame_mask = mask_np[i]  # (H, W)
+
+            # Find masked regions (where mask > 0.5)
+            masked_regions = frame_mask > 0.5
+
+            # In masked regions, blend RGB with color based on alpha
+            # Formula: result = rgb * alpha + color * (1 - alpha)
+            if np.any(masked_regions):
+                alpha_3d = frame_alpha[:, :, np.newaxis]  # (H, W, 1)
+                color_rgb = np.array([r, g, b], dtype=np.float32)  # (3,)
+
+                # Apply blending only where masked
+                result[i][masked_regions] = frame_rgb[masked_regions] * alpha_3d[
+                    masked_regions
+                ] + color_rgb * (1.0 - alpha_3d[masked_regions])
+
+                # Set alpha to 1.0 (fully opaque) in masked regions where we replaced transparency
+                result_alpha[i][masked_regions] = 1.0
+
+        # Clip and convert back to tensor
+        result = np.clip(result, 0.0, 1.0)
+        result_tensor = torch.from_numpy(result).to(frames.device)
+        result_alpha_tensor = torch.from_numpy(result_alpha).to(alpha.device)
+
+        return (result_tensor, result_alpha_tensor)
+
+
+class PreviewImageAlpha:
+    """Preview images with alpha transparency (no background replacement)."""
+
+    CATEGORY = "Video/Masking"
+    RETURN_TYPES = ()
+    FUNCTION = "preview_alpha"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "alpha": ("MASK",),
+            }
+        }
+
+    def preview_alpha(self, frames: torch.Tensor, alpha: torch.Tensor):
+        """Preview frames with alpha channel, showing transparency.
+
+        Args:
+            frames: RGB frames tensor (N, H, W, 3)
+            alpha: Alpha channel tensor (N, H, W)
+
+        Returns:
+            Preview data for ComfyUI UI
+        """
+        # Convert to numpy
+        frames_np = frames.cpu().numpy()  # Shape: (N, H, W, 3)
+        alpha_np = alpha.cpu().numpy()  # Shape: (N, H, W)
+
+        # Ensure shapes match
+        if frames_np.shape[0] != alpha_np.shape[0]:
+            raise ValueError(
+                f"Frame count mismatch: frames={frames_np.shape[0]}, alpha={alpha_np.shape[0]}"
+            )
+
+        if frames_np.shape[1:3] != alpha_np.shape[1:3]:
+            raise ValueError(
+                f"Frame size mismatch: frames={frames_np.shape[1:3]}, alpha={alpha_np.shape[1:3]}"
+            )
+
+        # Prepare output for ComfyUI preview
+        results = []
+
+        for i in range(frames_np.shape[0]):
+            # Combine RGB and alpha into RGBA
+            rgba = np.concatenate([frames_np[i], alpha_np[i][:, :, np.newaxis]], axis=2)
+
+            # Convert to uint8
+            rgba_255 = (np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8)
+
+            # Convert to PIL Image with alpha
+            pil_img = Image.fromarray(rgba_255, mode="RGBA")
+
+            # Save to output directory
+            output_dir = folder_paths.get_output_directory()
+            preview_name = f"preview_alpha_{i:04d}.png"
+            preview_path = os.path.join(output_dir, preview_name)
+            pil_img.save(preview_path)
+
+            results.append(
+                {"filename": preview_name, "subfolder": "", "type": "output"}
+            )
+
+        return {"ui": {"images": results}}
+
+
+class SaveImageSequenceZip:
+    """Save image sequence with alpha as RGBA PNGs in a ZIP file."""
+
+    CATEGORY = "Video/Masking"
+    RETURN_TYPES = ()
+    FUNCTION = "save_sequence"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "alpha": ("MASK",),
+                "prefix": ("STRING", {"default": "sequence"}),
+            }
+        }
+
+    def save_sequence(self, frames: torch.Tensor, alpha: torch.Tensor, prefix: str):
+        """Save image sequence with alpha as RGBA PNGs in a ZIP file.
+
+        Args:
+            frames: RGB frames tensor (N, H, W, 3)
+            alpha: Alpha channel tensor (N, H, W)
+            prefix: Filename prefix for images and zip
+
+        Returns:
+            UI result with download link
+        """
+        # Convert to numpy
+        frames_np = frames.cpu().numpy()  # Shape: (N, H, W, 3)
+        alpha_np = alpha.cpu().numpy()  # Shape: (N, H, W)
+
+        # Ensure shapes match
+        if frames_np.shape[0] != alpha_np.shape[0]:
+            raise ValueError(
+                f"Frame count mismatch: frames={frames_np.shape[0]}, alpha={alpha_np.shape[0]}"
+            )
+
+        if frames_np.shape[1:3] != alpha_np.shape[1:3]:
+            raise ValueError(
+                f"Frame size mismatch: frames={frames_np.shape[1:3]}, alpha={alpha_np.shape[1:3]}"
+            )
+
+        # Clean prefix
+        prefix = prefix.strip()
+        if not prefix:
+            prefix = "sequence"
+
+        # Generate random suffix for zip file to avoid overwriting
+        zip_suffix = random.randint(0, 9999999)
+        zip_filename = f"{prefix}_{zip_suffix:07d}.zip"
+
+        # Get output directory
+        output_dir = folder_paths.get_output_directory()
+        zip_path = os.path.join(output_dir, zip_filename)
+
+        # Create ZIP file
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for i in range(frames_np.shape[0]):
+                # Combine RGB and alpha into RGBA
+                rgba = np.concatenate(
+                    [frames_np[i], alpha_np[i][:, :, np.newaxis]], axis=2
+                )
+
+                # Convert to uint8
+                rgba_255 = (np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8)
+
+                # Convert to PIL Image with alpha
+                pil_img = Image.fromarray(rgba_255, mode="RGBA")
+
+                # Save to bytes buffer
+                img_buffer = BytesIO()
+                pil_img.save(img_buffer, format="PNG")
+                img_buffer.seek(0)
+
+                # Add to zip with sequential naming
+                image_filename = f"{prefix}_{i + 1:04d}.png"
+                zipf.writestr(image_filename, img_buffer.getvalue())
+
+        _log(f"Saved {frames_np.shape[0]} images to {zip_path}")
+
+        # Create download URL (ComfyUI's /view endpoint)
+        download_url = f"/view?filename={zip_filename}&type=output"
+
+        # Return UI with download link as HTML
+        return {
+            "ui": {
+                "text": [
+                    f'<a href="{download_url}" target="_blank" style="color: #4a9eff; text-decoration: underline;">Download: {zip_filename}</a>'
+                ],
+            }
+        }

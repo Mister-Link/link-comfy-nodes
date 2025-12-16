@@ -5,6 +5,9 @@ from .nodes import (
     FarthestColorNode,
     ImageRotatorNode,
     PoseImageSetupNode,
+    PreviewImageAlpha,
+    ReplaceAlpha,
+    SaveImageSequenceZip,
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
@@ -16,6 +19,9 @@ NODE_CLASS_MAPPINGS = {
     "Image Rotator": ImageRotatorNode,
     "Pose Image Setup": PoseImageSetupNode,
     "VideoMaskEditor": VideoMaskEditor,
+    "PreviewImageAlpha": PreviewImageAlpha,
+    "ReplaceAlpha": ReplaceAlpha,
+    "SaveImageSequenceZip": SaveImageSequenceZip,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -25,6 +31,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Image Rotator": "Rotate Image",
     "Pose Image Setup": "Pose Image Setup",
     "VideoMaskEditor": "Video Mask Editor",
+    "PreviewImageAlpha": "Preview Image (Alpha)",
+    "ReplaceAlpha": "Replace Alpha",
+    "SaveImageSequenceZip": "Save Image Sequence (ZIP)",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
