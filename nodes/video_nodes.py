@@ -858,15 +858,25 @@ class VideoMaskEditor:
     def IS_CHANGED(cls, source, **kwargs):
         video_path = folder_paths.get_annotated_filepath(source)
         unique_id = kwargs.get("unique_id")
-
-        # Increment version when video file changes to trigger re-execution
-        if unique_id:
-            _increment_mask_version(unique_id)
-
         mask_version = _get_mask_version(unique_id)
-        if os.path.exists(video_path):
-            return f"{os.path.getmtime(video_path)}_{mask_version}"
-        return f"missing_{mask_version}"
+        video_mtime = os.path.getmtime(video_path) if os.path.exists(video_path) else -1
+
+        key = (
+            source,
+            round(video_mtime, 3),
+            kwargs.get("framerate", 0),
+            kwargs.get("custom_width", 0),
+            kwargs.get("custom_height", 0),
+            kwargs.get("frame_load_cap", 0),
+            kwargs.get("skip_first_frames", 0),
+            kwargs.get("select_every_nth", 1),
+            bool(kwargs.get("is_wan", False)),
+            kwargs.get("bg_color", ""),
+            kwargs.get("force_size", ""),
+            str(unique_id),
+            mask_version,
+        )
+        return json.dumps(key, separators=(",", ":"))
 
     @classmethod
     def VALIDATE_INPUTS(cls, source, **kwargs):

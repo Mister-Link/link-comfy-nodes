@@ -1,15 +1,34 @@
 import { app } from "../../scripts/app.js";
 
-function setWidgetVisible(widget, visible) {
-  if (!widget) return;
-  widget.hidden = !visible;
-  if (widget.parentEl) {
-    widget.parentEl.style.display = visible ? "" : "none";
+const removeWidget = (node, name) => {
+  if (!node.widgets) {
+    return null;
   }
-  if (widget.inputEl) {
-    widget.inputEl.style.display = visible ? "" : "none";
+  const index = node.widgets.findIndex((widget) => widget.name === name);
+  if (index === -1) {
+    return null;
   }
-}
+  return node.widgets.splice(index, 1)[0] || null;
+};
+
+const restoreWidget = (node, widget, index) => {
+  if (!node.widgets || !widget) {
+    return;
+  }
+  if (node.widgets.includes(widget)) {
+    return;
+  }
+  const insertAt = index != null && index >= 0 ? index : node.widgets.length;
+  node.widgets.splice(insertAt, 0, widget);
+};
+
+const updateNodeSize = (node) => {
+  if (!node) {
+    return;
+  }
+  node.computeSize?.();
+  node.setDirtyCanvas?.(true, true);
+};
 
 app.registerExtension({
   name: "Comfy.LinkComfy.PixelationDimensions",
@@ -29,12 +48,46 @@ app.registerExtension({
         (w) => w.name === "custom_height",
       );
 
+      this._hiddenWidgets = this._hiddenWidgets || {};
+      if (customWidthWidget) {
+        this._hiddenWidgets.customWidthIndex =
+          this.widgets?.indexOf(customWidthWidget) ?? null;
+      }
+      if (customHeightWidget) {
+        this._hiddenWidgets.customHeightIndex =
+          this.widgets?.indexOf(customHeightWidget) ?? null;
+      }
+
       const updateVisibility = () => {
         const isCustom = presetWidget?.value === "Custom";
-        setWidgetVisible(customWidthWidget, isCustom);
-        setWidgetVisible(customHeightWidget, isCustom);
-        this.computeSize?.();
-        this.setDirtyCanvas?.(true, true);
+        if (isCustom) {
+          restoreWidget(
+            this,
+            this._hiddenWidgets.customWidthWidget || customWidthWidget,
+            this._hiddenWidgets.customWidthIndex,
+          );
+          restoreWidget(
+            this,
+            this._hiddenWidgets.customHeightWidget || customHeightWidget,
+            this._hiddenWidgets.customHeightIndex,
+          );
+          delete this._hiddenWidgets.customWidthWidget;
+          delete this._hiddenWidgets.customHeightWidget;
+        } else {
+          if (!this._hiddenWidgets.customWidthWidget) {
+            this._hiddenWidgets.customWidthWidget = removeWidget(
+              this,
+              "custom_width",
+            );
+          }
+          if (!this._hiddenWidgets.customHeightWidget) {
+            this._hiddenWidgets.customHeightWidget = removeWidget(
+              this,
+              "custom_height",
+            );
+          }
+        }
+        updateNodeSize(this);
       };
 
       if (presetWidget) {
@@ -47,6 +100,14 @@ app.registerExtension({
       }
 
       updateVisibility();
+
+      const onConfigure = this.onConfigure;
+      this.onConfigure = function () {
+        const result = onConfigure?.apply(this, arguments);
+        updateVisibility();
+        return result;
+      };
+
       return res;
     };
   },
