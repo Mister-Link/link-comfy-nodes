@@ -1534,7 +1534,7 @@ class PreviewImageAlpha:
 
 
 class SaveImageSequenceZip:
-    """Save image sequence with alpha as RGBA PNGs in a ZIP file."""
+    """Save connected image/mask sequences as files in a ZIP archive."""
 
     CATEGORY = "Video/Masking"
     RETURN_TYPES = ()
@@ -1544,47 +1544,34 @@ class SaveImageSequenceZip:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {
-                "frames": ("IMAGE",),
-                "alpha": ("MASK",),
-                "prefix": ("STRING", {"default": "sequence"}),
-            }
+            "required": {},
+            "optional": {
+                "input1_prefix": ("STRING", {"default": ""}),
+                "input2_prefix": ("STRING", {"default": ""}),
+                "input3_prefix": ("STRING", {"default": ""}),
+                "input4_prefix": ("STRING", {"default": ""}),
+                "input5_prefix": ("STRING", {"default": ""}),
+                "input6_prefix": ("STRING", {"default": ""}),
+                "input7_prefix": ("STRING", {"default": ""}),
+                "input8_prefix": ("STRING", {"default": ""}),
+            },
         }
 
-    def save_sequence(self, frames: torch.Tensor, alpha: torch.Tensor, prefix: str):
-        """Save image sequence with alpha as RGBA PNGs in a ZIP file.
+    def save_sequence(self, **kwargs):
+        """Save connected image/mask sequences in a ZIP file."""
 
-        Args:
-            frames: RGB frames tensor (N, H, W, 3)
-            alpha: Alpha channel tensor (N, H, W)
-            prefix: Filename prefix for images and zip
-
-        Returns:
-            UI result with download link
-        """
-        # Convert to numpy
-        frames_np = frames.cpu().numpy()  # Shape: (N, H, W, 3)
-        alpha_np = alpha.cpu().numpy()  # Shape: (N, H, W)
-
-        # Ensure shapes match
-        if frames_np.shape[0] != alpha_np.shape[0]:
-            raise ValueError(
-                f"Frame count mismatch: frames={frames_np.shape[0]}, alpha={alpha_np.shape[0]}"
-            )
-
-        if frames_np.shape[1:3] != alpha_np.shape[1:3]:
-            raise ValueError(
-                f"Frame size mismatch: frames={frames_np.shape[1:3]}, alpha={alpha_np.shape[1:3]}"
-            )
-
-        # Clean prefix
-        prefix = prefix.strip()
-        if not prefix:
-            prefix = "sequence"
+        inputs = []
+        for index in range(1, 9):
+            data = kwargs.get(f"input{index}")
+            if data is None:
+                continue
+            prefix = kwargs.get(f"input{index}_prefix", f"input{index}")
+            prefix = prefix.strip() or f"input{index}"
+            inputs.append((f"input{index}", data, prefix))
 
         # Generate random suffix for zip file to avoid overwriting
         zip_suffix = random.randint(0, 9999999)
-        zip_filename = f"{prefix}_{zip_suffix:07d}.zip"
+        zip_filename = f"save_to_zip_{zip_suffix:07d}.zip"
 
         # Get output directory
         output_dir = folder_paths.get_output_directory()
@@ -1592,28 +1579,39 @@ class SaveImageSequenceZip:
 
         # Create ZIP file
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for i in range(frames_np.shape[0]):
-                # Combine RGB and alpha into RGBA
-                rgba = np.concatenate(
-                    [frames_np[i], alpha_np[i][:, :, np.newaxis]], axis=2
-                )
+            for input_name, data, prefix in inputs:
+                if data is None:
+                    continue
+                if isinstance(data, str):
+                    payload = data.encode("utf-8")
+                    ext = self._extension_for_text(data)
+                    file_name = f"{prefix}.{ext}"
+                    zipf.writestr(file_name, payload)
+                    continue
+                if isinstance(data, dict):
+                    payload = json.dumps(data, indent=2).encode("utf-8")
+                    file_name = f"{prefix}.json"
+                    zipf.writestr(file_name, payload)
+                    continue
+                frames = self._normalize_frames(data)
+                if frames.shape[0] == 1:
+                    pil_img = self._to_pil(frames[0], "png")
+                    img_buffer = BytesIO()
+                    pil_img.save(img_buffer, format="PNG")
+                    img_buffer.seek(0)
+                    image_filename = f"{prefix}.png"
+                    zipf.writestr(image_filename, img_buffer.getvalue())
+                else:
+                    digits = max(2, len(str(frames.shape[0])))
+                    for i in range(frames.shape[0]):
+                        pil_img = self._to_pil(frames[i], "png")
+                        img_buffer = BytesIO()
+                        pil_img.save(img_buffer, format="PNG")
+                        img_buffer.seek(0)
+                        image_filename = f"{prefix}_{i + 1:0{digits}d}.png"
+                        zipf.writestr(image_filename, img_buffer.getvalue())
 
-                # Convert to uint8
-                rgba_255 = (np.clip(rgba, 0.0, 1.0) * 255).astype(np.uint8)
-
-                # Convert to PIL Image with alpha
-                pil_img = Image.fromarray(rgba_255, mode="RGBA")
-
-                # Save to bytes buffer
-                img_buffer = BytesIO()
-                pil_img.save(img_buffer, format="PNG")
-                img_buffer.seek(0)
-
-                # Add to zip with sequential naming
-                image_filename = f"{prefix}_{i + 1:04d}.png"
-                zipf.writestr(image_filename, img_buffer.getvalue())
-
-        _log(f"Saved {frames_np.shape[0]} images to {zip_path}")
+        _log(f"Saved ZIP to {zip_path}")
 
         # Create download URL (ComfyUI's /view endpoint)
         download_url = f"/view?filename={zip_filename}&type=output"
@@ -1626,3 +1624,38 @@ class SaveImageSequenceZip:
                 ],
             }
         }
+
+    @staticmethod
+    def _extension_for_text(text: str) -> str:
+        trimmed = text.lstrip()
+        if trimmed.startswith("{") or trimmed.startswith("["):
+            return "json"
+        return "txt"
+
+    @staticmethod
+    def _normalize_frames(data: torch.Tensor) -> np.ndarray:
+        frames = data.detach().cpu().float()
+        if frames.ndim == 2:
+            frames = frames.unsqueeze(0).unsqueeze(-1)
+        elif frames.ndim == 3:
+            if frames.shape[-1] in {1, 3, 4}:
+                frames = frames.unsqueeze(0)
+            else:
+                frames = frames.unsqueeze(-1)
+        elif frames.ndim == 4 and frames.shape[-1] not in {1, 3, 4}:
+            frames = frames.unsqueeze(-1)
+        if frames.ndim != 4:
+            raise ValueError("Expected data with shape (N, H, W, C)")
+        return frames.numpy()
+
+    @staticmethod
+    def _to_pil(frame: np.ndarray, ext: str) -> Image.Image:
+        frame = np.clip(frame, 0.0, 1.0)
+        if frame.shape[-1] == 1:
+            frame_255 = (frame[..., 0] * 255).astype(np.uint8)
+            return Image.fromarray(frame_255, mode="L")
+        if frame.shape[-1] == 4 and ext in {"jpg", "jpeg"}:
+            frame = frame[..., :3]
+        frame_255 = (frame * 255).astype(np.uint8)
+        mode = "RGBA" if frame_255.shape[-1] == 4 else "RGB"
+        return Image.fromarray(frame_255, mode=mode)

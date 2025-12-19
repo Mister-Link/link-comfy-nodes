@@ -10,6 +10,7 @@ from .nodes import (
     PreviewImageAlpha,
     ReplaceAlpha,
     SaveImageSequenceZip,
+    SpritesheetBuilderNode,
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
@@ -23,10 +24,11 @@ NODE_CLASS_MAPPINGS = {
     "Crop to Content": CropToContentNode,
     "Pixelation Dimensions": PixelationDimensionsNode,
     "Pose Image Setup": PoseImageSetupNode,
+    "Spritesheet Builder": SpritesheetBuilderNode,
     "VideoMaskEditor": VideoMaskEditor,
     "PreviewImageAlpha": PreviewImageAlpha,
     "ReplaceAlpha": ReplaceAlpha,
-    "SaveImageSequenceZip": SaveImageSequenceZip,
+    "Save To Zip": SaveImageSequenceZip,
     "ConvertToPixelArt": ConvertToPixelArt,
 }
 
@@ -38,10 +40,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Crop to Content": "Crop to Content",
     "Pixelation Dimensions": "Pixelation Dimensions",
     "Pose Image Setup": "Pose Image Setup",
+    "Spritesheet Builder": "Spritesheet Builder",
     "VideoMaskEditor": "Video Mask Editor",
     "PreviewImageAlpha": "Preview Image (Alpha)",
     "ReplaceAlpha": "Replace Alpha",
-    "SaveImageSequenceZip": "Save Image Sequence (ZIP)",
+    "Save To Zip": "Save to ZIP",
     "ConvertToPixelArt": "Convert to Pixel Art",
 }
 

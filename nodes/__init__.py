@@ -6,6 +6,7 @@ from .image_nodes import (
     ImageRotatorNode,
     PixelationDimensionsNode,
     PoseImageSetupNode,
+    SpritesheetBuilderNode,
 )
 from .pixel_art.node import ConvertToPixelArt
 from .video_nodes import (
@@ -23,6 +24,7 @@ __all__ = [
     "CropToContentNode",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
+    "SpritesheetBuilderNode",
     "ConvertToPixelArt",
     "PreviewImageAlpha",
     "ReplaceAlpha",
