@@ -2,7 +2,6 @@ from pathlib import Path
 
 from .nodes import (
     ColorParserNode,
-    ConvertToPixelArt,
     FarthestColorNode,
     ImageRotatorNode,
     PoseImageSetupNode,
@@ -12,6 +11,7 @@ from .nodes import (
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
+from .nodes.pixel_art.node import ConvertToPixelArt
 
 NODE_CLASS_MAPPINGS = {
     "Hex or 24 Bit Color": ColorParserNode,

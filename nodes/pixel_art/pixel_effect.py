@@ -73,12 +73,11 @@ class PixelEffectModule(nn.Module):
             alpha_intensity, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
         )
 
-        # Pad alpha itself with zeros (true transparency at edges)
+        # Pad alpha with replicate mode to prevent darkening at the edges
         alpha_norm_padded = F.pad(
             alpha_norm.repeat(1, param_num_bins, 1, 1),
             (pad_size, pad_size, pad_size, pad_size),
-            mode="constant",
-            value=0.0,
+            mode="replicate",
         )
 
         kernel_conv = torch.ones(
