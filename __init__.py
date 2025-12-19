@@ -2,6 +2,7 @@ from pathlib import Path
 
 from .nodes import (
     ColorParserNode,
+    ConvertToPixelArt,
     FarthestColorNode,
     ImageRotatorNode,
     PoseImageSetupNode,
@@ -22,6 +23,7 @@ NODE_CLASS_MAPPINGS = {
     "PreviewImageAlpha": PreviewImageAlpha,
     "ReplaceAlpha": ReplaceAlpha,
     "SaveImageSequenceZip": SaveImageSequenceZip,
+    "ConvertToPixelArt": ConvertToPixelArt,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -34,6 +36,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PreviewImageAlpha": "Preview Image (Alpha)",
     "ReplaceAlpha": "Replace Alpha",
     "SaveImageSequenceZip": "Save Image Sequence (ZIP)",
+    "ConvertToPixelArt": "Convert to Pixel Art",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

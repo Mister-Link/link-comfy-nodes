@@ -126,9 +126,7 @@ class PoseImageSetupNode:
 
         # Calculate padding amounts (split evenly on each side)
         left_pad = width_change // 2
-        right_pad = width_change - left_pad
         top_pad = height_change // 2
-        bottom_pad = height_change - top_pad
 
         # Process images
         result_images = []

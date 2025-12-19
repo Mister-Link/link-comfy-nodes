@@ -2,6 +2,7 @@
 
 from .color_nodes import ColorParserNode, FarthestColorNode
 from .image_nodes import ImageRotatorNode, PoseImageSetupNode
+from .pixel_art_nodes import ConvertToPixelArt
 from .video_nodes import (
     PreviewImageAlpha,
     ReplaceAlpha,
@@ -15,6 +16,7 @@ __all__ = [
     "FarthestColorNode",
     "ImageRotatorNode",
     "PoseImageSetupNode",
+    "ConvertToPixelArt",
     "PreviewImageAlpha",
     "ReplaceAlpha",
     "SaveImageSequenceZip",
