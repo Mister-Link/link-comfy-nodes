@@ -61,6 +61,11 @@ class ConvertToPixelArt:
         images = frames.detach().cpu().float()
         if images.ndim != 4:
             raise ValueError("Expected frames with shape (N, H, W, C)")
+        if images.numel():
+            max_val = float(images.max())
+            if max_val > 2.0:
+                images = images / 255.0
+            images = images.clamp(0.0, 1.0)
 
         has_alpha = images.shape[-1] == 4
         rgb = images[..., :3] * 255.0
@@ -73,6 +78,11 @@ class ConvertToPixelArt:
                 raise ValueError("Expected alpha mask with shape (N, H, W)")
             if mask.shape[0] != images.shape[0]:
                 raise ValueError("Alpha mask batch size does not match frames")
+            if mask.numel():
+                max_val = float(mask.max())
+                if max_val > 2.0:
+                    mask = mask / 255.0
+                mask = mask.clamp(0.0, 1.0)
             # Treat mask as alpha (white = opaque).
             alpha_channel = mask * 255.0
         elif has_alpha:
