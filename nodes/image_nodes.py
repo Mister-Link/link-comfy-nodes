@@ -202,3 +202,104 @@ class PoseImageSetupNode:
         result_tensor = torch.from_numpy(np.stack(result_images))
 
         return (result_tensor,)
+
+
+class CropToContentNode:
+    """Crop images to non-transparent content with a 1-pixel border."""
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("images", "alpha")
+    FUNCTION = "crop_to_content"
+    CATEGORY = "image/transform"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+            },
+            "optional": {
+                "alpha": ("MASK",),
+            },
+        }
+
+    def crop_to_content(self, images: torch.Tensor, alpha: torch.Tensor | None = None):
+        frames = images.detach().cpu().float()
+        if frames.ndim != 4:
+            raise ValueError("Expected images with shape (N, H, W, C)")
+
+        has_alpha = frames.shape[-1] == 4
+        if alpha is not None:
+            mask = alpha.detach().cpu().float()
+            if mask.ndim == 4 and mask.shape[-1] == 1:
+                mask = mask[..., 0]
+            if mask.ndim != 3:
+                raise ValueError("Expected alpha mask with shape (N, H, W)")
+            if mask.shape[0] != frames.shape[0]:
+                raise ValueError("Alpha mask batch size does not match images")
+            alpha_mask = mask.clamp(0, 1)
+        elif has_alpha:
+            alpha_mask = frames[..., 3].clamp(0, 1)
+        else:
+            alpha_mask = torch.ones(
+                frames.shape[0],
+                frames.shape[1],
+                frames.shape[2],
+                device=frames.device,
+                dtype=frames.dtype,
+            )
+
+        active = alpha_mask > 0.0
+        if active.any():
+            coords = active.nonzero(as_tuple=False)
+            height = alpha_mask.shape[1]
+            width = alpha_mask.shape[2]
+            y_min = int(coords[:, 1].min().item())
+            x_min = int(coords[:, 2].min().item())
+            y_max = int(coords[:, 1].max().item())
+            x_max = int(coords[:, 2].max().item())
+            y_min = max(y_min - 1, 0)
+            x_min = max(x_min - 1, 0)
+            y_max = min(y_max + 2, height)
+            x_max = min(x_max + 2, width)
+            frames = frames[:, y_min:y_max, x_min:x_max, :]
+            alpha_mask = alpha_mask[:, y_min:y_max, x_min:x_max]
+
+        return (frames, alpha_mask)
+
+
+class PixelationDimensionsNode:
+    """Provide width/height presets for pixelation targets."""
+
+    RETURN_TYPES = ("INT", "INT")
+    RETURN_NAMES = ("width", "height")
+    FUNCTION = "get_dimensions"
+    CATEGORY = "image/transform"
+
+    _PRESETS = {
+        "Spirie": (979, 1562),
+        "Custom": (0, 0),
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "preset": (list(cls._PRESETS.keys()),),
+                "custom_width": (
+                    "INT",
+                    {"default": 1024, "min": 1, "max": 8192, "step": 1},
+                ),
+                "custom_height": (
+                    "INT",
+                    {"default": 1024, "min": 1, "max": 8192, "step": 1},
+                ),
+            }
+        }
+
+    def get_dimensions(self, preset: str, custom_width: int, custom_height: int):
+        if preset == "Custom":
+            width, height = custom_width, custom_height
+        else:
+            width, height = self._PRESETS[preset]
+        return (width, height)

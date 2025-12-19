@@ -73,8 +73,8 @@ class ConvertToPixelArt:
                 raise ValueError("Expected alpha mask with shape (N, H, W)")
             if mask.shape[0] != images.shape[0]:
                 raise ValueError("Alpha mask batch size does not match frames")
-            # ComfyUI mask uses white as "masked", so invert to get alpha.
-            alpha_channel = (1.0 - mask) * 255.0
+            # Treat mask as alpha (white = opaque).
+            alpha_channel = mask * 255.0
         elif has_alpha:
             alpha_channel = images[..., 3] * 255.0
         else:

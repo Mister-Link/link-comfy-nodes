@@ -17,6 +17,8 @@ from PIL import Image
 
 import folder_paths
 
+from ..utils import parse_hex_color
+
 try:
     from aiohttp import web
 
@@ -643,6 +645,7 @@ class VideoMaskEditor:
                     {"default": 1, "min": 1, "max": BIGMAX, "step": 1},
                 ),
                 "is_wan": ("BOOLEAN", {"default": False}),
+                "bg_color": ("STRING", {"default": "#ffffff", "multiline": False}),
             },
             "hidden": {"force_size": "STRING", "unique_id": "UNIQUE_ID"},
         }
@@ -657,6 +660,7 @@ class VideoMaskEditor:
         skip_first_frames: int,
         select_every_nth: int,
         is_wan: bool,
+        bg_color: str,
         force_size: str = "",
         unique_id: Optional[str] = None,
     ):
@@ -783,6 +787,11 @@ class VideoMaskEditor:
                 (frames_array.shape[0], frames_array.shape[1], frames_array.shape[2]),
                 dtype=np.float32,
             )
+
+        bg_rgb = np.array(parse_hex_color(bg_color, fallback=(255, 255, 255)))
+        bg_rgb = (bg_rgb / 255.0).astype(np.float32)
+        alpha_expanded = alpha_array[..., None]
+        rgb_array = (rgb_array * alpha_expanded) + (bg_rgb * (1.0 - alpha_expanded))
 
         frames_tensor = torch.from_numpy(rgb_array)
         alpha_tensor = torch.from_numpy(alpha_array)
