@@ -1718,24 +1718,85 @@ class SaveImageSequenceZip:
                     zipf.writestr(file_name, payload)
                     continue
                 frames = self._normalize_frames(data)
+
+                # Check if prefix has an extension
+                prefix_base, prefix_ext = os.path.splitext(prefix)
+                has_extension = bool(prefix_ext)
+
+                # Determine format and extension
+                if has_extension:
+                    # Use extension from prefix
+                    ext = prefix_ext.lstrip(".")
+                    format_name = (
+                        ext.upper()
+                        if ext.upper() in {"PNG", "JPEG", "JPG", "WEBP"}
+                        else "PNG"
+                    )
+                    if format_name == "JPG":
+                        format_name = "JPEG"
+                else:
+                    # Default to PNG
+                    ext = "png"
+                    format_name = "PNG"
+
                 if frames.shape[0] == 1:
-                    pil_img = self._to_pil(frames[0], "png")
+                    pil_img = self._to_pil(frames[0], ext)
                     img_buffer = BytesIO()
-                    pil_img.save(img_buffer, format="PNG")
+                    pil_img.save(img_buffer, format=format_name)
                     img_buffer.seek(0)
-                    # Use global index for single frame
-                    image_filename = f"{prefix}_{global_frame_index:03d}.png"
+
+                    # Check if prefix contains format string (e.g., {:02d})
+                    if "{" in prefix_base:
+                        try:
+                            image_filename = prefix_base.format(global_frame_index) + (
+                                prefix_ext if has_extension else f".{ext}"
+                            )
+                        except (KeyError, IndexError):
+                            # If format string fails, fall back to default naming
+                            image_filename = (
+                                f"{prefix}_{global_frame_index:03d}.{ext}"
+                                if not has_extension
+                                else f"{prefix_base}_{global_frame_index:03d}{prefix_ext}"
+                            )
+                    else:
+                        image_filename = (
+                            f"{prefix}_{global_frame_index:03d}.{ext}"
+                            if not has_extension
+                            else f"{prefix_base}_{global_frame_index:03d}{prefix_ext}"
+                        )
+
                     zipf.writestr(image_filename, img_buffer.getvalue())
                     global_frame_index += 1
                 else:
-                    # For batches, use global index that increments across all frames
-                    digits = max(2, len(str(frames.shape[0])))
+                    # For batches, use format string if present, otherwise use global index
                     for i in range(frames.shape[0]):
-                        pil_img = self._to_pil(frames[i], "png")
+                        pil_img = self._to_pil(frames[i], ext)
                         img_buffer = BytesIO()
-                        pil_img.save(img_buffer, format="PNG")
+                        pil_img.save(img_buffer, format=format_name)
                         img_buffer.seek(0)
-                        image_filename = f"{prefix}_{global_frame_index:0{digits}d}.png"
+
+                        # Check if prefix contains format string (e.g., {:02d})
+                        if "{" in prefix_base:
+                            try:
+                                image_filename = prefix_base.format(
+                                    global_frame_index
+                                ) + (prefix_ext if has_extension else f".{ext}")
+                            except (KeyError, IndexError):
+                                # If format string fails, fall back to default naming
+                                digits = max(2, len(str(frames.shape[0])))
+                                image_filename = (
+                                    f"{prefix}_{global_frame_index:0{digits}d}.{ext}"
+                                    if not has_extension
+                                    else f"{prefix_base}_{global_frame_index:0{digits}d}{prefix_ext}"
+                                )
+                        else:
+                            digits = max(2, len(str(frames.shape[0])))
+                            image_filename = (
+                                f"{prefix}_{global_frame_index:0{digits}d}.{ext}"
+                                if not has_extension
+                                else f"{prefix_base}_{global_frame_index:0{digits}d}{prefix_ext}"
+                            )
+
                         zipf.writestr(image_filename, img_buffer.getvalue())
                         global_frame_index += 1
 
@@ -1744,8 +1805,13 @@ class SaveImageSequenceZip:
         # Extract just the filename for the download URL
         zip_filename = os.path.basename(zip_path)
 
+        # Remove "output/" prefix from zip_path for the download URL
+        zip_path_for_url = zip_path
+        if zip_path_for_url.startswith("output/"):
+            zip_path_for_url = zip_path_for_url[len("output/") :]
+
         # Create download URL (ComfyUI's /view endpoint)
-        download_url = f"/view?filename={zip_path}&type=output"
+        download_url = f"/view?filename={zip_path_for_url}&type=output"
 
         # Return UI with download link as HTML
         return {
