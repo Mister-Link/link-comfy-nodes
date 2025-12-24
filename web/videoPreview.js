@@ -712,6 +712,12 @@ function openMaskEditor(node, previewWidget) {
       }
     }
 
+    // Prefer live paint buffer when it matches the current frame
+    if (paintMaskData && paintMaskFrameIndex === dialogFrameIndex) {
+      showPaint = true;
+      paintDataToShow = paintMaskData;
+    }
+
     // Active bbox editing takes precedence but doesn't hide paint
     if (isDrawing || isDragging || isResizing) {
       showBbox = true;
@@ -734,24 +740,99 @@ function openMaskEditor(node, previewWidget) {
     // 1. Render Paint, if applicable
     if (showPaint && paintDataToShow) {
       try {
-        const binary = atob(paintDataToShow);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        const maskArray = new Float32Array(bytes.buffer);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        for (let i = 0; i < maskArray.length; i++) {
-          if (maskArray[i] > 0.5) {
-            const idx = i * 4;
-            // Set to semi-transparent red, ignoring original color and alpha
-            imageData.data[idx] = 255; // R
-            imageData.data[idx + 1] = 0; // G
-            imageData.data[idx + 2] = 0; // B
-            imageData.data[idx + 3] = 180; // Alpha (70% opacity)
+        if (paintDataToShow instanceof Uint8ClampedArray) {
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < paintDataToShow.length; i++) {
+            if (paintDataToShow[i] < 128) {
+              const idx = i * 4;
+              imageData.data[idx] = 255;
+              imageData.data[idx + 1] = 0;
+              imageData.data[idx + 2] = 0;
+              imageData.data[idx + 3] = 180;
+            }
           }
+          ctx.putImageData(imageData, 0, 0);
+        } else {
+          const binary = atob(paintDataToShow);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+          }
+          const maskArray = new Float32Array(bytes.buffer);
+
+          // Get stored mask dimensions from the active keyframe
+          const storedWidth = activeKeyframe.mask_width || canvas.width;
+          const storedHeight = activeKeyframe.mask_height || canvas.height;
+
+          // Verify the mask data size matches stored dimensions
+          const expectedSize = storedWidth * storedHeight;
+          if (maskArray.length !== expectedSize) {
+            console.error(
+              `[VideoMaskEditor] Mask size mismatch. Expected ${expectedSize}, got ${maskArray.length}. Stored dimensions: ${storedWidth}x${storedHeight}`,
+            );
+            return;
+          }
+
+          // Resize mask if dimensions don't match current canvas
+          let finalMaskArray = maskArray;
+          if (storedWidth !== canvas.width || storedHeight !== canvas.height) {
+            console.log(
+              `[VideoMaskEditor] Resizing mask from ${storedWidth}x${storedHeight} to ${canvas.width}x${canvas.height}`,
+            );
+
+            // Create a temporary canvas for resizing
+            const tempCanvas = document.createElement("canvas");
+            tempCanvas.width = storedWidth;
+            tempCanvas.height = storedHeight;
+            const tempCtx = tempCanvas.getContext("2d");
+
+            // Convert float mask to grayscale image data
+            const tempImageData = tempCtx.createImageData(
+              storedWidth,
+              storedHeight,
+            );
+            for (let i = 0; i < maskArray.length; i++) {
+              const value = maskArray[i] * 255;
+              tempImageData.data[i * 4] = value; // R
+              tempImageData.data[i * 4 + 1] = value; // G
+              tempImageData.data[i * 4 + 2] = value; // B
+              tempImageData.data[i * 4 + 3] = 255; // A
+            }
+            tempCtx.putImageData(tempImageData, 0, 0);
+
+            // Resize to target canvas dimensions
+            const resizeCanvas = document.createElement("canvas");
+            resizeCanvas.width = canvas.width;
+            resizeCanvas.height = canvas.height;
+            const resizeCtx = resizeCanvas.getContext("2d");
+            resizeCtx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+
+            // Extract resized mask data
+            const resizedImageData = resizeCtx.getImageData(
+              0,
+              0,
+              canvas.width,
+              canvas.height,
+            );
+            finalMaskArray = new Float32Array(canvas.width * canvas.height);
+            for (let i = 0; i < finalMaskArray.length; i++) {
+              finalMaskArray[i] = resizedImageData.data[i * 4] / 255.0;
+            }
+          }
+
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < finalMaskArray.length; i++) {
+            if (finalMaskArray[i] > 0.5) {
+              const idx = i * 4;
+              // Set to semi-transparent red, ignoring original color and alpha
+              imageData.data[idx] = 255; // R
+              imageData.data[idx + 1] = 0; // G
+              imageData.data[idx + 2] = 0; // B
+              imageData.data[idx + 3] = 180; // Alpha (70% opacity)
+            }
+          }
+          ctx.putImageData(imageData, 0, 0);
         }
-        ctx.putImageData(imageData, 0, 0);
       } catch (error) {
         console.error(
           "[VideoMaskEditor] Failed to display painted mask:",
@@ -1505,6 +1586,8 @@ function openMaskEditor(node, previewWidget) {
           type: existingKeyframe.bbox ? "hybrid" : "painted",
           bbox: existingKeyframe.bbox || null,
           mask_data: base64,
+          mask_width: canvas.width,
+          mask_height: canvas.height,
         };
 
         // Send to backend
@@ -1518,6 +1601,8 @@ function openMaskEditor(node, previewWidget) {
               type: keyframes[dialogFrameIndex].type,
               bbox: keyframes[dialogFrameIndex].bbox,
               mask_data: keyframes[dialogFrameIndex].mask_data,
+              mask_width: keyframes[dialogFrameIndex].mask_width,
+              mask_height: keyframes[dialogFrameIndex].mask_height,
             }),
           });
         } catch (error) {
@@ -1925,11 +2010,11 @@ function openMaskEditor(node, previewWidget) {
 
   closeButton.addEventListener("click", handleCancel);
 
-  applyButton.addEventListener("click", () => {
+  applyButton.addEventListener("click", async () => {
     // Manually trigger a refresh of the main node's preview to ensure
     // it reflects the final state from the editor.
     if (node.refreshPreview) {
-      node.refreshPreview();
+      await node.refreshPreview();
     }
     closeDialog();
   });
