@@ -1544,7 +1544,7 @@ class PreviewImageAlpha:
 
 
 class BatchImageSave:
-    """Save a batch of images with custom path formatting like output/loop_42/frame_{:02d}.png"""
+    """Save a batch of images with sequential naming."""
 
     CATEGORY = "image"
     RETURN_TYPES = ("STRING", "STRING")
@@ -1559,22 +1559,42 @@ class BatchImageSave:
                 "images": ("IMAGE",),
                 "path": (
                     "STRING",
-                    {"default": "output/batch/frame_{:03d}.png", "multiline": False},
+                    {"default": "batch", "multiline": False},
+                ),
+                "filename_prefix": (
+                    "STRING",
+                    {"default": "frame", "multiline": False},
+                ),
+                "delimiter": (
+                    "STRING",
+                    {"default": "_", "multiline": False},
+                ),
+                "extension": (
+                    ["png", "jpg", "jpeg", "webp"],
+                    {"default": "png"},
                 ),
             },
         }
 
-    def save_images(self, images: torch.Tensor, path: str):
-        """Save batch of images with custom path formatting.
+    def save_images(
+        self,
+        images: torch.Tensor,
+        path: str,
+        filename_prefix: str,
+        delimiter: str,
+        extension: str,
+    ):
+        """Save batch of images with sequential naming.
 
         Args:
             images: Image tensor (N, H, W, C)
-            path: Path pattern with format specifier like {:02d}, {:03d}, etc.
-                  Example: "output/loop_42/frame_{:02d}.png"
-                  The format specifier will be replaced with the image index (1-indexed)
+            path: Subfolder path (relative to output directory)
+            filename_prefix: Prefix for filenames
+            delimiter: Character(s) between prefix and number
+            extension: File extension (png, jpg, jpeg, webp)
 
         Returns:
-            UI response with saved file information
+            UI response with saved file information and outputs
         """
         # Convert to numpy
         images_np = images.cpu().numpy()
@@ -1590,24 +1610,32 @@ class BatchImageSave:
         # Get ComfyUI output directory as base
         output_dir = folder_paths.get_output_directory()
 
+        # Determine number of digits for padding
+        digits = max(2, len(str(num_images)))
+
+        # Normalize extension
+        ext = extension.lower()
+        if ext == "jpg":
+            ext = "jpeg"
+
+        # Determine PIL format
+        format_map = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
+        pil_format = format_map.get(ext, "PNG")
+
+        # Create full directory path
+        full_dir = os.path.join(output_dir, path) if path else output_dir
+        os.makedirs(full_dir, exist_ok=True)
+
         for i in range(num_images):
-            # Format the path with the current image index (1-indexed)
-            try:
-                # Replace format specifier like {:02d} with the image number
-                formatted_path = path.format(i + 1)
-            except (KeyError, IndexError, ValueError) as e:
-                _log(f"Error formatting path '{path}': {e}. Using index {i + 1}")
-                # Fallback: append index to path
-                base, ext = os.path.splitext(path)
-                formatted_path = f"{base}_{i + 1:03d}{ext}"
+            # Create sequential filename: prefix + delimiter + number + extension
+            index = i + 1
+            filename = f"{filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
 
-            # Combine with output directory
-            full_path = os.path.join(output_dir, formatted_path)
+            # Relative path for tracking
+            relative_path = os.path.join(path, filename) if path else filename
 
-            # Create directories if they don't exist
-            dir_path = os.path.dirname(full_path)
-            if dir_path:
-                os.makedirs(dir_path, exist_ok=True)
+            # Full path for saving
+            full_path = os.path.join(full_dir, filename)
 
             # Convert frame to PIL Image
             frame = images_np[i]
@@ -1622,30 +1650,32 @@ class BatchImageSave:
                 # RGB
                 frame_255 = (frame * 255).astype(np.uint8)
                 pil_img = Image.fromarray(frame_255, mode="RGB")
+                # Convert RGBA to RGB for JPEG
+                if pil_format == "JPEG":
+                    pil_img = pil_img.convert("RGB")
             elif frame.shape[-1] == 4:
                 # RGBA
                 frame_255 = (frame * 255).astype(np.uint8)
                 pil_img = Image.fromarray(frame_255, mode="RGBA")
+                # Convert RGBA to RGB for JPEG
+                if pil_format == "JPEG":
+                    pil_img = pil_img.convert("RGB")
             else:
                 raise ValueError(f"Unsupported number of channels: {frame.shape[-1]}")
 
             # Save the image
-            pil_img.save(full_path)
-            saved_files.append(formatted_path)
-            _log(f"Saved image {i + 1}/{num_images} to {full_path}")
+            pil_img.save(full_path, format=pil_format)
+            saved_files.append(relative_path)
+            _log(f"Saved image {index}/{num_images} to {full_path}")
 
         # Determine the folder path (relative to output folder)
-        if saved_files:
-            first_file = saved_files[0]
-            folder_path = os.path.dirname(first_file)
-        else:
-            folder_path = ""
+        folder_path = path if path else ""
 
         # Join file names with newlines
         file_names = "\n".join([os.path.basename(f) for f in saved_files])
 
         return {
-            "ui": {"text": [f"Saved {num_images} images to pattern: {path}"]},
+            "ui": {"text": [f"Saved {num_images} images to {path or 'output'}"]},
             "result": (folder_path, file_names),
         }
 
