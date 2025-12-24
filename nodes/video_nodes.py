@@ -1682,14 +1682,24 @@ class SaveImageSequenceZip:
         if not zip_path.endswith(".zip"):
             zip_path = f"{zip_path}.zip"
 
-        # Get output directory
+        # Get output directory and construct full path
         output_dir = folder_paths.get_output_directory()
-        full_zip_path = os.path.join(output_dir, zip_path)
+
+        # If zip_path is absolute, use it as-is; otherwise make it relative to output_dir
+        if os.path.isabs(zip_path):
+            full_zip_path = zip_path
+        else:
+            full_zip_path = os.path.join(output_dir, zip_path)
 
         # Create parent directory if it doesn't exist
         zip_dir = os.path.dirname(full_zip_path)
         if zip_dir:
             os.makedirs(zip_dir, exist_ok=True)
+
+        _log(f"Saving ZIP to: {full_zip_path}")
+
+        # Track global frame index for incrementing prefixes across batches
+        global_frame_index = 1
 
         # Create ZIP file
         with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
@@ -1713,17 +1723,21 @@ class SaveImageSequenceZip:
                     img_buffer = BytesIO()
                     pil_img.save(img_buffer, format="PNG")
                     img_buffer.seek(0)
-                    image_filename = f"{prefix}.png"
+                    # Use global index for single frame
+                    image_filename = f"{prefix}_{global_frame_index:03d}.png"
                     zipf.writestr(image_filename, img_buffer.getvalue())
+                    global_frame_index += 1
                 else:
+                    # For batches, use global index that increments across all frames
                     digits = max(2, len(str(frames.shape[0])))
                     for i in range(frames.shape[0]):
                         pil_img = self._to_pil(frames[i], "png")
                         img_buffer = BytesIO()
                         pil_img.save(img_buffer, format="PNG")
                         img_buffer.seek(0)
-                        image_filename = f"{prefix}_{i + 1:0{digits}d}.png"
+                        image_filename = f"{prefix}_{global_frame_index:0{digits}d}.png"
                         zipf.writestr(image_filename, img_buffer.getvalue())
+                        global_frame_index += 1
 
         _log(f"Saved ZIP to {full_zip_path}")
 
