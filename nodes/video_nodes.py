@@ -1634,10 +1634,10 @@ class BatchImageSave:
             saved_files.append(formatted_path)
             _log(f"Saved image {i + 1}/{num_images} to {full_path}")
 
-        # Determine the folder path
+        # Determine the folder path (relative to output folder)
         if saved_files:
             first_file = saved_files[0]
-            folder_path = os.path.dirname(os.path.join(output_dir, first_file))
+            folder_path = os.path.dirname(first_file)
         else:
             folder_path = ""
 

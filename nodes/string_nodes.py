@@ -4,6 +4,8 @@ import os
 import shutil
 import zipfile
 
+import folder_paths
+
 
 class AdvancedStringConcat:
     """Concatenate strings using template placeholders like %1, %2, etc."""
@@ -74,32 +76,50 @@ class SaveFolderAsZip:
         if not folder_path:
             raise ValueError("Folder path cannot be empty")
 
-        if not os.path.exists(folder_path):
-            raise ValueError(f"Folder does not exist: {folder_path}")
+        # Get output directory
+        output_dir = folder_paths.get_output_directory()
 
-        if not os.path.isdir(folder_path):
-            raise ValueError(f"Path is not a directory: {folder_path}")
+        # If folder_path is relative, resolve it relative to output directory
+        if os.path.isabs(folder_path):
+            full_folder_path = folder_path
+        else:
+            full_folder_path = os.path.join(output_dir, folder_path)
+
+        if not os.path.exists(full_folder_path):
+            raise ValueError(f"Folder does not exist: {full_folder_path}")
+
+        if not os.path.isdir(full_folder_path):
+            raise ValueError(f"Path is not a directory: {full_folder_path}")
 
         # Create zip file path (same location as folder, with .zip extension)
-        zip_path = f"{folder_path}.zip"
+        full_zip_path = f"{full_folder_path}.zip"
 
         # Remove existing zip if it exists
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
+        if os.path.exists(full_zip_path):
+            os.remove(full_zip_path)
 
         # Create the zip file
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             # Walk through the folder and add all files
-            for root, dirs, files in os.walk(folder_path):
+            for root, dirs, files in os.walk(full_folder_path):
                 for file in files:
                     file_path = os.path.join(root, file)
                     # Calculate the archive name (relative path from the folder)
-                    arcname = os.path.relpath(file_path, os.path.dirname(folder_path))
+                    arcname = os.path.relpath(
+                        file_path, os.path.dirname(full_folder_path)
+                    )
                     zipf.write(file_path, arcname)
 
-        print(f"Created zip file: {zip_path}")
+        print(f"Created zip file: {full_zip_path}")
 
-        return (zip_path,)
+        # Return path relative to output folder
+        try:
+            zip_path_relative = os.path.relpath(full_zip_path, output_dir)
+        except ValueError:
+            # If can't make it relative (e.g., different drives on Windows), return absolute
+            zip_path_relative = full_zip_path
+
+        return (zip_path_relative,)
 
 
 NODE_CLASS_MAPPINGS = {
