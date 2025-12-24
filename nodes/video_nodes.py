@@ -1805,10 +1805,12 @@ class SaveImageSequenceZip:
         # Extract just the filename for the download URL
         zip_filename = os.path.basename(zip_path)
 
-        # Remove "output/" prefix from zip_path for the download URL
-        zip_path_for_url = zip_path
+        # Remove "output/" prefix from zip_path for the download URL (with optional leading/trailing slash)
+        zip_path_for_url = zip_path.strip("/")
         if zip_path_for_url.startswith("output/"):
             zip_path_for_url = zip_path_for_url[len("output/") :]
+        elif zip_path_for_url.startswith("output"):
+            zip_path_for_url = zip_path_for_url[len("output") :].lstrip("/")
 
         # Create download URL (ComfyUI's /view endpoint)
         download_url = f"/view?filename={zip_path_for_url}&type=output"
