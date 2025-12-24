@@ -12,6 +12,7 @@ from .nodes import (
     PreviewImageAlpha,
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
+    SaveFolderAsZip,
     SaveImageSequenceZip,
     SpritesheetBuilderNode,
     VideoMaskEditor,
@@ -36,6 +37,7 @@ NODE_CLASS_MAPPINGS = {
     "ConvertToPixelArt": ConvertToPixelArt,
     "BatchImageSave": BatchImageSave,
     "Advanced String Concat": AdvancedStringConcat,
+    "Save Folder as ZIP": SaveFolderAsZip,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -55,6 +57,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ConvertToPixelArt": "Convert to Pixel Art",
     "BatchImageSave": "Batch Image Save",
     "Advanced String Concat": "Advanced String Concat",
+    "Save Folder as ZIP": "Save Folder as ZIP",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

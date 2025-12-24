@@ -10,7 +10,7 @@ from .image_nodes import (
     SpritesheetBuilderNode,
 )
 from .pixel_art.node import ConvertToPixelArt
-from .string_nodes import AdvancedStringConcat
+from .string_nodes import AdvancedStringConcat, SaveFolderAsZip
 from .video_nodes import (
     BatchImageSave,
     PreviewImageAlpha,
@@ -31,6 +31,7 @@ __all__ = [
     "SpritesheetBuilderNode",
     "ConvertToPixelArt",
     "AdvancedStringConcat",
+    "SaveFolderAsZip",
     "BatchImageSave",
     "PreviewImageAlpha",
     "ReplaceAlpha",
