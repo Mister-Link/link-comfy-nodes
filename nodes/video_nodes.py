@@ -1610,8 +1610,8 @@ class BatchImageSave:
         # Get ComfyUI output directory as base
         output_dir = folder_paths.get_output_directory()
 
-        # Determine number of digits for padding
-        digits = max(2, len(str(num_images)))
+        # Determine number of digits for padding based on total count
+        digits = len(str(num_images))
 
         # Normalize extension
         ext = extension.lower()
@@ -1650,14 +1650,11 @@ class BatchImageSave:
                 # RGB
                 frame_255 = (frame * 255).astype(np.uint8)
                 pil_img = Image.fromarray(frame_255, mode="RGB")
-                # Convert RGBA to RGB for JPEG
-                if pil_format == "JPEG":
-                    pil_img = pil_img.convert("RGB")
             elif frame.shape[-1] == 4:
                 # RGBA
                 frame_255 = (frame * 255).astype(np.uint8)
                 pil_img = Image.fromarray(frame_255, mode="RGBA")
-                # Convert RGBA to RGB for JPEG
+                # Convert RGBA to RGB for JPEG (no alpha support)
                 if pil_format == "JPEG":
                     pil_img = pil_img.convert("RGB")
             else:
