@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import random
+import re
 import zipfile
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -1610,9 +1611,6 @@ class BatchImageSave:
         # Get ComfyUI output directory as base
         output_dir = folder_paths.get_output_directory()
 
-        # Determine number of digits for padding based on total count
-        digits = len(str(num_images))
-
         # Normalize extension
         ext = extension.lower()
         if ext == "jpg":
@@ -1626,9 +1624,24 @@ class BatchImageSave:
         full_dir = os.path.join(output_dir, path) if path else output_dir
         os.makedirs(full_dir, exist_ok=True)
 
+        # Find the next available index to avoid overwriting existing files
+        existing_max = 0
+        pattern = re.compile(
+            rf"^{re.escape(filename_prefix)}{re.escape(delimiter)}(\d+)\.{re.escape(ext)}$"
+        )
+        for name in os.listdir(full_dir):
+            match = pattern.match(name)
+            if match:
+                existing_max = max(existing_max, int(match.group(1)))
+
+        start_index = existing_max + 1
+
+        # Determine number of digits for padding based on final count (min 2)
+        digits = max(2, len(str(start_index + num_images - 1)))
+
         for i in range(num_images):
             # Create sequential filename: prefix + delimiter + number + extension
-            index = i + 1
+            index = start_index + i
             filename = f"{filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
 
             # Relative path for tracking
