@@ -128,6 +128,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AdvancedStringConcat": "Advanced String Concat",
+    "AdvancedStringConcat": "Concat",
     "SaveFolderAsZip": "Save Folder as ZIP",
 }

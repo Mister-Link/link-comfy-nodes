@@ -36,7 +36,7 @@ NODE_CLASS_MAPPINGS = {
     "Save To Zip": SaveImageSequenceZip,
     "ConvertToPixelArt": ConvertToPixelArt,
     "BatchImageSave": BatchImageSave,
-    "Advanced String Concat": AdvancedStringConcat,
+    "Concat": AdvancedStringConcat,
     "Save Folder as ZIP": SaveFolderAsZip,
 }
 
@@ -56,7 +56,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Save To Zip": "Save to ZIP",
     "ConvertToPixelArt": "Convert to Pixel Art",
     "BatchImageSave": "Batch Image Save",
-    "Advanced String Concat": "Advanced String Concat",
+    "Concat": "Concat",
     "Save Folder as ZIP": "Save Folder as ZIP",
 }
 

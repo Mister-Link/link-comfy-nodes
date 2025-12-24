@@ -80,10 +80,10 @@ const syncDynamicInputs = (node) => {
 };
 
 app.registerExtension({
-  name: "AdvancedStringConcat.DynamicInputs",
+  name: "Concat.DynamicInputs",
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "Advanced String Concat") {
+    if (nodeData.name !== "Concat") {
       return;
     }
 
