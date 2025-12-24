@@ -11,6 +11,7 @@ from .image_nodes import (
 )
 from .pixel_art.node import ConvertToPixelArt
 from .video_nodes import (
+    BatchImageSave,
     PreviewImageAlpha,
     ReplaceAlpha,
     SaveImageSequenceZip,
@@ -28,6 +29,7 @@ __all__ = [
     "ResizeImageAndMaskBySideNode",
     "SpritesheetBuilderNode",
     "ConvertToPixelArt",
+    "BatchImageSave",
     "PreviewImageAlpha",
     "ReplaceAlpha",
     "SaveImageSequenceZip",

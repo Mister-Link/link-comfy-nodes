@@ -1543,6 +1543,99 @@ class PreviewImageAlpha:
         return {"ui": {"images": results}}
 
 
+class BatchImageSave:
+    """Save a batch of images with custom path formatting like output/loop_42/frame_{:02d}.png"""
+
+    CATEGORY = "image"
+    RETURN_TYPES = ()
+    FUNCTION = "save_images"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "path": (
+                    "STRING",
+                    {"default": "output/batch/frame_{:03d}.png", "multiline": False},
+                ),
+            },
+        }
+
+    def save_images(self, images: torch.Tensor, path: str):
+        """Save batch of images with custom path formatting.
+
+        Args:
+            images: Image tensor (N, H, W, C)
+            path: Path pattern with format specifier like {:02d}, {:03d}, etc.
+                  Example: "output/loop_42/frame_{:02d}.png"
+                  The format specifier will be replaced with the image index (1-indexed)
+
+        Returns:
+            UI response with saved file information
+        """
+        # Convert to numpy
+        images_np = images.cpu().numpy()
+
+        if images_np.ndim != 4:
+            raise ValueError(
+                f"Expected images with shape (N, H, W, C), got shape {images_np.shape}"
+            )
+
+        num_images = images_np.shape[0]
+        saved_files = []
+
+        # Get ComfyUI output directory as base
+        output_dir = folder_paths.get_output_directory()
+
+        for i in range(num_images):
+            # Format the path with the current image index (1-indexed)
+            try:
+                # Replace format specifier like {:02d} with the image number
+                formatted_path = path.format(i + 1)
+            except (KeyError, IndexError, ValueError) as e:
+                _log(f"Error formatting path '{path}': {e}. Using index {i + 1}")
+                # Fallback: append index to path
+                base, ext = os.path.splitext(path)
+                formatted_path = f"{base}_{i + 1:03d}{ext}"
+
+            # Combine with output directory
+            full_path = os.path.join(output_dir, formatted_path)
+
+            # Create directories if they don't exist
+            dir_path = os.path.dirname(full_path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+
+            # Convert frame to PIL Image
+            frame = images_np[i]
+            frame = np.clip(frame, 0.0, 1.0)
+
+            # Handle different channel counts
+            if frame.shape[-1] == 1:
+                # Grayscale
+                frame_255 = (frame[:, :, 0] * 255).astype(np.uint8)
+                pil_img = Image.fromarray(frame_255, mode="L")
+            elif frame.shape[-1] == 3:
+                # RGB
+                frame_255 = (frame * 255).astype(np.uint8)
+                pil_img = Image.fromarray(frame_255, mode="RGB")
+            elif frame.shape[-1] == 4:
+                # RGBA
+                frame_255 = (frame * 255).astype(np.uint8)
+                pil_img = Image.fromarray(frame_255, mode="RGBA")
+            else:
+                raise ValueError(f"Unsupported number of channels: {frame.shape[-1]}")
+
+            # Save the image
+            pil_img.save(full_path)
+            saved_files.append(formatted_path)
+            _log(f"Saved image {i + 1}/{num_images} to {full_path}")
+
+        return {"ui": {"text": [f"Saved {num_images} images to pattern: {path}"]}}
+
+
 class SaveImageSequenceZip:
     """Save connected image/mask sequences as files in a ZIP archive."""
 
@@ -1554,7 +1647,12 @@ class SaveImageSequenceZip:
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "required": {},
+            "required": {
+                "zip_path": (
+                    "STRING",
+                    {"default": "output/archive", "multiline": False},
+                ),
+            },
             "optional": {
                 "input1_prefix": ("STRING", {"default": ""}),
                 "input2_prefix": ("STRING", {"default": ""}),
@@ -1567,7 +1665,7 @@ class SaveImageSequenceZip:
             },
         }
 
-    def save_sequence(self, **kwargs):
+    def save_sequence(self, zip_path: str, **kwargs):
         """Save connected image/mask sequences in a ZIP file."""
 
         inputs = []
@@ -1579,16 +1677,22 @@ class SaveImageSequenceZip:
             prefix = prefix.strip() or f"input{index}"
             inputs.append((f"input{index}", data, prefix))
 
-        # Generate random suffix for zip file to avoid overwriting
-        zip_suffix = random.randint(0, 9999999)
-        zip_filename = f"save_to_zip_{zip_suffix:07d}.zip"
+        # Process zip_path: add .zip extension if not present
+        zip_path = zip_path.strip()
+        if not zip_path.endswith(".zip"):
+            zip_path = f"{zip_path}.zip"
 
         # Get output directory
         output_dir = folder_paths.get_output_directory()
-        zip_path = os.path.join(output_dir, zip_filename)
+        full_zip_path = os.path.join(output_dir, zip_path)
+
+        # Create parent directory if it doesn't exist
+        zip_dir = os.path.dirname(full_zip_path)
+        if zip_dir:
+            os.makedirs(zip_dir, exist_ok=True)
 
         # Create ZIP file
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for input_name, data, prefix in inputs:
                 if data is None:
                     continue
@@ -1621,10 +1725,13 @@ class SaveImageSequenceZip:
                         image_filename = f"{prefix}_{i + 1:0{digits}d}.png"
                         zipf.writestr(image_filename, img_buffer.getvalue())
 
-        _log(f"Saved ZIP to {zip_path}")
+        _log(f"Saved ZIP to {full_zip_path}")
+
+        # Extract just the filename for the download URL
+        zip_filename = os.path.basename(zip_path)
 
         # Create download URL (ComfyUI's /view endpoint)
-        download_url = f"/view?filename={zip_filename}&type=output"
+        download_url = f"/view?filename={zip_path}&type=output"
 
         # Return UI with download link as HTML
         return {

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from .nodes import (
+    BatchImageSave,
     ColorParserNode,
     CropToContentNode,
     FarthestColorNode,
@@ -32,6 +33,7 @@ NODE_CLASS_MAPPINGS = {
     "ReplaceAlpha": ReplaceAlpha,
     "Save To Zip": SaveImageSequenceZip,
     "ConvertToPixelArt": ConvertToPixelArt,
+    "BatchImageSave": BatchImageSave,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -49,6 +51,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ReplaceAlpha": "Replace Alpha",
     "Save To Zip": "Save to ZIP",
     "ConvertToPixelArt": "Convert to Pixel Art",
+    "BatchImageSave": "Batch Image Save",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
