@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from .nodes import (
+    AdvancedStringConcat,
     BatchImageSave,
     ColorParserNode,
     CropToContentNode,
@@ -34,6 +35,7 @@ NODE_CLASS_MAPPINGS = {
     "Save To Zip": SaveImageSequenceZip,
     "ConvertToPixelArt": ConvertToPixelArt,
     "BatchImageSave": BatchImageSave,
+    "Advanced String Concat": AdvancedStringConcat,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -52,6 +54,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Save To Zip": "Save to ZIP",
     "ConvertToPixelArt": "Convert to Pixel Art",
     "BatchImageSave": "Batch Image Save",
+    "Advanced String Concat": "Advanced String Concat",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

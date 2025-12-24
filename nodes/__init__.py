@@ -10,6 +10,7 @@ from .image_nodes import (
     SpritesheetBuilderNode,
 )
 from .pixel_art.node import ConvertToPixelArt
+from .string_nodes import AdvancedStringConcat
 from .video_nodes import (
     BatchImageSave,
     PreviewImageAlpha,
@@ -29,6 +30,7 @@ __all__ = [
     "ResizeImageAndMaskBySideNode",
     "SpritesheetBuilderNode",
     "ConvertToPixelArt",
+    "AdvancedStringConcat",
     "BatchImageSave",
     "PreviewImageAlpha",
     "ReplaceAlpha",
