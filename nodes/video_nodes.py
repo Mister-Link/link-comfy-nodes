@@ -1547,7 +1547,8 @@ class BatchImageSave:
     """Save a batch of images with custom path formatting like output/loop_42/frame_{:02d}.png"""
 
     CATEGORY = "image"
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("folder_path", "file_names")
     FUNCTION = "save_images"
     OUTPUT_NODE = True
 
@@ -1633,7 +1634,20 @@ class BatchImageSave:
             saved_files.append(formatted_path)
             _log(f"Saved image {i + 1}/{num_images} to {full_path}")
 
-        return {"ui": {"text": [f"Saved {num_images} images to pattern: {path}"]}}
+        # Determine the folder path
+        if saved_files:
+            first_file = saved_files[0]
+            folder_path = os.path.dirname(os.path.join(output_dir, first_file))
+        else:
+            folder_path = ""
+
+        # Join file names with newlines
+        file_names = "\n".join([os.path.basename(f) for f in saved_files])
+
+        return {
+            "ui": {"text": [f"Saved {num_images} images to pattern: {path}"]},
+            "result": (folder_path, file_names),
+        }
 
 
 class SaveImageSequenceZip:
