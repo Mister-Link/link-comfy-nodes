@@ -1432,22 +1432,27 @@ class ReplaceAlpha:
                 f"Frame size mismatch: frames={frames.shape[1:3]}, alpha={alpha_tensor.shape[1:3]}, mask={mask_tensor.shape[1:3]}"
             )
 
-        # Parse hex color to a single alpha value (0-1 range).
+        # Parse hex color to RGB (0-1 range) for compositing.
         r, g, b = parse_hex_color(color, fallback=(255, 255, 255))
-        color_alpha = (r + g + b) / (3.0 * 255.0)
+        color_rgb = torch.tensor(
+            [r / 255.0, g / 255.0, b / 255.0],
+            device=frames.device,
+            dtype=frames.dtype,
+        )
 
         result_alpha = alpha_tensor.clone()
-        replace_regions = (mask_tensor > 0.5) & (alpha_tensor > 0.0)
+        result_frames = frames.clone()
+        replace_regions = mask_tensor > 0.5
         if replace_regions.any():
+            alpha_3d = alpha_tensor.unsqueeze(-1)
+            blended = result_frames * alpha_3d + color_rgb * (1.0 - alpha_3d)
+            replace_regions_3d = replace_regions.unsqueeze(-1)
+            result_frames = torch.where(replace_regions_3d, blended, result_frames)
             result_alpha = torch.where(
-                replace_regions,
-                torch.tensor(
-                    color_alpha, device=result_alpha.device, dtype=result_alpha.dtype
-                ),
-                result_alpha,
+                replace_regions, torch.ones_like(result_alpha), result_alpha
             )
 
-        return (frames, result_alpha)
+        return (result_frames, result_alpha)
 
 
 class PreviewImageAlpha:
