@@ -1405,75 +1405,49 @@ class ReplaceAlpha:
             color: Hex color string (e.g., "#FFFFFF")
 
         Returns:
-            RGB frames with alpha replaced by color in masked regions
+            Frames (unchanged) and alpha with color applied in masked regions
         """
-        # Parse hex color to RGB (0-1 range)
-        color = color.strip()
-        if color.startswith("#"):
-            color = color[1:]
-
-        try:
-            r = int(color[0:2], 16) / 255.0
-            g = int(color[2:4], 16) / 255.0
-            b = int(color[4:6], 16) / 255.0
-        except (ValueError, IndexError):
-            _log(f"Invalid color format: {color}, using white")
-            r, g, b = 1.0, 1.0, 1.0
-
-        # Convert to numpy for processing
-        frames_np = frames.cpu().numpy()  # Shape: (N, H, W, 3)
-        alpha_np = alpha.cpu().numpy()  # Shape: (N, H, W)
-        mask_np = mask.cpu().numpy()  # Shape: (N, H, W)
+        # Normalize mask/alpha shapes to (N, H, W)
+        alpha_tensor = alpha
+        mask_tensor = mask
+        if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
+            alpha_tensor = alpha_tensor[..., 0]
+        if mask_tensor.ndim == 4 and mask_tensor.shape[-1] == 1:
+            mask_tensor = mask_tensor[..., 0]
 
         # Ensure shapes match
         if (
-            frames_np.shape[0] != alpha_np.shape[0]
-            or frames_np.shape[0] != mask_np.shape[0]
+            frames.shape[0] != alpha_tensor.shape[0]
+            or frames.shape[0] != mask_tensor.shape[0]
         ):
             raise ValueError(
-                f"Frame count mismatch: frames={frames_np.shape[0]}, alpha={alpha_np.shape[0]}, mask={mask_np.shape[0]}"
+                f"Frame count mismatch: frames={frames.shape[0]}, alpha={alpha_tensor.shape[0]}, mask={mask_tensor.shape[0]}"
             )
 
         if (
-            frames_np.shape[1:3] != alpha_np.shape[1:3]
-            or frames_np.shape[1:3] != mask_np.shape[1:3]
+            frames.shape[1:3] != alpha_tensor.shape[1:3]
+            or frames.shape[1:3] != mask_tensor.shape[1:3]
         ):
             raise ValueError(
-                f"Frame size mismatch: frames={frames_np.shape[1:3]}, alpha={alpha_np.shape[1:3]}, mask={mask_np.shape[1:3]}"
+                f"Frame size mismatch: frames={frames.shape[1:3]}, alpha={alpha_tensor.shape[1:3]}, mask={mask_tensor.shape[1:3]}"
             )
 
-        result = frames_np.copy()
-        result_alpha = alpha_np.copy()
+        # Parse hex color to a single alpha value (0-1 range).
+        r, g, b = parse_hex_color(color, fallback=(255, 255, 255))
+        color_alpha = (r + g + b) / (3.0 * 255.0)
 
-        # Process each frame
-        for i in range(frames_np.shape[0]):
-            frame_rgb = frames_np[i]  # (H, W, 3)
-            frame_alpha = alpha_np[i]  # (H, W)
-            frame_mask = mask_np[i]  # (H, W)
+        result_alpha = alpha_tensor.clone()
+        replace_regions = (mask_tensor > 0.5) & (alpha_tensor > 0.0)
+        if replace_regions.any():
+            result_alpha = torch.where(
+                replace_regions,
+                torch.tensor(
+                    color_alpha, device=result_alpha.device, dtype=result_alpha.dtype
+                ),
+                result_alpha,
+            )
 
-            # Find masked regions (where mask > 0.5)
-            masked_regions = frame_mask > 0.5
-
-            # In masked regions, blend RGB with color based on alpha
-            # Formula: result = rgb * alpha + color * (1 - alpha)
-            if np.any(masked_regions):
-                alpha_3d = frame_alpha[:, :, np.newaxis]  # (H, W, 1)
-                color_rgb = np.array([r, g, b], dtype=np.float32)  # (3,)
-
-                # Apply blending only where masked
-                result[i][masked_regions] = frame_rgb[masked_regions] * alpha_3d[
-                    masked_regions
-                ] + color_rgb * (1.0 - alpha_3d[masked_regions])
-
-                # Set alpha to 1.0 (fully opaque) in masked regions where we replaced transparency
-                result_alpha[i][masked_regions] = 1.0
-
-        # Clip and convert back to tensor
-        result = np.clip(result, 0.0, 1.0)
-        result_tensor = torch.from_numpy(result).to(frames.device)
-        result_alpha_tensor = torch.from_numpy(result_alpha).to(alpha.device)
-
-        return (result_tensor, result_alpha_tensor)
+        return (frames, result_alpha)
 
 
 class PreviewImageAlpha:
