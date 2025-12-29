@@ -1,8 +1,7 @@
 import { app } from "../../scripts/app.js";
 
 const STYLE_ID = "lc_markdown_preview_styles";
-const PREVIEW_MIN_HEIGHT = 160;
-const PREVIEW_MAX_HEIGHT = 360;
+const PREVIEW_MIN_HEIGHT = 70;
 const NODE_HEIGHT_PADDING = 54;
 
 function ensureStyles() {
@@ -228,10 +227,7 @@ app.registerExtension({
         0,
         (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
       );
-      const height = Math.max(
-        PREVIEW_MIN_HEIGHT,
-        Math.min(PREVIEW_MAX_HEIGHT, available),
-      );
+      const height = Math.max(PREVIEW_MIN_HEIGHT, available);
       this.computedHeight = height;
       return [width, height];
     };
