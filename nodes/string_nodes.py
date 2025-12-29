@@ -131,6 +131,13 @@ class PreviewAsMarkdown:
     OUTPUT_NODE = True
 
     @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def __init__(self):
+        self.min_height = 180
+
+    @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
