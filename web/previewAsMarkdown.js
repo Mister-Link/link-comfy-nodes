@@ -127,7 +127,7 @@ function renderMarkdown(text) {
     return `@@INLINECODE_${inlineCode.length - 1}@@`;
   });
 
-  // Extract links before processing emphasis to prevent underscores in URLs from being interpreted as emphasis
+  // Extract links IMMEDIATELY after code, BEFORE emphasis processing
   const links = [];
   html = html.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, (_, text, url) => {
     links.push({ text, url });
