@@ -1,0 +1,152 @@
+import { app } from "../../scripts/app.js";
+
+// Simple markdown parser for basic syntax
+function parseMarkdown(text) {
+  if (!text) return "";
+
+  let html = text;
+
+  // Escape HTML first
+  html = html
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Headers
+  html = html.replace(/^### (.*$)/gim, "<h3>$1</h3>");
+  html = html.replace(/^## (.*$)/gim, "<h2>$1</h2>");
+  html = html.replace(/^# (.*$)/gim, "<h1>$1</h1>");
+
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
+
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  html = html.replace(/_(.+?)_/g, "<em>$1</em>");
+
+  // Code blocks
+  html = html.replace(/```([\s\S]*?)```/g, "<pre><code>$1</code></pre>");
+
+  // Inline code
+  html = html.replace(/`(.+?)`/g, "<code>$1</code>");
+
+  // Links
+  html = html.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" target="_blank">$1</a>',
+  );
+
+  // Line breaks
+  html = html.replace(/\n\n/g, "</p><p>");
+  html = html.replace(/\n/g, "<br>");
+
+  // Wrap in paragraph
+  if (!html.startsWith("<h") && !html.startsWith("<pre>")) {
+    html = `<p>${html}</p>`;
+  }
+
+  return html;
+}
+
+app.registerExtension({
+  name: "PreviewAsMarkdown.Render",
+
+  async nodeCreated(node) {
+    if (node.comfyClass !== "PreviewAsMarkdown") {
+      return;
+    }
+
+    // Create a container for the markdown preview
+    const container = document.createElement("div");
+    container.style.cssText = `
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 4px;
+      padding: 12px;
+      margin: 8px 0;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      line-height: 1.6;
+      max-width: 400px;
+      overflow-wrap: break-word;
+      word-wrap: break-word;
+    `;
+
+    // Add style for markdown elements
+    const style = document.createElement("style");
+    style.textContent = `
+      .markdown-preview h1 { font-size: 1.5em; margin: 0.5em 0; font-weight: bold; }
+      .markdown-preview h2 { font-size: 1.3em; margin: 0.5em 0; font-weight: bold; }
+      .markdown-preview h3 { font-size: 1.1em; margin: 0.5em 0; font-weight: bold; }
+      .markdown-preview p { margin: 0.5em 0; }
+      .markdown-preview code {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 2px 4px;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+      }
+      .markdown-preview pre {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 8px;
+        border-radius: 4px;
+        overflow-x: auto;
+      }
+      .markdown-preview pre code {
+        background: none;
+        padding: 0;
+      }
+      .markdown-preview a {
+        color: #4a9eff;
+        text-decoration: underline;
+      }
+      .markdown-preview strong { font-weight: bold; }
+      .markdown-preview em { font-style: italic; }
+    `;
+    document.head.appendChild(style);
+
+    container.className = "markdown-preview";
+    container.innerHTML = '<em style="color: #888;">Waiting for input...</em>';
+
+    // Add widget to display the markdown
+    const previewWidget = node.addDOMWidget(
+      "preview",
+      "markdown_preview",
+      container,
+    );
+    previewWidget.serialize = false;
+
+    // Store reference for updates
+    node._markdownContainer = container;
+
+    // Handle execution results
+    const originalOnExecuted = node.onExecuted;
+    node.onExecuted = function (message) {
+      if (originalOnExecuted) {
+        originalOnExecuted.apply(this, arguments);
+      }
+
+      if (message?.markdown && message.markdown.length > 0) {
+        const markdownText = message.markdown[0];
+        if (markdownText && markdownText.trim()) {
+          const html = parseMarkdown(markdownText);
+          node._markdownContainer.innerHTML = html;
+        } else {
+          node._markdownContainer.innerHTML =
+            '<em style="color: #888;">Empty input</em>';
+        }
+      }
+    };
+
+    // Resize node to fit content
+    node.onResize = function (size) {
+      if (node._markdownContainer) {
+        const contentHeight = node._markdownContainer.scrollHeight;
+        const minHeight = Math.max(200, contentHeight + 100);
+        if (size[1] < minHeight) {
+          size[1] = minHeight;
+        }
+      }
+    };
+  },
+});

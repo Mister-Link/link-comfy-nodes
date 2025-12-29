@@ -9,6 +9,7 @@ from .nodes import (
     ImageRotatorNode,
     PixelationDimensionsNode,
     PoseImageSetupNode,
+    PreviewAsMarkdown,
     PreviewImageAlpha,
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
@@ -38,6 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "BatchImageSave": BatchImageSave,
     "Concat": AdvancedStringConcat,
     "Save Folder as ZIP": SaveFolderAsZip,
+    "PreviewAsMarkdown": PreviewAsMarkdown,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -58,6 +60,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "BatchImageSave": "Batch Image Save",
     "Concat": "Concat",
     "Save Folder as ZIP": "Save Folder as ZIP",
+    "PreviewAsMarkdown": "Preview as Markdown",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

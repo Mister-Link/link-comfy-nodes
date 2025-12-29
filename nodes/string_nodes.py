@@ -129,12 +129,42 @@ class SaveFolderAsZip:
         return (zip_path_relative,)
 
 
+class PreviewAsMarkdown:
+    """Preview a string as rendered markdown on the node."""
+
+    CATEGORY = "utils"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("source",)
+    FUNCTION = "preview_markdown"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source": (
+                    "STRING",
+                    {"default": "", "multiline": True, "forceInput": True},
+                ),
+            },
+        }
+
+    def preview_markdown(self, source: str):
+        """Pass through the string and send it to the UI for markdown rendering."""
+        return {
+            "ui": {"markdown": [source]},
+            "result": (source,),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "AdvancedStringConcat": AdvancedStringConcat,
     "SaveFolderAsZip": SaveFolderAsZip,
+    "PreviewAsMarkdown": PreviewAsMarkdown,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AdvancedStringConcat": "Concat",
     "SaveFolderAsZip": "Save Folder as ZIP",
+    "PreviewAsMarkdown": "Preview as Markdown",
 }
