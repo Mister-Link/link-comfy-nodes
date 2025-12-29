@@ -76,13 +76,6 @@ class SaveFolderAsZip:
         if not folder_path:
             raise ValueError("Folder path cannot be empty")
 
-        # Extract just the directory part (in case a file pattern was provided)
-        folder_path = (
-            os.path.dirname(folder_path)
-            if os.path.dirname(folder_path)
-            else folder_path
-        )
-
         # Get output directory
         output_dir = folder_paths.get_output_directory()
 
