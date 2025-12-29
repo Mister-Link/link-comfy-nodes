@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 
 const STYLE_ID = "lc_markdown_preview_styles";
-const PREVIEW_MIN_HEIGHT = 70;
+const PREVIEW_MIN_HEIGHT = 80;
 const NODE_HEIGHT_PADDING = 54;
 
 function ensureStyles() {
