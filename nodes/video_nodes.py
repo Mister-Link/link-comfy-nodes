@@ -1731,9 +1731,6 @@ class SaveImageSequenceZip:
 
         _log(f"Saving ZIP to: {full_zip_path}")
 
-        # Track global frame index for incrementing prefixes across batches
-        global_frame_index = 1
-
         # Create ZIP file
         with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for input_name, data, prefix in inputs:
@@ -1778,31 +1775,17 @@ class SaveImageSequenceZip:
                     pil_img.save(img_buffer, format=format_name)
                     img_buffer.seek(0)
 
-                    # Check if prefix contains format string (e.g., {:02d})
-                    if "{" in prefix_base:
-                        try:
-                            image_filename = prefix_base.format(global_frame_index) + (
-                                prefix_ext if has_extension else f".{ext}"
-                            )
-                        except (KeyError, IndexError):
-                            # If format string fails, fall back to default naming
-                            image_filename = (
-                                f"{prefix}_{global_frame_index:03d}.{ext}"
-                                if not has_extension
-                                else f"{prefix_base}_{global_frame_index:03d}{prefix_ext}"
-                            )
-                    else:
-                        image_filename = (
-                            f"{prefix}_{global_frame_index:03d}.{ext}"
-                            if not has_extension
-                            else f"{prefix_base}_{global_frame_index:03d}{prefix_ext}"
-                        )
+                    image_filename = (
+                        f"{prefix_base}{prefix_ext}"
+                        if has_extension
+                        else f"{prefix_base}.{ext}"
+                    )
 
                     zipf.writestr(image_filename, img_buffer.getvalue())
-                    global_frame_index += 1
                 else:
                     # For batches, use format string if present, otherwise use global index
                     for i in range(frames.shape[0]):
+                        frame_index = i + 1
                         pil_img = self._to_pil(frames[i], ext)
                         img_buffer = BytesIO()
                         pil_img.save(img_buffer, format=format_name)
@@ -1811,27 +1794,26 @@ class SaveImageSequenceZip:
                         # Check if prefix contains format string (e.g., {:02d})
                         if "{" in prefix_base:
                             try:
-                                image_filename = prefix_base.format(
-                                    global_frame_index
-                                ) + (prefix_ext if has_extension else f".{ext}")
+                                image_filename = prefix_base.format(frame_index) + (
+                                    prefix_ext if has_extension else f".{ext}"
+                                )
                             except (KeyError, IndexError):
                                 # If format string fails, fall back to default naming
                                 digits = max(2, len(str(frames.shape[0])))
                                 image_filename = (
-                                    f"{prefix}_{global_frame_index:0{digits}d}.{ext}"
+                                    f"{prefix}_{frame_index:0{digits}d}.{ext}"
                                     if not has_extension
-                                    else f"{prefix_base}_{global_frame_index:0{digits}d}{prefix_ext}"
+                                    else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                                 )
                         else:
                             digits = max(2, len(str(frames.shape[0])))
                             image_filename = (
-                                f"{prefix}_{global_frame_index:0{digits}d}.{ext}"
+                                f"{prefix}_{frame_index:0{digits}d}.{ext}"
                                 if not has_extension
-                                else f"{prefix_base}_{global_frame_index:0{digits}d}{prefix_ext}"
+                                else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                             )
 
                         zipf.writestr(image_filename, img_buffer.getvalue())
-                        global_frame_index += 1
 
         _log(f"Saved ZIP to {full_zip_path}")
 
