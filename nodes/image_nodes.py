@@ -231,11 +231,7 @@ class CropToContentNode:
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
-        has_alpha = frames.shape[-1] == 4
-        image_alpha = frames[..., 3].clamp(0, 1) if has_alpha else None
-
-        # Build the alpha mask from available sources
-        alpha_mask = None
+        # Build the alpha mask
         if alpha is not None:
             mask = alpha.detach().cpu().float()
             if mask.ndim == 4 and mask.shape[-1] == 1:
@@ -246,18 +242,20 @@ class CropToContentNode:
                 raise ValueError("Alpha mask batch size does not match images")
             if mask.shape[1] != frames.shape[1] or mask.shape[2] != frames.shape[2]:
                 raise ValueError("Alpha mask dimensions do not match images")
+
+            # Normalize to 0-1 range if needed
             mask_max = float(mask.max().item()) if mask.numel() else 0.0
             if mask_max > 1.0:
                 mask = mask / 255.0
-            alpha_mask = mask.clamp(0, 1)
 
-        # Combine alpha sources
-        if alpha_mask is not None and image_alpha is not None:
-            alpha_mask = alpha_mask * image_alpha
-        elif alpha_mask is None and image_alpha is not None:
-            alpha_mask = image_alpha
-        elif alpha_mask is None:
-            # No alpha - assume fully opaque
+            mask = mask.clamp(0, 1)
+
+            # ComfyUI MASK: white (high values) = transparent, black (low values) = opaque
+            # We want to find the black areas, so look for LOW mask values
+            # Invert for alpha representation: alpha_mask where 1.0 = opaque, 0.0 = transparent
+            alpha_mask = 1.0 - mask
+        else:
+            # No mask input - assume fully opaque
             alpha_mask = torch.ones(
                 frames.shape[0],
                 frames.shape[1],
@@ -266,35 +264,43 @@ class CropToContentNode:
                 dtype=frames.dtype,
             )
 
-        # Find non-transparent pixels (anything > 0.0)
-        is_opaque = alpha_mask > 0.0
+        # Find content pixels - anything that's NOT fully transparent (alpha > 0.0)
+        # Use a small threshold to ignore noise
+        threshold = 0.01
+        is_content = alpha_mask > threshold
 
-        if not is_opaque.any():
+        if not is_content.any():
             # Everything transparent - return minimal crop
             frames = frames[:, :1, :1, :]
             alpha_mask = alpha_mask[:, :1, :1]
             return (frames, alpha_mask)
 
-        # Find bbox across ALL frames
-        coords = is_opaque.nonzero(as_tuple=False)
+        # Find bbox of content across ALL frames
+        coords = is_content.nonzero(as_tuple=False)
 
         height = frames.shape[1]
         width = frames.shape[2]
 
         y_min = int(coords[:, 1].min().item())
         x_min = int(coords[:, 2].min().item())
-        y_max = int(coords[:, 1].max().item())
-        x_max = int(coords[:, 2].max().item())
+        y_max = int(coords[:, 1].max().item()) + 1  # +1 because we want inclusive
+        x_max = int(coords[:, 2].max().item()) + 1
 
-        # Add 1-pixel border (but don't exceed bounds)
+        # Add 1-pixel border
         y_min = max(y_min - 1, 0)
         x_min = max(x_min - 1, 0)
-        y_max = min(y_max + 2, height)
-        x_max = min(x_max + 2, width)
+        y_max = min(y_max + 1, height)
+        x_max = min(x_max + 1, width)
+
+        print(
+            f"Crop bounds: x=[{x_min}:{x_max}], y=[{y_min}:{y_max}], original size: {width}x{height}"
+        )
 
         # Crop all frames to this bbox
         frames = frames[:, y_min:y_max, x_min:x_max, :]
         alpha_mask = alpha_mask[:, y_min:y_max, x_min:x_max]
+
+        print(f"Output size: {frames.shape[2]}x{frames.shape[1]}")
 
         return (frames, alpha_mask)
 
