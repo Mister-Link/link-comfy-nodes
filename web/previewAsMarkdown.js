@@ -127,6 +127,13 @@ function renderMarkdown(text) {
     return `@@INLINECODE_${inlineCode.length - 1}@@`;
   });
 
+  // Extract links before processing emphasis to prevent underscores in URLs from being interpreted as emphasis
+  const links = [];
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+    links.push({ text, url });
+    return `@@LINK_${links.length - 1}@@`;
+  });
+
   html = html.replace(/^### (.*$)/gim, "<h3>$1</h3>");
   html = html.replace(/^## (.*$)/gim, "<h2>$1</h2>");
   html = html.replace(/^# (.*$)/gim, "<h1>$1</h1>");
@@ -136,10 +143,11 @@ function renderMarkdown(text) {
   html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
   html = html.replace(/_(.+?)_/g, "<em>$1</em>");
 
-  html = html.replace(
-    /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
-  );
+  // Restore links after emphasis processing
+  html = html.replace(/@@LINK_(\d+)@@/g, (_, index) => {
+    const link = links[Number(index)];
+    return `<a href="${link.url}" target="_blank" rel="noopener noreferrer">${link.text}</a>`;
+  });
 
   html = html.replace(/^(\s*[-*] .+(?:\n\s*[-*] .+)*)/gm, (list) => {
     const items = list
