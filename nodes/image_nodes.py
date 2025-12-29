@@ -249,14 +249,9 @@ class CropToContentNode:
                 mask = mask / 255.0
 
             mask = mask.clamp(0, 1)
-
-            # ComfyUI MASK: white (high values) = transparent, black (low values) = opaque
-            # We want to find the black areas, so look for LOW mask values
-            # Invert for alpha representation: alpha_mask where 1.0 = opaque, 0.0 = transparent
-            alpha_mask = 1.0 - mask
         else:
             # No mask input - assume fully opaque
-            alpha_mask = torch.ones(
+            mask = torch.ones(
                 frames.shape[0],
                 frames.shape[1],
                 frames.shape[2],
@@ -264,45 +259,47 @@ class CropToContentNode:
                 dtype=frames.dtype,
             )
 
-        # Find content pixels - anything that's NOT fully transparent (alpha > 0.0)
-        # Use a small threshold to ignore noise
+        # Find content pixels across ALL frames
+        # Mask convention: black (low values) = content, white (high values) = background
+        # Look for pixels that are close to black to avoid including white padding.
         threshold = 0.01
-        is_content = alpha_mask > threshold
+        is_content = mask <= threshold
 
         if not is_content.any():
-            # Everything transparent - return minimal crop
+            # Everything is background - return minimal crop
             frames = frames[:, :1, :1, :]
-            alpha_mask = alpha_mask[:, :1, :1]
-            return (frames, alpha_mask)
+            mask = mask[:, :1, :1]
+            return (frames, mask)
 
-        # Find bbox of content across ALL frames
+        # Find the minimum bounding box that contains content from ALL frames
+        # This ensures no actual content is cropped out from any frame
         coords = is_content.nonzero(as_tuple=False)
 
         height = frames.shape[1]
         width = frames.shape[2]
 
+        # Get the bounds that encompass all content across all frames
         y_min = int(coords[:, 1].min().item())
         x_min = int(coords[:, 2].min().item())
         y_max = int(coords[:, 1].max().item()) + 1  # +1 because we want inclusive
         x_max = int(coords[:, 2].max().item()) + 1
 
-        # Add 1-pixel border
+        # Add 1-pixel border to ensure clean edges
         y_min = max(y_min - 1, 0)
         x_min = max(x_min - 1, 0)
         y_max = min(y_max + 1, height)
         x_max = min(x_max + 1, width)
 
         print(
-            f"Crop bounds: x=[{x_min}:{x_max}], y=[{y_min}:{y_max}], original size: {width}x{height}"
+            f"CropToContent: bounds x=[{x_min}:{x_max}], y=[{y_min}:{y_max}], "
+            f"original={width}x{height}, cropped={(x_max - x_min)}x{(y_max - y_min)}"
         )
 
         # Crop all frames to this bbox
         frames = frames[:, y_min:y_max, x_min:x_max, :]
-        alpha_mask = alpha_mask[:, y_min:y_max, x_min:x_max]
+        mask = mask[:, y_min:y_max, x_min:x_max]
 
-        print(f"Output size: {frames.shape[2]}x{frames.shape[1]}")
-
-        return (frames, alpha_mask)
+        return (frames, mask)
 
 
 class PixelationDimensionsNode:
