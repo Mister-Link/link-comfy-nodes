@@ -1,3 +1,4 @@
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 from .nodes import (
@@ -64,5 +65,26 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
+
+
+def _load_model_downloader():
+    model_downloader_path = Path(__file__).parent / "Model-Downloader" / "__init__.py"
+    if not model_downloader_path.exists():
+        return
+
+    spec = spec_from_file_location(
+        "link_comfy_nodes.model_downloader", model_downloader_path
+    )
+    if not spec or not spec.loader:
+        return
+
+    try:
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        print(f"Failed to load Model-Downloader: {exc}")
+
+
+_load_model_downloader()
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
