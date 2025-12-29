@@ -223,10 +223,24 @@ class CropToContentNode:
             },
             "optional": {
                 "alpha": ("MASK",),
+                "background_color": (
+                    "STRING",
+                    {"default": "#FFFFFF", "multiline": False},
+                ),
+                "tolerance": (
+                    "FLOAT",
+                    {"default": 0.01, "min": 0.0, "max": 1.0, "step": 0.001},
+                ),
             },
         }
 
-    def crop_to_content(self, images: torch.Tensor, alpha: torch.Tensor | None = None):
+    def crop_to_content(
+        self,
+        images: torch.Tensor,
+        alpha: torch.Tensor | None = None,
+        background_color: str = "#FFFFFF",
+        tolerance: float = 0.01,
+    ):
         frames = images.detach().cpu().float()
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
@@ -251,13 +265,12 @@ class CropToContentNode:
                 mask = mask / 255.0
             alpha_mask = mask.clamp(0, 1)
 
-        # Combine alpha sources (multiply if both exist)
+        # Combine alpha sources
         if alpha_mask is not None and image_alpha is not None:
             alpha_mask = alpha_mask * image_alpha
         elif alpha_mask is None and image_alpha is not None:
             alpha_mask = image_alpha
         elif alpha_mask is None:
-            # No alpha anywhere - assume fully opaque
             alpha_mask = torch.ones(
                 frames.shape[0],
                 frames.shape[1],
@@ -266,41 +279,36 @@ class CropToContentNode:
                 dtype=frames.dtype,
             )
 
-        # Find the minimum bounding box across ALL frames
-        # Use a threshold to determine what's "transparent"
-        threshold = 0.01  # Consider anything below 1% opacity as transparent
-        active = alpha_mask > threshold
+        # Parse background color
+        bg_rgb = parse_hex_color(background_color)
+        bg_tensor = torch.tensor(
+            [bg_rgb[0] / 255.0, bg_rgb[1] / 255.0, bg_rgb[2] / 255.0],
+            dtype=frames.dtype,
+        )
 
-        if not active.any():
-            # Everything is transparent - return minimal 1x1 crop
+        # Detect content: pixel is "content" if:
+        # 1. Alpha > tolerance AND
+        # 2. RGB differs from background by more than tolerance
+        rgb_frames = frames[..., :3]
+        color_diff = torch.abs(rgb_frames - bg_tensor).max(dim=-1)[0]
+        is_content = (alpha_mask > tolerance) & (color_diff > tolerance)
+
+        if not is_content.any():
+            # No content found - return minimal crop
             frames = frames[:, :1, :1, :]
             alpha_mask = alpha_mask[:, :1, :1]
             return (frames, alpha_mask)
 
-        # Get coordinates of all non-transparent pixels across all frames
-        coords = active.nonzero(as_tuple=False)
+        # Find bbox across all frames
+        coords = is_content.nonzero(as_tuple=False)
 
-        height = alpha_mask.shape[1]
-        width = alpha_mask.shape[2]
+        height = frames.shape[1]
+        width = frames.shape[2]
 
-        # Find the tightest bbox that encompasses all non-transparent content
         y_min = int(coords[:, 1].min().item())
         x_min = int(coords[:, 2].min().item())
         y_max = int(coords[:, 1].max().item())
-        x_max = int(coords[:, 2].max().item())
-
-        # Add 1-pixel border (but don't exceed image bounds)
-        y_min = max(y_min - 1, 0)
-        x_min = max(x_min - 1, 0)
-        y_max = min(y_max + 2, height)  # +2 because range is exclusive
-        x_max = min(x_max + 2, width)
-
-        # Crop all frames to this bbox
-        frames = frames[:, y_min:y_max, x_min:x_max, :]
-        alpha_mask = alpha_mask[:, y_min:y_max, x_min:x_max]
-
-        return (frames, alpha_mask)
-
+        x_max = int(coords[:, 2].max().item
 
 class PixelationDimensionsNode:
     """Provide width/height presets for pixelation targets."""
