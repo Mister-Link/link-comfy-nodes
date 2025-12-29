@@ -69,6 +69,9 @@ app.registerExtension({
       font-size: 13px;
       line-height: 1.6;
       max-width: 400px;
+      max-height: 300px;
+      overflow-y: auto;
+      overflow-x: hidden;
       overflow-wrap: break-word;
       word-wrap: break-word;
     `;
@@ -134,17 +137,6 @@ app.registerExtension({
         } else {
           node._markdownContainer.innerHTML =
             '<em style="color: #888;">Empty input</em>';
-        }
-      }
-    };
-
-    // Resize node to fit content
-    node.onResize = function (size) {
-      if (node._markdownContainer) {
-        const contentHeight = node._markdownContainer.scrollHeight;
-        const minHeight = Math.max(200, contentHeight + 100);
-        if (size[1] < minHeight) {
-          size[1] = minHeight;
         }
       }
     };
