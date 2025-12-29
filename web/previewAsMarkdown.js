@@ -57,24 +57,36 @@ app.registerExtension({
       return;
     }
 
-    // Create a container for the markdown preview
+    const PREVIEW_MIN_HEIGHT = 140;
+    const PREVIEW_MAX_HEIGHT = 320;
+    const NODE_HEIGHT_PADDING = 84;
+
+    // Create a wrapper and container for the markdown preview
+    const wrapper = document.createElement("div");
+    wrapper.style.cssText = `
+      box-sizing: border-box;
+      padding: 8px;
+      width: 100%;
+      height: 100%;
+    `;
+
     const container = document.createElement("div");
     container.style.cssText = `
+      box-sizing: border-box;
       background: rgba(0, 0, 0, 0.2);
-      border-radius: 4px;
-      padding: 12px;
-      margin: 8px 0;
+      border-radius: 6px;
+      padding: 12px 14px;
       color: #e0e0e0;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       font-size: 13px;
       line-height: 1.6;
-      max-width: 400px;
-      max-height: 300px;
+      height: 100%;
       overflow-y: auto;
       overflow-x: hidden;
       overflow-wrap: break-word;
       word-wrap: break-word;
     `;
+    wrapper.appendChild(container);
 
     // Add style for markdown elements
     const style = document.createElement("style");
@@ -115,12 +127,30 @@ app.registerExtension({
     const previewWidget = node.addDOMWidget(
       "preview",
       "markdown_preview",
-      container,
+      wrapper,
     );
     previewWidget.serialize = false;
+    previewWidget.computeSize = function (width) {
+      const availableHeight = (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING;
+      const height = Math.min(
+        PREVIEW_MAX_HEIGHT,
+        Math.max(PREVIEW_MIN_HEIGHT, availableHeight),
+      );
+      return [width, height];
+    };
 
     // Store reference for updates
     node._markdownContainer = container;
+
+    const originalOnResize = node.onResize;
+    node.onResize = function (size) {
+      const minHeight = PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING;
+      const maxHeight = PREVIEW_MAX_HEIGHT + NODE_HEIGHT_PADDING;
+      size[1] = Math.min(maxHeight, Math.max(minHeight, size[1]));
+      if (originalOnResize) {
+        originalOnResize.apply(this, arguments);
+      }
+    };
 
     // Handle execution results
     const originalOnExecuted = node.onExecuted;

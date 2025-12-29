@@ -126,8 +126,7 @@ class PreviewAsMarkdown:
     """Preview a string as rendered markdown on the node."""
 
     CATEGORY = "utils"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("source",)
+    RETURN_TYPES = ()
     FUNCTION = "preview_markdown"
     OUTPUT_NODE = True
 
@@ -146,7 +145,6 @@ class PreviewAsMarkdown:
         """Pass through the string and send it to the UI for markdown rendering."""
         return {
             "ui": {"markdown": [source]},
-            "result": (source,),
         }
 
 
