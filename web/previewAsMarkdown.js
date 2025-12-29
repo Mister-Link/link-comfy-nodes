@@ -57,9 +57,9 @@ app.registerExtension({
       return;
     }
 
-    const PREVIEW_MIN_HEIGHT = 140;
+    const PREVIEW_MIN_HEIGHT = 80;
     const PREVIEW_MAX_HEIGHT = 320;
-    const NODE_HEIGHT_PADDING = 100; // Increased from 84 to give more margin
+    const NODE_HEIGHT_PADDING = 80;
 
     // Create a wrapper and container for the markdown preview
     const wrapper = document.createElement("div");
