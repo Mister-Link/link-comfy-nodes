@@ -232,6 +232,8 @@ class CropToContentNode:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
         has_alpha = frames.shape[-1] == 4
+        image_alpha = frames[..., 3].clamp(0, 1) if has_alpha else None
+        alpha_mask = None
         if alpha is not None:
             mask = alpha.detach().cpu().float()
             if mask.ndim == 4 and mask.shape[-1] == 1:
@@ -240,10 +242,18 @@ class CropToContentNode:
                 raise ValueError("Expected alpha mask with shape (N, H, W)")
             if mask.shape[0] != frames.shape[0]:
                 raise ValueError("Alpha mask batch size does not match images")
+            if mask.shape[1] != frames.shape[1] or mask.shape[2] != frames.shape[2]:
+                raise ValueError("Alpha mask dimensions do not match images")
+            mask_max = float(mask.max().item()) if mask.numel() else 0.0
+            if mask_max > 1.0:
+                mask = mask / 255.0
             alpha_mask = mask.clamp(0, 1)
-        elif has_alpha:
-            alpha_mask = frames[..., 3].clamp(0, 1)
-        else:
+
+        if alpha_mask is not None and image_alpha is not None:
+            alpha_mask = alpha_mask * image_alpha
+        elif alpha_mask is None and image_alpha is not None:
+            alpha_mask = image_alpha
+        elif alpha_mask is None:
             alpha_mask = torch.ones(
                 frames.shape[0],
                 frames.shape[1],
