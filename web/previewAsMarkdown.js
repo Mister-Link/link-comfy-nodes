@@ -129,7 +129,7 @@ function renderMarkdown(text) {
 
   // Extract links before processing emphasis to prevent underscores in URLs from being interpreted as emphasis
   const links = [];
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+  html = html.replace(/\[([^\]]+)\]\s*\(([^)]+)\)/g, (_, text, url) => {
     links.push({ text, url });
     return `@@LINK_${links.length - 1}@@`;
   });
@@ -139,9 +139,15 @@ function renderMarkdown(text) {
   html = html.replace(/^# (.*$)/gim, "<h1>$1</h1>");
 
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/__(.+?)__/g, "<strong>$1</strong>");
+  html = html.replace(
+    /(^|[^\w])__(.+?)__([^\w]|$)/g,
+    (_, lead, text, tail) => `${lead}<strong>${text}</strong>${tail}`,
+  );
   html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
-  html = html.replace(/_(.+?)_/g, "<em>$1</em>");
+  html = html.replace(
+    /(^|[^\w])_(.+?)_([^\w]|$)/g,
+    (_, lead, text, tail) => `${lead}<em>${text}</em>${tail}`,
+  );
 
   // Restore links after emphasis processing
   html = html.replace(/@@LINK_(\d+)@@/g, (_, index) => {
