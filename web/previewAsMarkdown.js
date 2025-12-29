@@ -59,7 +59,7 @@ app.registerExtension({
 
     const PREVIEW_MIN_HEIGHT = 140;
     const PREVIEW_MAX_HEIGHT = 320;
-    const NODE_HEIGHT_PADDING = 84;
+    const NODE_HEIGHT_PADDING = 100; // Increased from 84 to give more margin
 
     // Create a wrapper and container for the markdown preview
     const wrapper = document.createElement("div");
@@ -142,11 +142,19 @@ app.registerExtension({
     // Store reference for updates
     node._markdownContainer = container;
 
+    let lastResizeHeight = null;
     const originalOnResize = node.onResize;
     node.onResize = function (size) {
       const minHeight = PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING;
       const maxHeight = PREVIEW_MAX_HEIGHT + NODE_HEIGHT_PADDING;
-      size[1] = Math.min(maxHeight, Math.max(minHeight, size[1]));
+
+      // Only apply clamping if the user is manually resizing
+      // Prevent feedback loop by checking if height changed from last resize
+      if (lastResizeHeight !== size[1]) {
+        size[1] = Math.min(maxHeight, Math.max(minHeight, size[1]));
+        lastResizeHeight = size[1];
+      }
+
       if (originalOnResize) {
         originalOnResize.apply(this, arguments);
       }
