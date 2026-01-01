@@ -1,5 +1,6 @@
 """Node implementations grouped by domain."""
 
+from .auto_cropper import AutoCropperNode
 from .color_nodes import ColorParserNode, FarthestColorNode
 from .image_nodes import (
     CropToContentNode,
@@ -12,7 +13,6 @@ from .image_nodes import (
 from .pixel_art.node import ConvertToPixelArt
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
 from .video_nodes import (
-    AutoCropperNode,
     BatchImageSave,
     PreviewImageAlpha,
     ReplaceAlpha,
