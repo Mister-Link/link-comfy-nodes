@@ -41,6 +41,15 @@ class AutoCropperNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
+                "method": (
+                    [
+                        "anime_seg",
+                        "alpha_channel",
+                        "bbox_detection",
+                        "contour_detection",
+                    ],
+                    {"default": "bbox_detection"},
+                ),
                 "sensitivity": (
                     "FLOAT",
                     {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05},
@@ -52,14 +61,6 @@ class AutoCropperNode:
             },
             "optional": {
                 "alpha": ("MASK",),
-                "width": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": 8192, "step": 1},
-                ),
-                "height": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": 8192, "step": 1},
-                ),
             },
         }
 
@@ -79,8 +80,8 @@ class AutoCropperNode:
         return cls._model, cls._device
 
     @torch.no_grad()
-    def _segment_frame(self, frame_np, model, device, sensitivity):
-        """Segment a single frame to get the mask."""
+    def _segment_frame_anime(self, frame_np, model, device, sensitivity):
+        """Segment a single frame using anime segmentation model."""
         if frame_np.shape[2] == 4:
             bgr = frame_np[:, :, :3]
         else:
@@ -98,6 +99,71 @@ class AutoCropperNode:
         if num > 1:
             largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
             mask = (labels == largest).astype(np.uint8) * 255
+
+        return mask
+
+    def _detect_bbox_from_pixels(self, frame_np, sensitivity):
+        """Detect bounding box from non-black/non-transparent pixels."""
+        # Convert to uint8 for processing
+        frame_uint8 = (frame_np * 255).astype(np.uint8)
+
+        # Create mask from non-black pixels
+        if frame_np.shape[2] == 4:
+            # Use alpha channel if available
+            alpha = frame_uint8[:, :, 3]
+            # Also check RGB channels
+            rgb_mask = np.any(frame_uint8[:, :, :3] > int(sensitivity * 255), axis=2)
+            mask = ((alpha > int(sensitivity * 255)) & rgb_mask).astype(np.uint8) * 255
+        else:
+            # No alpha, just check if any RGB channel is non-black
+            mask = (
+                np.any(frame_uint8 > int(sensitivity * 255), axis=2).astype(np.uint8)
+                * 255
+            )
+
+        return mask
+
+    def _detect_contour(self, frame_np, sensitivity):
+        """Detect largest contour in the frame."""
+        frame_uint8 = (frame_np * 255).astype(np.uint8)
+
+        # Convert to grayscale
+        if frame_np.shape[2] == 4:
+            gray = cv2.cvtColor(frame_uint8[:, :, :3], cv2.COLOR_RGB2GRAY)
+        else:
+            gray = cv2.cvtColor(frame_uint8, cv2.COLOR_RGB2GRAY)
+
+        # Threshold
+        _, binary = cv2.threshold(gray, int(sensitivity * 255), 255, cv2.THRESH_BINARY)
+
+        # Find contours
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        # Create mask with largest contour
+        mask = np.zeros_like(gray)
+        if contours:
+            largest_contour = max(contours, key=cv2.contourArea)
+            cv2.drawContours(mask, [largest_contour], -1, 255, -1)
+
+        return mask
+
+    def _get_mask_from_alpha(self, frame_np, alpha_np, sensitivity):
+        """Use provided alpha channel as mask."""
+        if alpha_np is not None:
+            # Alpha is already provided, use it
+            mask = (alpha_np * 255).astype(np.uint8)
+            # Apply sensitivity threshold
+            mask = (mask > int(sensitivity * 255)).astype(np.uint8) * 255
+        elif frame_np.shape[2] == 4:
+            # Extract alpha from frame
+            alpha = frame_np[:, :, 3]
+            mask = (alpha * 255).astype(np.uint8)
+            mask = (mask > int(sensitivity * 255)).astype(np.uint8) * 255
+        else:
+            # No alpha available, fall back to bbox detection
+            mask = self._detect_bbox_from_pixels(frame_np, sensitivity)
 
         return mask
 
@@ -143,16 +209,19 @@ class AutoCropperNode:
     def auto_crop(
         self,
         frames: torch.Tensor,
+        method: str,
         sensitivity: float,
         padding: int,
         alpha: torch.Tensor = None,
-        width: int = 0,
-        height: int = 0,
     ):
         """Auto-crop frames to content bounds with padding."""
-        print(f"[AutoCropper] Processing {frames.shape[0]} frames...")
+        print(f"[AutoCropper] Processing {frames.shape[0]} frames using {method}...")
 
-        model, device = self._get_model()
+        # Only load model if using anime_seg method
+        if method == "anime_seg":
+            model, device = self._get_model()
+        else:
+            model, device = None, None
 
         frames_np = frames.cpu().numpy()
 
@@ -183,7 +252,21 @@ class AutoCropperNode:
         global_box = None
 
         for i, frame in enumerate(frames_np):
-            mask = self._segment_frame(frame, model, device, sensitivity)
+            # Get frame-specific alpha if available
+            frame_alpha = alpha_np[i] if alpha_np is not None else None
+
+            # Generate mask based on selected method
+            if method == "anime_seg":
+                mask = self._segment_frame_anime(frame, model, device, sensitivity)
+            elif method == "alpha_channel":
+                mask = self._get_mask_from_alpha(frame, frame_alpha, sensitivity)
+            elif method == "bbox_detection":
+                mask = self._detect_bbox_from_pixels(frame, sensitivity)
+            elif method == "contour_detection":
+                mask = self._detect_contour(frame, sensitivity)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
             bbox = self._mask_to_bbox(mask)
 
             if bbox is None:
@@ -226,13 +309,6 @@ class AutoCropperNode:
 
             cropped_frame = frame[y1:y2, x1:x2]
             cropped_alpha = alpha_frame[y1:y2, x1:x2]
-
-            if width > 0 or height > 0:
-                target_w = width if width > 0 else crop_width
-                target_h = height if height > 0 else crop_height
-                cropped_frame, cropped_alpha = self._resize_with_padding(
-                    cropped_frame, cropped_alpha, (target_w, target_h)
-                )
 
             cropped_frames.append(cropped_frame)
             cropped_alphas.append(cropped_alpha)
