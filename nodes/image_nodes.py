@@ -541,26 +541,25 @@ class SpritesheetBuilderNode:
     def _closest_grid(
         frame_count: int, target_ratio: float, frame_width: int, frame_height: int
     ) -> tuple[int, int]:
+        import math
+
         best_cols = 1
         best_rows = frame_count
         best_diff = float("inf")
-        best_cells = frame_count
 
-        for rows in range(1, frame_count + 1):
-            if frame_count % rows != 0:
-                continue
-            cols = frame_count // rows
+        # Try different column counts
+        for cols in range(1, frame_count + 1):
+            # Calculate rows needed for this column count (allowing partial last row)
+            rows = math.ceil(frame_count / cols)
+
+            # Calculate the aspect ratio of this grid
             ratio = (cols * frame_width) / (rows * frame_height)
             diff = abs(ratio - target_ratio)
-            cells = rows * cols
-            if (
-                diff < best_diff
-                or (diff == best_diff and cells < best_cells)
-                or (diff == best_diff and cells == best_cells and cols > best_cols)
-            ):
+
+            # Update if this is closer to target ratio
+            if diff < best_diff:
                 best_diff = diff
                 best_cols = cols
                 best_rows = rows
-                best_cells = cells
 
         return best_cols, best_rows
