@@ -103,23 +103,22 @@ class AutoCropperNode:
         return mask
 
     def _detect_bbox_from_pixels(self, frame_np, sensitivity):
-        """Detect bounding box from non-black/non-transparent pixels."""
+        """Detect bounding box from non-black pixels, ignoring transparency."""
         # Convert to uint8 for processing
         frame_uint8 = (frame_np * 255).astype(np.uint8)
 
-        # Create mask from non-black pixels
+        # Create mask from non-black pixels in RGB channels only
+        # Ignore alpha channel completely
         if frame_np.shape[2] == 4:
-            # Use alpha channel if available
-            alpha = frame_uint8[:, :, 3]
-            # Also check RGB channels
-            rgb_mask = np.any(frame_uint8[:, :, :3] > int(sensitivity * 255), axis=2)
-            mask = ((alpha > int(sensitivity * 255)) & rgb_mask).astype(np.uint8) * 255
+            # Only check RGB channels, ignore alpha
+            rgb_channels = frame_uint8[:, :, :3]
         else:
-            # No alpha, just check if any RGB channel is non-black
-            mask = (
-                np.any(frame_uint8 > int(sensitivity * 255), axis=2).astype(np.uint8)
-                * 255
-            )
+            rgb_channels = frame_uint8
+
+        # Check if any RGB channel is above threshold
+        mask = (
+            np.any(rgb_channels > int(sensitivity * 255), axis=2).astype(np.uint8) * 255
+        )
 
         return mask
 
