@@ -12,6 +12,7 @@ from .image_nodes import (
 from .pixel_art.node import ConvertToPixelArt
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
 from .video_nodes import (
+    AutoCropperNode,
     BatchImageSave,
     PreviewImageAlpha,
     ReplaceAlpha,
@@ -33,6 +34,7 @@ __all__ = [
     "AdvancedStringConcat",
     "PreviewAsMarkdown",
     "SaveFolderAsZip",
+    "AutoCropperNode",
     "BatchImageSave",
     "PreviewImageAlpha",
     "ReplaceAlpha",

@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .nodes import (
     AdvancedStringConcat,
+    AutoCropperNode,
     BatchImageSave,
     ColorParserNode,
     CropToContentNode,
@@ -41,6 +42,7 @@ NODE_CLASS_MAPPINGS = {
     "Concat": AdvancedStringConcat,
     "Save Folder as ZIP": SaveFolderAsZip,
     "PreviewAsMarkdown": PreviewAsMarkdown,
+    "Auto Cropper": AutoCropperNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -62,6 +64,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Concat": "Concat",
     "Save Folder as ZIP": "Save Folder as ZIP",
     "PreviewAsMarkdown": "Preview as Markdown",
+    "Auto Cropper": "Auto Cropper",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
