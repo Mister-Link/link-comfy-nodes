@@ -22,6 +22,8 @@ STATUS_URL = "https://bgeraser.com/"
 STATUS_ACTION = "1af975bb141cc30518bca9d55ab31f1f992fec60"
 STATUS_STATE = "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
 CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "bgeraser"
+BATCH_SIZE = 20
+RATE_LIMIT_SLEEP = 12.0
 
 
 def build_headers() -> tuple[dict, dict, dict]:
@@ -76,31 +78,37 @@ def _upload_image(
     name: str,
     session: requests.Session,
     headers: dict,
+    max_attempts: int = 5,
+    rate_limit_sleep: float = RATE_LIMIT_SLEEP,
 ) -> str:
     data = {"type": "4", "mattValue": "0"}
 
     last_exc: Optional[Exception] = None
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         try:
             files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
             resp = session.post(
                 UPLOAD_URL, headers=headers, files=files, data=data, timeout=30
             )
             resp.raise_for_status()
-            break
         except requests.HTTPError as exc:
             last_exc = exc
-            if attempt == 2:
+            if attempt == max_attempts - 1:
                 raise
             time.sleep(1.0)
-    if last_exc:
-        _ = last_exc
+            continue
 
-    payload = resp.json()
-    if payload.get("code") != 200:
+        payload = resp.json()
+        if payload.get("code") == 200:
+            return payload["data"]["code"]
+        if payload.get("code") == 999 and attempt < max_attempts - 1:
+            time.sleep(rate_limit_sleep)
+            continue
         raise RuntimeError(f"Upload failed: {payload}")
 
-    return payload["data"]["code"]
+    if last_exc:
+        _ = last_exc
+    raise RuntimeError("Upload failed: exhausted retries.")
 
 
 def _poll_and_download(
@@ -224,6 +232,22 @@ class BulkBackgroundRemoverBgEraserNode:
         )
         completed_counter = [0]
 
+        def flush_pending() -> None:
+            if not pending:
+                return
+            _poll_and_download(
+                pending,
+                session=session,
+                status_headers=status_headers,
+                download_headers=download_headers,
+                results=results,
+                progress_bar=progress_bar,
+                request_timeout=60.0,
+                completed_counter=completed_counter,
+            )
+            pending.clear()
+            pending_by_key.clear()
+
         for idx, img_data in enumerate(frames.numpy()):
             image_bytes = _image_to_jpeg_bytes(img_data)
             cache_key = hashlib.sha256(image_bytes).hexdigest()
@@ -256,17 +280,10 @@ class BulkBackgroundRemoverBgEraserNode:
             pending_by_key[cache_key] = code
             if progress_bar is not None:
                 progress_bar.update(1)
+            if len(pending) >= BATCH_SIZE:
+                flush_pending()
 
-        _poll_and_download(
-            pending,
-            session=session,
-            status_headers=status_headers,
-            download_headers=download_headers,
-            results=results,
-            progress_bar=progress_bar,
-            request_timeout=60.0,
-            completed_counter=completed_counter,
-        )
+        flush_pending()
 
         if any(result is None for result in results):
             raise RuntimeError("Missing output for one or more images.")
