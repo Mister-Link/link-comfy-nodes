@@ -1851,7 +1851,17 @@ class SaveImageSequenceZip:
 
     @staticmethod
     def _normalize_frames(data: torch.Tensor) -> np.ndarray:
-        frames = data.detach().cpu().float()
+        if isinstance(data, (list, tuple)):
+            frames_list = [
+                SaveImageSequenceZip._normalize_frames(item) for item in data
+            ]
+            if not frames_list:
+                raise ValueError("Expected non-empty list/tuple for frames")
+            return np.concatenate(frames_list, axis=0)
+        if isinstance(data, np.ndarray):
+            frames = torch.from_numpy(data).float()
+        else:
+            frames = data.detach().cpu().float()
         if frames.ndim == 2:
             frames = frames.unsqueeze(0).unsqueeze(-1)
         elif frames.ndim == 3:
