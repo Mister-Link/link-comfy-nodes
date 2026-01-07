@@ -6,3 +6,4 @@ transformers
 torchvision
 huggingface-hub
 pytorch_lightning
+requests

@@ -1,6 +1,7 @@
 """Node implementations grouped by domain."""
 
 from .auto_cropper import AutoCropperNode
+from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode
 from .image_nodes import (
     CropToContentNode,
@@ -25,6 +26,7 @@ __all__ = [
     "ColorParserNode",
     "FarthestColorNode",
     "ImageRotatorNode",
+    "BulkBackgroundRemoverBgEraserNode",
     "CropToContentNode",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
