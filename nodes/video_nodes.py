@@ -1679,6 +1679,7 @@ class SaveImageSequenceZip:
     RETURN_TYPES = ()
     FUNCTION = "save_sequence"
     OUTPUT_NODE = True
+    INPUT_IS_LIST = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1703,6 +1704,8 @@ class SaveImageSequenceZip:
 
     def save_sequence(self, zip_path: str, **kwargs):
         """Save connected image/mask sequences in a ZIP file."""
+        if isinstance(zip_path, (list, tuple)):
+            zip_path = zip_path[0] if zip_path else ""
 
         inputs = []
         for index in range(1, 9):
@@ -1710,6 +1713,8 @@ class SaveImageSequenceZip:
             if data is None:
                 continue
             prefix = kwargs.get(f"input{index}_prefix", f"input{index}")
+            if isinstance(prefix, (list, tuple)):
+                prefix = prefix[0] if prefix else ""
             prefix = prefix.strip() or f"input{index}"
             inputs.append((f"input{index}", data, prefix))
 

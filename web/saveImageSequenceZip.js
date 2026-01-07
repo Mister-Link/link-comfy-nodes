@@ -122,12 +122,7 @@ app.registerExtension({
       if (this.widgets?.length) {
         this.widgets
           .map((widget) => widget.name)
-          .filter(
-            (name) =>
-              name === "prefix" ||
-              name?.endsWith("_ext") ||
-              name?.endsWith("_prefix"),
-          )
+          .filter((name) => name === "prefix" || name?.endsWith("_ext"))
           .forEach((name) => removeWidget(this, name));
       }
 
