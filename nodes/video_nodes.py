@@ -1755,6 +1755,22 @@ class SaveImageSequenceZip:
                     file_name = f"{prefix}.json"
                     zipf.writestr(file_name, payload)
                     continue
+                if isinstance(data, (list, tuple)) and data:
+                    if all(isinstance(item, str) for item in data):
+                        digits = max(2, len(str(len(data))))
+                        for i, item in enumerate(data, start=1):
+                            payload = item.encode("utf-8")
+                            ext = self._extension_for_text(item)
+                            file_name = f"{prefix}_{i:0{digits}d}.{ext}"
+                            zipf.writestr(file_name, payload)
+                        continue
+                    if all(isinstance(item, dict) for item in data):
+                        digits = max(2, len(str(len(data))))
+                        for i, item in enumerate(data, start=1):
+                            payload = json.dumps(item, indent=2).encode("utf-8")
+                            file_name = f"{prefix}_{i:0{digits}d}.json"
+                            zipf.writestr(file_name, payload)
+                        continue
                 frames = self._normalize_frames(data)
 
                 # Check if prefix has an extension
