@@ -14,11 +14,16 @@ function ensureStyles() {
   style.id = STYLE_ID;
   style.textContent = `
     .lc-fast-preview {
+      box-sizing: border-box;
       width: 100%;
       height: 100%;
       display: grid;
+      grid-auto-flow: row;
       align-content: center;
       justify-content: center;
+      gap: 0;
+      overflow: hidden;
+      position: relative;
     }
     .lc-fast-preview-empty {
       color: #9a9a9a;
@@ -39,7 +44,6 @@ function ensureStyles() {
     .lc-fast-preview-item img {
       width: 100%;
       height: 100%;
-      object-fit: contain;
       display: block;
       transition: filter 0.15s ease;
     }
@@ -61,7 +65,6 @@ function ensureStyles() {
       max-height: 100%;
       width: auto;
       height: auto;
-      object-fit: contain;
       display: block;
     }
     .lc-fast-preview-overlay button {
@@ -347,6 +350,9 @@ app.registerExtension({
     }
 
     ensureStyles();
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "lc-fast-preview-wrapper";
 
     const container = document.createElement("div");
     container.className = "lc-fast-preview";
