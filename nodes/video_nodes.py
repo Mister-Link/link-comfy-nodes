@@ -1740,6 +1740,21 @@ class SaveImageSequenceZip:
         _log(f"Saving ZIP to: {full_zip_path}")
 
         # Create ZIP file
+        used_names = set()
+
+        def reserve_name(file_name: str) -> str:
+            if file_name not in used_names:
+                used_names.add(file_name)
+                return file_name
+            base, ext = os.path.splitext(file_name)
+            counter = 1
+            while True:
+                candidate = f"{base}_{counter:02d}{ext}"
+                if candidate not in used_names:
+                    used_names.add(candidate)
+                    return candidate
+                counter += 1
+
         with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             for input_name, data, prefix in inputs:
                 if data is None:
@@ -1747,28 +1762,26 @@ class SaveImageSequenceZip:
                 if isinstance(data, str):
                     payload = data.encode("utf-8")
                     ext = self._extension_for_text(data)
-                    file_name = f"{prefix}.{ext}"
+                    file_name = reserve_name(f"{prefix}.{ext}")
                     zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, dict):
                     payload = json.dumps(data, indent=2).encode("utf-8")
-                    file_name = f"{prefix}.json"
+                    file_name = reserve_name(f"{prefix}.json")
                     zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, (list, tuple)) and data:
                     if all(isinstance(item, str) for item in data):
-                        digits = max(2, len(str(len(data))))
                         for i, item in enumerate(data, start=1):
                             payload = item.encode("utf-8")
                             ext = self._extension_for_text(item)
-                            file_name = f"{prefix}_{i:0{digits}d}.{ext}"
+                            file_name = reserve_name(f"{prefix}.{ext}")
                             zipf.writestr(file_name, payload)
                         continue
                     if all(isinstance(item, dict) for item in data):
-                        digits = max(2, len(str(len(data))))
                         for i, item in enumerate(data, start=1):
                             payload = json.dumps(item, indent=2).encode("utf-8")
-                            file_name = f"{prefix}_{i:0{digits}d}.json"
+                            file_name = reserve_name(f"{prefix}.json")
                             zipf.writestr(file_name, payload)
                         continue
                 frames = self._normalize_frames(data)
@@ -1799,7 +1812,7 @@ class SaveImageSequenceZip:
                     pil_img.save(img_buffer, format=format_name)
                     img_buffer.seek(0)
 
-                    image_filename = (
+                    image_filename = reserve_name(
                         f"{prefix_base}{prefix_ext}"
                         if has_extension
                         else f"{prefix_base}.{ext}"
@@ -1837,6 +1850,7 @@ class SaveImageSequenceZip:
                                 else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                             )
 
+                        image_filename = reserve_name(image_filename)
                         zipf.writestr(image_filename, img_buffer.getvalue())
 
         _log(f"Saved ZIP to {full_zip_path}")
