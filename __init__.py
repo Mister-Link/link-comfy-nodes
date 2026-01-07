@@ -9,6 +9,7 @@ from .nodes import (
     ColorParserNode,
     CropToContentNode,
     FarthestColorNode,
+    FastImagePreviewNode,
     ImageRotatorNode,
     PixelationDimensionsNode,
     PoseImageSetupNode,
@@ -45,6 +46,7 @@ NODE_CLASS_MAPPINGS = {
     "Save Folder as ZIP": SaveFolderAsZip,
     "PreviewAsMarkdown": PreviewAsMarkdown,
     "Auto Cropper": AutoCropperNode,
+    "Fast Image Preview": FastImagePreviewNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -68,6 +70,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Save Folder as ZIP": "Save Folder as ZIP",
     "PreviewAsMarkdown": "Preview as Markdown",
     "Auto Cropper": "Auto Cropper",
+    "Fast Image Preview": "Fast Image Preview",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

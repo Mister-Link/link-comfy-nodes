@@ -1,11 +1,21 @@
 from __future__ import annotations
 
 import json
+import math
+from typing import Any, ClassVar, TypeAlias, cast
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from PIL import Image
+import numpy as np  # pyright: ignore[reportMissingImports]
+import torch  # pyright: ignore[reportMissingImports]
+import torch.nn.functional as F  # pyright: ignore[reportMissingImports]
+from PIL import Image  # pyright: ignore[reportMissingImports]
+
+np = cast(Any, np)
+torch = cast(Any, torch)
+F = cast(Any, F)
+Image = cast(Any, Image)
+
+Tensor: TypeAlias = Any
+PILImage: TypeAlias = Any
 
 from ..utils import parse_hex_color
 
@@ -13,10 +23,10 @@ from ..utils import parse_hex_color
 class ImageRotatorNode:
     """Rotate an image batch by the provided degrees with configurable background color."""
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("rotated_image",)
-    FUNCTION = "rotate_image"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE",)
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("rotated_image",)
+    FUNCTION: ClassVar[str] = "rotate_image"
+    CATEGORY: ClassVar[str] = "image/transform"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -40,7 +50,7 @@ class ImageRotatorNode:
             }
         }
 
-    def rotate_image(self, images: torch.Tensor, degrees: int, background_color: str):
+    def rotate_image(self, images: Tensor, degrees: int, background_color: str):
         bg_rgb = parse_hex_color(background_color)
         images_np = images.detach().cpu().numpy()
 
@@ -58,8 +68,8 @@ class ImageRotatorNode:
 
     @staticmethod
     def _fit_to_size(
-        pil_img: Image.Image, target_size: tuple[int, int], bg_rgb: tuple[int, int, int]
-    ):
+        pil_img: PILImage, target_size: tuple[int, int], bg_rgb: tuple[int, int, int]
+    ) -> PILImage:
         """Pad or crop image to the target size after rotation."""
         target_width, target_height = target_size
         fitted_img = Image.new("RGB", target_size, bg_rgb)
@@ -72,10 +82,10 @@ class ImageRotatorNode:
 class PoseImageSetupNode:
     """Expand an image around a bbox region and fill uncovered areas."""
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
-    FUNCTION = "setup_pose_images"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE",)
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("images",)
+    FUNCTION: ClassVar[str] = "setup_pose_images"
+    CATEGORY: ClassVar[str] = "image/transform"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -105,7 +115,7 @@ class PoseImageSetupNode:
 
     def setup_pose_images(
         self,
-        images: torch.Tensor,
+        images: Tensor,
         fill_with_color: bool,
         fill_color: str,
         width_change: int,
@@ -113,6 +123,7 @@ class PoseImageSetupNode:
         offset_x: int,
         offset_y: int,
     ):
+        _ = fill_with_color
         fill_rgb = parse_hex_color(fill_color)
         images_np = images.detach().cpu().numpy()
         img_height, img_width = images_np.shape[1:3]
@@ -129,14 +140,12 @@ class PoseImageSetupNode:
 
         # Calculate padding amounts (split evenly on each side)
         left_pad = width_change // 2
-        right_pad = width_change - left_pad
         top_pad = height_change // 2
-        bottom_pad = height_change - top_pad
 
         # Process images
         result_images = []
 
-        for img_idx, img_data in enumerate(images_np):
+        for img_data in images_np:
             img_255 = (img_data * 255).astype(np.uint8)
             if img_255.ndim == 2:
                 img_255 = img_255[:, :, None]
@@ -210,10 +219,10 @@ class PoseImageSetupNode:
 class CropToContentNode:
     """Crop images to non-transparent content with a 1-pixel border."""
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "alpha")
-    FUNCTION = "crop_to_content"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE", "MASK")
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("images", "alpha")
+    FUNCTION: ClassVar[str] = "crop_to_content"
+    CATEGORY: ClassVar[str] = "image/transform"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -226,7 +235,7 @@ class CropToContentNode:
             },
         }
 
-    def crop_to_content(self, images: torch.Tensor, alpha: torch.Tensor | None = None):
+    def crop_to_content(self, images: Tensor, alpha: Tensor | None = None):
         frames = images.detach().cpu().float()
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
@@ -290,11 +299,6 @@ class CropToContentNode:
         y_max = min(y_max + 1, height)
         x_max = min(x_max + 1, width)
 
-        print(
-            f"CropToContent: bounds x=[{x_min}:{x_max}], y=[{y_min}:{y_max}], "
-            f"original={width}x{height}, cropped={(x_max - x_min)}x{(y_max - y_min)}"
-        )
-
         # Crop all frames to this bbox
         frames = frames[:, y_min:y_max, x_min:x_max, :]
         mask = mask[:, y_min:y_max, x_min:x_max]
@@ -305,12 +309,12 @@ class CropToContentNode:
 class PixelationDimensionsNode:
     """Provide width/height presets for pixelation targets."""
 
-    RETURN_TYPES = ("INT", "INT")
-    RETURN_NAMES = ("width", "height")
-    FUNCTION = "get_dimensions"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("INT", "INT")
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("width", "height")
+    FUNCTION: ClassVar[str] = "get_dimensions"
+    CATEGORY: ClassVar[str] = "image/transform"
 
-    _PRESETS = {
+    _PRESETS: ClassVar[dict[str, tuple[int, int]]] = {
         "Spirie": (979, 1562),
         "Custom": (0, 0),
     }
@@ -346,17 +350,17 @@ class PixelationDimensionsNode:
 class ResizeImageAndMaskBySideNode:
     """Resize images and masks so the chosen side matches the target length."""
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "mask")
-    FUNCTION = "resize_by_side"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE", "MASK")
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("images", "mask")
+    FUNCTION: ClassVar[str] = "resize_by_side"
+    CATEGORY: ClassVar[str] = "image/transform"
 
-    _INTERPOLATION_MODES = {
+    _INTERPOLATION_MODES: ClassVar[dict[str, str]] = {
         "bicubic": "bicubic",
         "bilinear": "bilinear",
         "nearest exact": "nearest-exact",
     }
-    _SIDES = ["longer", "shorter"]
+    _SIDES: ClassVar[list[str]] = ["longer", "shorter"]
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -375,9 +379,9 @@ class ResizeImageAndMaskBySideNode:
 
     def resize_by_side(
         self,
-        image: torch.Tensor,
+        image: Tensor,
         length: int,
-        mask: torch.Tensor,
+        mask: Tensor,
         interpolation: str,
         side: str,
     ):
@@ -414,15 +418,19 @@ class ResizeImageAndMaskBySideNode:
         images_chw = images.permute(0, 3, 1, 2)
         mask_chw = mask.unsqueeze(1)
 
-        interp_kwargs = {"mode": self._INTERPOLATION_MODES[interpolation]}
-        if interpolation in ("bilinear", "bicubic"):
-            interp_kwargs["align_corners"] = False
-
         resized_images = F.interpolate(
-            images_chw, size=(target_height, target_width), **interp_kwargs
+            images_chw,
+            size=(target_height, target_width),
+            mode=self._INTERPOLATION_MODES[interpolation],
+            align_corners=False,
+            antialias=False,
         )
         resized_mask = F.interpolate(
-            mask_chw, size=(target_height, target_width), **interp_kwargs
+            mask_chw,
+            size=(target_height, target_width),
+            mode=self._INTERPOLATION_MODES[interpolation],
+            align_corners=False,
+            antialias=False,
         )
 
         result_images = resized_images.permute(0, 2, 3, 1)
@@ -433,12 +441,12 @@ class ResizeImageAndMaskBySideNode:
 class SpritesheetBuilderNode:
     """Combine frames into a spritesheet with a target aspect ratio."""
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("spritesheet", "alpha", "metadata")
-    FUNCTION = "build_spritesheet"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("spritesheet", "alpha", "metadata")
+    FUNCTION: ClassVar[str] = "build_spritesheet"
+    CATEGORY: ClassVar[str] = "image/transform"
 
-    _ASPECT_RATIOS = {
+    _ASPECT_RATIOS: ClassVar[dict[str, tuple[int, int]]] = {
         "1:1 (Square)": (1, 1),
         "4:3 (Landscape)": (4, 3),
         "3:4 (Portrait)": (3, 4),
@@ -457,23 +465,22 @@ class SpritesheetBuilderNode:
         }
 
     def build_spritesheet(
-        self, frames: torch.Tensor, alpha: torch.Tensor, aspect_ratio: str
+        self, frames: Tensor, alpha: Tensor | None, aspect_ratio: str
     ):
         frames_cpu = frames.detach().cpu().float()
         if frames_cpu.ndim != 4:
             raise ValueError("Expected frames with shape (N, H, W, C)")
 
+        alpha_cpu: Tensor | None = None
         if alpha is not None:
-            alpha_cpu = alpha.detach().cpu().float()
-            if alpha_cpu.ndim == 4 and alpha_cpu.shape[-1] == 1:
-                alpha_cpu = alpha_cpu[..., 0]
-            if alpha_cpu.ndim != 3:
+            alpha_tensor = alpha.detach().cpu().float()
+            if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
+                alpha_tensor = alpha_tensor[..., 0]
+            if alpha_tensor.ndim != 3:
                 raise ValueError("Expected alpha mask with shape (N, H, W)")
-            if alpha_cpu.shape[0] != frames_cpu.shape[0]:
+            if alpha_tensor.shape[0] != frames_cpu.shape[0]:
                 raise ValueError("Alpha mask batch size does not match frames")
-            alpha_cpu = alpha_cpu.clamp(0, 1)
-        else:
-            alpha_cpu = None
+            alpha_cpu = alpha_tensor.clamp(0, 1)
 
         target_ratio = self._aspect_ratio_value(aspect_ratio)
         frame_count, frame_height, frame_width, frame_channels = frames_cpu.shape
@@ -541,8 +548,6 @@ class SpritesheetBuilderNode:
     def _closest_grid(
         frame_count: int, target_ratio: float, frame_width: int, frame_height: int
     ) -> tuple[int, int]:
-        import math
-
         best_cols = 1
         best_rows = frame_count
         best_diff = float("inf")

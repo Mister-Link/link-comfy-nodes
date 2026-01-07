@@ -3,6 +3,7 @@
 from .auto_cropper import AutoCropperNode
 from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode
+from .fast_image_preview import FastImagePreviewNode
 from .image_nodes import (
     CropToContentNode,
     ImageRotatorNode,
@@ -25,6 +26,7 @@ from .video_nodes import (
 __all__ = [
     "ColorParserNode",
     "FarthestColorNode",
+    "FastImagePreviewNode",
     "ImageRotatorNode",
     "BulkBackgroundRemoverBgEraserNode",
     "CropToContentNode",

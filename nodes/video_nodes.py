@@ -3,28 +3,28 @@ from __future__ import annotations
 import base64
 import json
 import os
-import random
 import re
 import zipfile
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, List, Optional, Tuple
+from typing import Protocol, TypedDict, cast
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-import folder_paths
+import folder_paths  # type: ignore[import-untyped]
 
 from ..utils import parse_hex_color
 
 try:
     from aiohttp import web
 
-    from server import PromptServer
-except Exception:  # pragma: no cover - ComfyUI runtime handles availability
+    from server import PromptServer  # type: ignore[import-not-found]
+except Exception:
     PromptServer = None
     web = None
 
@@ -37,8 +37,56 @@ PREVIEW_CACHE_MAX_ITEMS = 5  # Increased since WebP is smaller
 PREVIEW_CACHE_MAX_BYTES = 20_000_000  # Reduced since WebP is more efficient
 
 
-def _log(message: str):
-    print(f"[VideoMaskEditor] {message}")
+def _log(message: str) -> None:
+    _ = message  # Suppress unused parameter warning
+
+
+def _coerce_int(value: object, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str, bytes, bytearray)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+class MaskBbox(TypedDict, total=False):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class MaskKeyframe(TypedDict, total=False):
+    type: str
+    bbox: MaskBbox
+    mask_data: str
+    mask_width: int
+    mask_height: int
+
+
+class _RelUrl(Protocol):
+    query: Mapping[str, str]
+
+
+class _Request(Protocol):
+    rel_url: _RelUrl
+
+    async def json(self) -> dict[str, object]: ...
+
+
+class FrameLoadResult(TypedDict):
+    frames: list[np.ndarray]
+    selected_indices: list[int]
+    target_width: int
+    target_height: int
+    original_fps: int
+    effective_fps: float
+    total_frames: int
+    frame_step: int
+    combined_step: int
 
 
 @dataclass
@@ -49,15 +97,15 @@ class MaskRegion:
     height: int
 
     @classmethod
-    def from_payload(cls, payload: Optional[Dict]) -> Optional["MaskRegion"]:
+    def from_payload(cls, payload: Mapping[str, object] | None) -> "MaskRegion | None":
         if not payload:
             return None
         try:
             return cls(
-                x=int(payload.get("x", 0)),
-                y=int(payload.get("y", 0)),
-                width=int(payload.get("width", 0)),
-                height=int(payload.get("height", 0)),
+                x=_coerce_int(payload.get("x", 0)),
+                y=_coerce_int(payload.get("y", 0)),
+                width=_coerce_int(payload.get("width", 0)),
+                height=_coerce_int(payload.get("height", 0)),
             )
         except Exception:
             return None
@@ -70,11 +118,11 @@ class MaskRegion:
         return MaskRegion(x=x, y=y, width=width, height=height)
 
 
-_mask_regions: Dict[str, MaskRegion] = {}
-_mask_regions_by_video: Dict[str, MaskRegion] = {}
-_mask_versions: Dict[str, int] = {}
-_mask_keyframes: Dict[str, Dict] = {}  # node_id -> {frame_index: mask_data}
-_preview_cache: "OrderedDict[str, Dict]" = OrderedDict()
+_mask_regions: dict[str, MaskRegion] = {}
+_mask_regions_by_video: dict[str, MaskRegion] = {}
+_mask_versions: dict[str, int] = {}
+_mask_keyframes: dict[str, dict[str, MaskKeyframe]] = {}
+_preview_cache: OrderedDict[str, dict[str, object]] = OrderedDict()
 
 # Persistence file path
 _KEYFRAMES_CACHE_FILE = os.path.join(
@@ -97,7 +145,11 @@ def _load_keyframes_from_disk():
     try:
         if os.path.exists(_KEYFRAMES_CACHE_FILE):
             with open(_KEYFRAMES_CACHE_FILE, "r") as f:
-                _mask_keyframes = json.load(f)
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    _mask_keyframes = cast(dict[str, dict[str, MaskKeyframe]], loaded)
+                else:
+                    _mask_keyframes = {}
             _log(f"Loaded keyframes from disk: {len(_mask_keyframes)} nodes")
     except Exception as e:
         _log(f"Failed to load keyframes from disk: {e}")
@@ -125,7 +177,7 @@ def _increment_mask_version(node_id: str) -> int:
     return _mask_versions[node_id]
 
 
-def _get_mask_version(node_id: Optional[str]) -> int:
+def _get_mask_version(node_id: str | None) -> int:
     if not node_id:
         return 0
     return _mask_versions.get(str(node_id), 0)
@@ -161,12 +213,18 @@ def _preview_cache_key(
     return json.dumps(key_tuple, separators=(",", ":"))
 
 
-def _maybe_cache_preview(key: str, payload: Dict):
+def _maybe_cache_preview(key: str, payload: dict[str, object]) -> None:
     """Cache preview payload when it is reasonably small."""
     try:
-        total_bytes = sum(
-            len(frame.get("data", "")) for frame in payload.get("frames", [])
-        )
+        frames = payload.get("frames")
+        if not isinstance(frames, list):
+            total_bytes = PREVIEW_CACHE_MAX_BYTES + 1
+        else:
+            total_bytes = sum(
+                len(frame.get("data", ""))
+                for frame in frames
+                if isinstance(frame, dict)
+            )
     except Exception:
         total_bytes = PREVIEW_CACHE_MAX_BYTES + 1
 
@@ -180,11 +238,11 @@ def _maybe_cache_preview(key: str, payload: Dict):
     _preview_cache.move_to_end(key)
 
     while len(_preview_cache) > PREVIEW_CACHE_MAX_ITEMS:
-        _preview_cache.popitem(last=False)
+        _ = _preview_cache.popitem(last=False)
 
 
 def _generate_masks_from_keyframes(
-    node_id: str, frame_count: int, width: int, height: int
+    node_id: str | None, frame_count: int, width: int, height: int
 ) -> np.ndarray:
     """Generate masks for all frames based on keyframe data.
 
@@ -232,7 +290,7 @@ def _generate_masks_from_keyframes(
         prev_kf_data = None
         next_kf_data = None
 
-        for i, kf_idx in enumerate(keyframe_indices):
+        for kf_idx in keyframe_indices:
             if kf_idx <= frame_idx:
                 prev_kf_idx = kf_idx
                 prev_kf_data = keyframes[str(kf_idx)]
@@ -256,7 +314,12 @@ def _generate_masks_from_keyframes(
             # Interpolate bbox position between keyframes
             prev_bbox = prev_kf_data.get("bbox", {})
 
-            if next_kf_data and next_kf_data.get("bbox") and next_kf_idx is not None:
+            if (
+                next_kf_data
+                and next_kf_data.get("bbox")
+                and next_kf_idx is not None
+                and prev_kf_idx is not None
+            ):
                 # Interpolate between two bbox keyframes
                 next_bbox = next_kf_data.get("bbox", {})
 
@@ -357,7 +420,7 @@ def _calculate_target_size(
     custom_width: int,
     custom_height: int,
     downscale_ratio: int = 8,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     if custom_width == 0 and custom_height == 0:
         target_width, target_height = width, height
     elif custom_height == 0:
@@ -382,8 +445,8 @@ def _load_frames_from_folder(
     frame_load_cap: int,
     skip_first_frames: int,
     select_every_nth: int,
-    preview_max_frames: Optional[int] = None,
-):
+    preview_max_frames: int | None = None,
+) -> FrameLoadResult:
     """Load frames from a folder of images."""
     if not os.path.isdir(folder_path):
         raise ValueError(f"Not a directory: {folder_path}")
@@ -412,8 +475,8 @@ def _load_frames_from_folder(
         width, height, custom_width, custom_height
     )
 
-    frames_list: List[np.ndarray] = []
-    selected_frame_indices: List[int] = []
+    frames_list: list[np.ndarray] = []
+    selected_frame_indices: list[int] = []
 
     max_frames = frame_load_cap if frame_load_cap > 0 else None
     if preview_max_frames is not None and preview_max_frames > 0:
@@ -442,7 +505,9 @@ def _load_frames_from_folder(
                 img = img.convert("RGB")
 
             if target_width != width or target_height != height:
-                img = img.resize((target_width, target_height), Image.LANCZOS)
+                img = img.resize(
+                    (target_width, target_height), Image.Resampling.LANCZOS
+                )
 
             frame = np.array(img, dtype=np.float32) / 255.0
             if frame.ndim == 2:
@@ -488,8 +553,8 @@ def _load_video_frames(
     frame_load_cap: int,
     skip_first_frames: int,
     select_every_nth: int,
-    preview_max_frames: Optional[int] = None,
-):
+    preview_max_frames: int | None = None,
+) -> FrameLoadResult:
     video_cap = cv2.VideoCapture(video_path)
     if not video_cap.isOpened():
         raise ValueError(f"Could not open video: {video_path}")
@@ -520,8 +585,8 @@ def _load_video_frames(
     combined_step = max(1, select_every_nth) * frame_step
     offset_adjustment = 1 if frame_step > 1 else 0
 
-    frames_list: List[np.ndarray] = []
-    selected_frame_indices: List[int] = []
+    frames_list: list[np.ndarray] = []
+    selected_frame_indices: list[int] = []
     frame_index = 0
 
     max_frames = frame_load_cap if frame_load_cap > 0 else None
@@ -595,11 +660,11 @@ def _load_video_frames(
 class VideoMaskEditor:
     """Load a video, create bbox for regions, and expose preview endpoints."""
 
-    CATEGORY = "Video/Masking"
-    RETURN_TYPES = ("IMAGE", "INT", "MASK", "MASK")
-    RETURN_NAMES = ("frames", "frame_count", "masks", "alpha_channel")
-    FUNCTION = "load_video"
-    OUTPUT_NODE = False
+    CATEGORY: str = "Video/Masking"
+    RETURN_TYPES: tuple[str, ...] = ("IMAGE", "INT", "MASK", "MASK")
+    RETURN_NAMES: tuple[str, ...] = ("frames", "frame_count", "masks", "alpha_channel")
+    FUNCTION: str = "load_video"
+    OUTPUT_NODE: bool = False
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -663,8 +728,9 @@ class VideoMaskEditor:
         is_wan: bool,
         bg_color: str,
         force_size: str = "",
-        unique_id: Optional[str] = None,
+        unique_id: str | None = None,
     ):
+        _ = force_size  # Suppress unused parameter warning
         video_path = folder_paths.get_annotated_filepath(source)
         source_total_frames = 0
 
@@ -677,6 +743,7 @@ class VideoMaskEditor:
             ]
             source_total_frames = len(image_files)
         elif os.path.isfile(video_path):
+            video_cap = None
             try:
                 video_cap = cv2.VideoCapture(video_path)
                 if not video_cap.isOpened():
@@ -685,7 +752,7 @@ class VideoMaskEditor:
                     )
                 source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
             finally:
-                if video_cap:
+                if video_cap is not None:
                     video_cap.release()
 
         if is_wan and frame_load_cap > 0 and source_total_frames > 0:
@@ -845,7 +912,7 @@ class VideoMaskEditor:
         _log(
             f"Frames tensor shape: {frames_tensor.shape}, dtype: {frames_tensor.dtype}"
         )
-        json.dumps(selected_frame_indices)  # backward compatibility noop
+        _ = json.dumps(selected_frame_indices)  # backward compatibility noop
 
         # Generate masks from keyframes
         masks_array = _generate_masks_from_keyframes(
@@ -859,10 +926,12 @@ class VideoMaskEditor:
         return frames_tensor, frames_tensor.shape[0], masks_tensor, alpha_tensor
 
     @classmethod
-    def IS_CHANGED(cls, source, **kwargs):
+    def IS_CHANGED(cls, source: str, **kwargs: object) -> str:
         video_path = folder_paths.get_annotated_filepath(source)
         unique_id = kwargs.get("unique_id")
-        mask_version = _get_mask_version(unique_id)
+        mask_version = _get_mask_version(
+            str(unique_id) if unique_id is not None else None
+        )
         video_mtime = os.path.getmtime(video_path) if os.path.exists(video_path) else -1
 
         key = (
@@ -883,7 +952,8 @@ class VideoMaskEditor:
         return json.dumps(key, separators=(",", ":"))
 
     @classmethod
-    def VALIDATE_INPUTS(cls, source, **kwargs):
+    def VALIDATE_INPUTS(cls, source: str, **kwargs: object) -> str | bool:
+        _ = kwargs
         if not folder_paths.exists_annotated_filepath(source):
             return f"Invalid video file: {source}"
         return True
@@ -913,19 +983,24 @@ def _register_preview_route():
     if PromptServer is None or web is None:
         return
 
-    @PromptServer.instance.routes.get("/videomaskeditor/preview")
-    async def video_mask_editor_preview(request):  # pylint: disable=unused-variable
+    server = PromptServer
+    aiohttp_web = web
+
+    @server.instance.routes.get("/videomaskeditor/preview")
+    async def video_mask_editor_preview(request: _Request):  # pylint: disable=unused-variable
         params = request.rel_url.query
         video_name = params.get("video")
         node_id = params.get("node_id")  # Added to get keyframes for this node
 
         if not video_name:
-            return web.json_response({"error": "Missing video parameter"}, status=400)
+            return aiohttp_web.json_response(
+                {"error": "Missing video parameter"}, status=400
+            )
 
         if not folder_paths.exists_annotated_filepath(video_name):
-            return web.json_response({"error": "Video not found"}, status=404)
+            return aiohttp_web.json_response({"error": "Video not found"}, status=404)
 
-        def _int_param(key: str, default: int, minimum: Optional[int] = None) -> int:
+        def _int_param(key: str, default: int, minimum: int | None = None) -> int:
             try:
                 value = int(params.get(key, default))
             except (TypeError, ValueError):
@@ -956,6 +1031,7 @@ def _register_preview_route():
         mask_version = _get_mask_version(node_id)
         cache_key = None
 
+        processing_result: FrameLoadResult
         try:
             video_path = folder_paths.get_annotated_filepath(video_name)
             video_mtime = os.path.getmtime(video_path)
@@ -977,10 +1053,12 @@ def _register_preview_route():
             if cache_key in _preview_cache:
                 cached_payload = _preview_cache[cache_key]
                 _preview_cache.move_to_end(cache_key)
-                _log(
-                    f"Preview cache HIT for {video_name} ({len(cached_payload.get('frames', []))} frames)"
+                cached_frames = cached_payload.get("frames")
+                cached_count = (
+                    len(cached_frames) if isinstance(cached_frames, list) else 0
                 )
-                return web.json_response(cached_payload)
+                _log(f"Preview cache HIT for {video_name} ({cached_count} frames)")
+                return aiohttp_web.json_response(cached_payload)
 
             # Detect if it's a directory or file
             if os.path.isdir(video_path):
@@ -1006,7 +1084,7 @@ def _register_preview_route():
                     preview_max_frames=max_preview_frames,
                 )
         except Exception as exc:  # pragma: no cover - surfaced in UI
-            return web.json_response({"error": str(exc)}, status=400)
+            return aiohttp_web.json_response({"error": str(exc)}, status=400)
 
         # --- Generate masks and apply overlays ---
         masks_array = None
@@ -1022,7 +1100,7 @@ def _register_preview_route():
                 _log(f"Could not generate masks for preview: {e}")
         # --- End mask generation ---
 
-        frames_payload = []
+        frames_payload: list[dict[str, object]] = []
         for idx, frame_data in enumerate(processing_result["frames"]):
             # Keep RGBA if present, otherwise use RGB
             has_alpha = frame_data.shape[-1] == 4
@@ -1110,7 +1188,7 @@ def _register_preview_route():
                 }
             )
 
-        response_payload = {
+        response_payload: dict[str, object] = {
             "frames": frames_payload,
             "fps": processing_result["effective_fps"],
             "original_fps": processing_result["original_fps"],
@@ -1121,67 +1199,84 @@ def _register_preview_route():
         if cache_key:
             _maybe_cache_preview(cache_key, response_payload)
 
-        return web.json_response(response_payload)
+        return aiohttp_web.json_response(response_payload)
 
 
 def _register_mask_route():
     if PromptServer is None or web is None:
         return
 
-    @PromptServer.instance.routes.post("/videomaskeditor/setmask")
-    async def video_mask_editor_setmask(request):  # pylint: disable=unused-variable
+    server = PromptServer
+    aiohttp_web = web
+
+    @server.instance.routes.post("/videomaskeditor/setmask")
+    async def video_mask_editor_setmask(request: _Request):  # pylint: disable=unused-variable
         try:
             data = await request.json()
             node_id = data.get("node_id")
-            region = MaskRegion.from_payload(data.get("mask_region"))
+            mask_region_payload = data.get("mask_region")
+            region = MaskRegion.from_payload(
+                mask_region_payload
+                if isinstance(mask_region_payload, Mapping)
+                else None
+            )
             video = data.get("video")
 
             if node_id is None:
-                return web.json_response({"error": "Missing node_id"}, status=400)
+                return aiohttp_web.json_response(
+                    {"error": "Missing node_id"}, status=400
+                )
 
+            node_id_str = str(node_id)
             region = region if region else MaskRegion(0, 0, 0, 0)
-            _mask_regions[str(node_id)] = region
+            _mask_regions[node_id_str] = region
             if video:
                 _mask_regions_by_video[str(video)] = region
 
-            _log(f"Mask region set for node {node_id}: {region}")
+            _log(f"Mask region set for node {node_id_str}: {region}")
             _log(f"_mask_regions after setting: {_mask_regions}")
             _log(f"_mask_regions dict id: {id(_mask_regions)}")
-            _increment_mask_version(node_id)
+            _ = _increment_mask_version(node_id_str)
 
             # Notify the frontend that this node needs to be re-executed
-            PromptServer.instance.send_sync(
-                "videomaskeditor.mask_updated", {"node_id": node_id}
+            _ = server.instance.send_sync(
+                "videomaskeditor.mask_updated", {"node_id": node_id_str}
             )
 
-            return web.json_response({"success": True})
+            return aiohttp_web.json_response({"success": True})
         except Exception as exc:
             _log(f"Error setting mask: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
 
 def _register_clear_mask_route():
     if PromptServer is None or web is None:
         return
 
-    @PromptServer.instance.routes.post("/videomaskeditor/clearmask")
-    async def video_mask_editor_clearmask(request):  # pylint: disable=unused-variable
+    server = PromptServer
+    aiohttp_web = web
+
+    @server.instance.routes.post("/videomaskeditor/clearmask")
+    async def video_mask_editor_clearmask(request: _Request):  # pylint: disable=unused-variable
         try:
             data = await request.json()
             node_id = data.get("node_id")
 
             if node_id is None:
-                return web.json_response({"error": "Missing node_id"}, status=400)
+                return aiohttp_web.json_response(
+                    {"error": "Missing node_id"}, status=400
+                )
 
-            if str(node_id) in _mask_regions:
-                del _mask_regions[str(node_id)]
-                _log(f"Cleared mask region for node {node_id}")
-            _increment_mask_version(node_id)
+            node_id_str = str(node_id)
+            if node_id_str in _mask_regions:
+                del _mask_regions[node_id_str]
+                _log(f"Cleared mask region for node {node_id_str}")
+            _ = _increment_mask_version(node_id_str)
 
-            return web.json_response({"success": True})
+            return aiohttp_web.json_response({"success": True})
         except Exception as exc:
             _log(f"Error clearing mask: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
 
 def _register_keyframe_routes():
@@ -1189,8 +1284,11 @@ def _register_keyframe_routes():
     if PromptServer is None or web is None:
         return
 
-    @PromptServer.instance.routes.post("/videomaskeditor/setkeyframe")
-    async def video_mask_editor_setkeyframe(request):
+    server = PromptServer
+    aiohttp_web = web
+
+    @server.instance.routes.post("/videomaskeditor/setkeyframe")
+    async def video_mask_editor_setkeyframe(request: _Request):
         """Set a mask keyframe for a specific frame."""
         try:
             data = await request.json()
@@ -1201,41 +1299,58 @@ def _register_keyframe_routes():
             mask_data = data.get("mask_data")  # base64 painted mask
 
             if node_id is None or frame_index is None:
-                return web.json_response(
+                return aiohttp_web.json_response(
                     {"error": "Missing node_id or frame_index"}, status=400
                 )
 
-            node_id = str(node_id)
-            if node_id not in _mask_keyframes:
-                _mask_keyframes[node_id] = {}
+            node_id_str = str(node_id)
+            if node_id_str not in _mask_keyframes:
+                _mask_keyframes[node_id_str] = {}
+
+            bbox_payload: MaskBbox | None = None
+            if isinstance(bbox_data, Mapping):
+                bbox_payload = {
+                    "x": _coerce_int(bbox_data.get("x", 0)),
+                    "y": _coerce_int(bbox_data.get("y", 0)),
+                    "width": _coerce_int(bbox_data.get("width", 0)),
+                    "height": _coerce_int(bbox_data.get("height", 0)),
+                }
+
+            mask_entry: MaskKeyframe = {
+                "type": str(mask_type),
+            }
+            if bbox_payload is not None:
+                mask_entry["bbox"] = bbox_payload
+            if isinstance(mask_data, str):
+                mask_entry["mask_data"] = mask_data
+            mask_width = data.get("mask_width")
+            mask_height = data.get("mask_height")
+            if mask_width is not None:
+                mask_entry["mask_width"] = _coerce_int(mask_width)
+            if mask_height is not None:
+                mask_entry["mask_height"] = _coerce_int(mask_height)
 
             # Support hybrid keyframes with both bbox and painted data
-            _mask_keyframes[node_id][str(frame_index)] = {
-                "type": mask_type,
-                "bbox": bbox_data,
-                "mask_data": mask_data,
-                "mask_width": data.get("mask_width"),
-                "mask_height": data.get("mask_height"),
-            }
+            _mask_keyframes[node_id_str][str(frame_index)] = mask_entry
 
             _log(
-                f"Set keyframe for node {node_id}, frame {frame_index}, type {mask_type}"
+                f"Set keyframe for node {node_id_str}, frame {frame_index}, type {mask_type}"
             )
-            _increment_mask_version(node_id)
+            _ = _increment_mask_version(node_id_str)
             _save_keyframes_to_disk()
 
             # Notify frontend
-            PromptServer.instance.send_sync(
-                "videomaskeditor.mask_updated", {"node_id": node_id}
+            _ = server.instance.send_sync(
+                "videomaskeditor.mask_updated", {"node_id": node_id_str}
             )
 
-            return web.json_response({"success": True})
+            return aiohttp_web.json_response({"success": True})
         except Exception as exc:
             _log(f"Error setting keyframe: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
-    @PromptServer.instance.routes.post("/videomaskeditor/deletekeyframe")
-    async def video_mask_editor_deletekeyframe(request):
+    @server.instance.routes.post("/videomaskeditor/deletekeyframe")
+    async def video_mask_editor_deletekeyframe(request: _Request):
         """Delete a specific keyframe."""
         try:
             data = await request.json()
@@ -1243,76 +1358,109 @@ def _register_keyframe_routes():
             frame_index = data.get("frame_index")
 
             if node_id is None or frame_index is None:
-                return web.json_response(
+                return aiohttp_web.json_response(
                     {"error": "Missing node_id or frame_index"}, status=400
                 )
 
-            node_id = str(node_id)
+            node_id_str = str(node_id)
             if (
-                node_id in _mask_keyframes
-                and str(frame_index) in _mask_keyframes[node_id]
+                node_id_str in _mask_keyframes
+                and str(frame_index) in _mask_keyframes[node_id_str]
             ):
-                del _mask_keyframes[node_id][str(frame_index)]
-                _log(f"Deleted keyframe for node {node_id}, frame {frame_index}")
-                _increment_mask_version(node_id)
+                del _mask_keyframes[node_id_str][str(frame_index)]
+                _log(f"Deleted keyframe for node {node_id_str}, frame {frame_index}")
+                _ = _increment_mask_version(node_id_str)
                 _save_keyframes_to_disk()
 
-                PromptServer.instance.send_sync(
-                    "videomaskeditor.mask_updated", {"node_id": node_id}
+                _ = server.instance.send_sync(
+                    "videomaskeditor.mask_updated", {"node_id": node_id_str}
                 )
 
-            return web.json_response({"success": True})
+            return aiohttp_web.json_response({"success": True})
         except Exception as exc:
             _log(f"Error deleting keyframe: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
-    @PromptServer.instance.routes.get("/videomaskeditor/getkeyframes")
-    async def video_mask_editor_getkeyframes(request):
+    @server.instance.routes.get("/videomaskeditor/getkeyframes")
+    async def video_mask_editor_getkeyframes(request: _Request):
         """Get all keyframes for a node."""
         try:
             params = request.rel_url.query
             node_id = params.get("node_id")
 
             if not node_id:
-                return web.json_response({"error": "Missing node_id"}, status=400)
+                return aiohttp_web.json_response(
+                    {"error": "Missing node_id"}, status=400
+                )
 
-            node_id = str(node_id)
-            keyframes = _mask_keyframes.get(node_id, {})
+            node_id_str = str(node_id)
+            keyframes = _mask_keyframes.get(node_id_str, {})
 
-            return web.json_response({"keyframes": keyframes})
+            return aiohttp_web.json_response({"keyframes": keyframes})
         except Exception as exc:
             _log(f"Error getting keyframes: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
-    @PromptServer.instance.routes.post("/videomaskeditor/restorekeyframes")
-    async def video_mask_editor_restorekeyframes(request):
+    @server.instance.routes.post("/videomaskeditor/restorekeyframes")
+    async def video_mask_editor_restorekeyframes(request: _Request):
         """Restore keyframes to a previous state (used for cancel functionality)."""
         try:
             data = await request.json()
             node_id = data.get("node_id")
-            keyframes = data.get("keyframes", {})
+            keyframes_raw = data.get("keyframes", {})
 
             if node_id is None:
-                return web.json_response({"error": "Missing node_id"}, status=400)
+                return aiohttp_web.json_response(
+                    {"error": "Missing node_id"}, status=400
+                )
 
-            node_id = str(node_id)
+            node_id_str = str(node_id)
+            keyframes: dict[str, MaskKeyframe] = {}
+            if isinstance(keyframes_raw, dict):
+                for key, value in keyframes_raw.items():
+                    if not isinstance(value, Mapping):
+                        continue
+                    restored_entry: MaskKeyframe = {}
+                    restored_type = value.get("type")
+                    if isinstance(restored_type, str):
+                        restored_entry["type"] = restored_type
+                    restored_bbox = value.get("bbox")
+                    if isinstance(restored_bbox, Mapping):
+                        restored_entry["bbox"] = {
+                            "x": _coerce_int(restored_bbox.get("x", 0)),
+                            "y": _coerce_int(restored_bbox.get("y", 0)),
+                            "width": _coerce_int(restored_bbox.get("width", 0)),
+                            "height": _coerce_int(restored_bbox.get("height", 0)),
+                        }
+                    restored_mask_data = value.get("mask_data")
+                    if isinstance(restored_mask_data, str):
+                        restored_entry["mask_data"] = restored_mask_data
+                    if "mask_width" in value:
+                        restored_entry["mask_width"] = _coerce_int(
+                            value.get("mask_width")
+                        )
+                    if "mask_height" in value:
+                        restored_entry["mask_height"] = _coerce_int(
+                            value.get("mask_height")
+                        )
+                    keyframes[str(key)] = restored_entry
 
             # Restore the keyframes to the provided state
-            _mask_keyframes[node_id] = keyframes
+            _mask_keyframes[node_id_str] = keyframes
 
-            _log(f"Restored keyframes for node {node_id} (count: {len(keyframes)})")
-            _increment_mask_version(node_id)
+            _log(f"Restored keyframes for node {node_id_str} (count: {len(keyframes)})")
+            _ = _increment_mask_version(node_id_str)
             _save_keyframes_to_disk()
 
             # Notify frontend
-            PromptServer.instance.send_sync(
-                "videomaskeditor.mask_updated", {"node_id": node_id}
+            _ = server.instance.send_sync(
+                "videomaskeditor.mask_updated", {"node_id": node_id_str}
             )
 
-            return web.json_response({"success": True})
+            return aiohttp_web.json_response({"success": True})
         except Exception as exc:
             _log(f"Error restoring keyframes: {exc}")
-            return web.json_response({"error": str(exc)}, status=500)
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
 
 _register_preview_route()
@@ -1327,10 +1475,10 @@ _load_keyframes_from_disk()
 class WANFrameCalculatorNode:
     """Calculate nearest WAN-compatible frame count (1 + 4x)."""
 
-    RETURN_TYPES = ("INT",)
-    RETURN_NAMES = ("wan_frames",)
-    FUNCTION = "calculate_wan_frames"
-    CATEGORY = "animation/utils"
+    RETURN_TYPES: tuple[str, ...] = ("INT",)
+    RETURN_NAMES: tuple[str, ...] = ("wan_frames",)
+    FUNCTION: str = "calculate_wan_frames"
+    CATEGORY: str = "animation/utils"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1375,11 +1523,11 @@ class WANFrameCalculatorNode:
 class ReplaceAlpha:
     """Replace alpha channel with a color in masked regions."""
 
-    CATEGORY = "Video/Masking"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("frames", "alpha")
-    FUNCTION = "replace_alpha"
-    OUTPUT_NODE = False
+    CATEGORY: str = "Video/Masking"
+    RETURN_TYPES: tuple[str, ...] = ("IMAGE", "MASK")
+    RETURN_NAMES: tuple[str, ...] = ("frames", "alpha")
+    FUNCTION: str = "replace_alpha"
+    OUTPUT_NODE: bool = False
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1461,10 +1609,10 @@ class ReplaceAlpha:
 class PreviewImageAlpha:
     """Preview images with alpha transparency (no background replacement)."""
 
-    CATEGORY = "Video/Masking"
-    RETURN_TYPES = ()
-    FUNCTION = "preview_alpha"
-    OUTPUT_NODE = True
+    CATEGORY: str = "Video/Masking"
+    RETURN_TYPES: tuple[str, ...] = ()
+    FUNCTION: str = "preview_alpha"
+    OUTPUT_NODE: bool = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1529,11 +1677,11 @@ class PreviewImageAlpha:
 class BatchImageSave:
     """Save a batch of images with sequential naming."""
 
-    CATEGORY = "image"
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("folder_path", "file_names")
-    FUNCTION = "save_images"
-    OUTPUT_NODE = True
+    CATEGORY: str = "image"
+    RETURN_TYPES: tuple[str, ...] = ("STRING", "STRING")
+    RETURN_NAMES: tuple[str, ...] = ("folder_path", "file_names")
+    FUNCTION: str = "save_images"
+    OUTPUT_NODE: bool = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1675,11 +1823,11 @@ class BatchImageSave:
 class SaveImageSequenceZip:
     """Save connected image/mask sequences as files in a ZIP archive."""
 
-    CATEGORY = "Video/Masking"
-    RETURN_TYPES = ()
-    FUNCTION = "save_sequence"
-    OUTPUT_NODE = True
-    INPUT_IS_LIST = True
+    CATEGORY: str = "Video/Masking"
+    RETURN_TYPES: tuple[str, ...] = ()
+    FUNCTION: str = "save_sequence"
+    OUTPUT_NODE: bool = True
+    INPUT_IS_LIST: bool = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -1702,7 +1850,7 @@ class SaveImageSequenceZip:
             },
         }
 
-    def save_sequence(self, zip_path: str, **kwargs):
+    def save_sequence(self, zip_path: str, **kwargs: object):
         """Save connected image/mask sequences in a ZIP file."""
         if isinstance(zip_path, (list, tuple)):
             zip_path = zip_path[0] if zip_path else ""
@@ -1712,11 +1860,12 @@ class SaveImageSequenceZip:
             data = kwargs.get(f"input{index}")
             if data is None:
                 continue
-            prefix = kwargs.get(f"input{index}_prefix", f"input{index}")
-            if isinstance(prefix, (list, tuple)):
-                prefix = prefix[0] if prefix else ""
-            prefix = prefix.strip() or f"input{index}"
-            inputs.append((f"input{index}", data, prefix))
+            prefix_value = kwargs.get(f"input{index}_prefix", f"input{index}")
+            if isinstance(prefix_value, (list, tuple)):
+                prefix_value = prefix_value[0] if prefix_value else ""
+            prefix_text = prefix_value if isinstance(prefix_value, str) else ""
+            prefix_text = prefix_text.strip() or f"input{index}"
+            inputs.append((f"input{index}", data, prefix_text))
 
         # Process zip_path: add .zip extension if not present
         zip_path = zip_path.strip()
@@ -1756,19 +1905,19 @@ class SaveImageSequenceZip:
                 counter += 1
 
         with zipfile.ZipFile(full_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for input_name, data, prefix in inputs:
+            for _input_name, data, prefix in inputs:
                 if data is None:
                     continue
                 if isinstance(data, str):
                     payload = data.encode("utf-8")
                     ext = self._extension_for_text(data)
                     file_name = reserve_name(f"{prefix}.{ext}")
-                    zipf.writestr(file_name, payload)
+                    _ = zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, dict):
                     payload = json.dumps(data, indent=2).encode("utf-8")
                     file_name = reserve_name(f"{prefix}.json")
-                    zipf.writestr(file_name, payload)
+                    _ = zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, (list, tuple)) and data:
                     if all(isinstance(item, str) for item in data):
@@ -1776,13 +1925,13 @@ class SaveImageSequenceZip:
                             payload = item.encode("utf-8")
                             ext = self._extension_for_text(item)
                             file_name = reserve_name(f"{prefix}.{ext}")
-                            zipf.writestr(file_name, payload)
+                            _ = zipf.writestr(file_name, payload)
                         continue
                     if all(isinstance(item, dict) for item in data):
                         for i, item in enumerate(data, start=1):
                             payload = json.dumps(item, indent=2).encode("utf-8")
                             file_name = reserve_name(f"{prefix}.json")
-                            zipf.writestr(file_name, payload)
+                            _ = zipf.writestr(file_name, payload)
                         continue
                 frames = self._normalize_frames(data)
 
@@ -1810,7 +1959,7 @@ class SaveImageSequenceZip:
                     pil_img = self._to_pil(frames[0], ext)
                     img_buffer = BytesIO()
                     pil_img.save(img_buffer, format=format_name)
-                    img_buffer.seek(0)
+                    _ = img_buffer.seek(0)
 
                     image_filename = reserve_name(
                         f"{prefix_base}{prefix_ext}"
@@ -1818,7 +1967,7 @@ class SaveImageSequenceZip:
                         else f"{prefix_base}.{ext}"
                     )
 
-                    zipf.writestr(image_filename, img_buffer.getvalue())
+                    _ = zipf.writestr(image_filename, img_buffer.getvalue())
                 else:
                     # For batches, use format string if present, otherwise use global index
                     for i in range(frames.shape[0]):
@@ -1826,7 +1975,7 @@ class SaveImageSequenceZip:
                         pil_img = self._to_pil(frames[i], ext)
                         img_buffer = BytesIO()
                         pil_img.save(img_buffer, format=format_name)
-                        img_buffer.seek(0)
+                        _ = img_buffer.seek(0)
 
                         # Check if prefix contains format string (e.g., {:02d})
                         if "{" in prefix_base:
@@ -1851,7 +2000,7 @@ class SaveImageSequenceZip:
                             )
 
                         image_filename = reserve_name(image_filename)
-                        zipf.writestr(image_filename, img_buffer.getvalue())
+                        _ = zipf.writestr(image_filename, img_buffer.getvalue())
 
         _log(f"Saved ZIP to {full_zip_path}")
 
@@ -1885,7 +2034,7 @@ class SaveImageSequenceZip:
         return "txt"
 
     @staticmethod
-    def _normalize_frames(data: torch.Tensor) -> np.ndarray:
+    def _normalize_frames(data: torch.Tensor | np.ndarray | list | tuple) -> np.ndarray:
         if isinstance(data, (list, tuple)):
             frames_list = [
                 SaveImageSequenceZip._normalize_frames(item) for item in data

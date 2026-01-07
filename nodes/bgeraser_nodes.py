@@ -5,16 +5,23 @@ import io
 import json
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Protocol
 
 import numpy as np
 import requests
 import torch
 from PIL import Image
 
+
+class ProgressBarProtocol(Protocol):
+    """Protocol for ComfyUI ProgressBar."""
+
+    def update(self, value: int) -> None: ...
+
+
 try:
-    from comfy.utils import ProgressBar
-except Exception:  # pragma: no cover - ComfyUI provides this dsaat runtime.
+    from comfy.utils import ProgressBar  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - ComfyUI provides this at runtime.
     ProgressBar = None
 
 UPLOAD_URL = "https://photoai.imglarger.com/api/PhoAi/Upload"
@@ -26,7 +33,7 @@ BATCH_SIZE = 20
 RATE_LIMIT_SLEEP = 12.0
 
 
-def build_headers() -> tuple[dict, dict, dict]:
+def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     upload_headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
         "Origin": "https://bgeraser.com",
@@ -56,7 +63,9 @@ def build_headers() -> tuple[dict, dict, dict]:
     return upload_headers, status_headers, download_headers
 
 
-def _image_to_jpeg_bytes(image: np.ndarray) -> bytes:
+def _image_to_jpeg_bytes(
+    image: np.ndarray[tuple[int, ...], np.dtype[np.floating]],
+) -> bytes:
     img_255 = (image * 255.0).clip(0, 255).astype(np.uint8)
     if img_255.ndim == 2:
         pil_img = Image.fromarray(img_255, mode="L").convert("RGB")
@@ -77,13 +86,13 @@ def _upload_image(
     image_bytes: bytes,
     name: str,
     session: requests.Session,
-    headers: dict,
+    headers: dict[str, str],
     max_attempts: int = 5,
     rate_limit_sleep: float = RATE_LIMIT_SLEEP,
 ) -> str:
     data = {"type": "4", "mattValue": "0"}
 
-    last_exc: Optional[Exception] = None
+    last_exc: Exception | None = None
     for attempt in range(max_attempts):
         try:
             files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
@@ -112,19 +121,19 @@ def _upload_image(
 
 
 def _poll_and_download(
-    pending: Dict[str, Tuple[List[int], str]],
+    pending: dict[str, tuple[list[int], str]],
     session: requests.Session,
-    status_headers: dict,
-    download_headers: dict,
-    results: List[Optional[np.ndarray]],
-    progress_bar: Optional[object],
+    status_headers: dict[str, str],
+    download_headers: dict[str, str],
+    results: list[np.ndarray[tuple[int, ...], np.dtype[np.floating]] | None],
+    progress_bar: ProgressBarProtocol | None,
     request_timeout: float,
-    completed_counter: List[int],
+    completed_counter: list[int],
 ) -> None:
     check_interval = 3.0
     max_checks = 120
     total = len(results)
-    failure_counts: Dict[str, int] = {}
+    failure_counts: dict[str, int] = {}
     for _ in range(max_checks):
         if not pending:
             return
@@ -139,7 +148,7 @@ def _poll_and_download(
             )
             status.raise_for_status()
         except requests.RequestException as exc:
-            print(f"BgEraser: status check failed ({exc}); retrying...")
+            print(f"BgEraser: status check failed ({exc}); retrying...")  # noqa: T201
             time.sleep(check_interval)
             continue
         data_line = next(
@@ -175,7 +184,7 @@ def _poll_and_download(
                             f"BgEraser: download failed twice for {code}: {exc}"
                         ) from exc
                     pending[code] = (indices, cache_key)
-                    print(f"BgEraser: download failed ({exc}); retrying...")
+                    print(f"BgEraser: download failed ({exc}); retrying...")  # noqa: T201
                     continue
                 result_array = np.asarray(img, dtype=np.float32) / 255.0
                 for idx in indices:
@@ -185,10 +194,10 @@ def _poll_and_download(
                     cache_path = CACHE_DIR / f"{cache_key}.png"
                     img.save(cache_path, format="PNG")
                 except Exception as exc:
-                    print(f"BgEraser: cache write failed ({exc})")
+                    print(f"BgEraser: cache write failed ({exc})")  # noqa: T201
                 completed_counter[0] += len(indices)
                 completed = completed_counter[0]
-                print(f"BgEraser: downloaded {completed}/{total}")
+                print(f"BgEraser: downloaded {completed}/{total}")  # noqa: T201
                 if progress_bar is not None:
                     progress_bar.update(len(indices))
         time.sleep(check_interval)
@@ -201,10 +210,10 @@ def _poll_and_download(
 class BulkBackgroundRemoverBgEraserNode:
     """Remove backgrounds from a batch of images using bgeraser.com."""
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "alpha")
-    FUNCTION = "remove_background"
-    CATEGORY = "image/transform"
+    RETURN_TYPES: tuple[str, ...] = ("IMAGE", "MASK")
+    RETURN_NAMES: tuple[str, ...] = ("images", "alpha")
+    FUNCTION: str = "remove_background"
+    CATEGORY: str = "image/transform"
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -215,7 +224,7 @@ class BulkBackgroundRemoverBgEraserNode:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def remove_background(self, images: torch.Tensor, unique_id: Optional[str] = None):
+    def remove_background(self, images: torch.Tensor, unique_id: str | None = None):
         frames = images.detach().cpu().float()
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
@@ -223,9 +232,11 @@ class BulkBackgroundRemoverBgEraserNode:
         session = requests.Session()
         upload_headers, status_headers, download_headers = build_headers()
 
-        pending: Dict[str, Tuple[List[int], str]] = {}
-        pending_by_key: Dict[str, str] = {}
-        results: List[Optional[np.ndarray]] = [None] * frames.shape[0]
+        pending: dict[str, tuple[list[int], str]] = {}
+        pending_by_key: dict[str, str] = {}
+        results: list[np.ndarray[tuple[int, ...], np.dtype[np.floating]] | None] = [
+            None
+        ] * frames.shape[0]
         total_steps = frames.shape[0] * 2
         progress_bar = (
             ProgressBar(total_steps, node_id=unique_id) if ProgressBar else None
@@ -260,10 +271,10 @@ class BulkBackgroundRemoverBgEraserNode:
                     completed_counter[0] += 1
                     if progress_bar is not None:
                         progress_bar.update(2)
-                    print(f"BgEraser: cache hit {completed_counter[0]}/{len(results)}")
+                    print(f"BgEraser: cache hit {completed_counter[0]}/{len(results)}")  # noqa: T201
                     continue
                 except Exception as exc:
-                    print(f"BgEraser: cache read failed ({exc}); reprocessing...")
+                    print(f"BgEraser: cache read failed ({exc}); reprocessing...")  # noqa: T201
             if cache_key in pending_by_key:
                 code = pending_by_key[cache_key]
                 pending[code][0].append(idx)
@@ -288,11 +299,16 @@ class BulkBackgroundRemoverBgEraserNode:
         if any(result is None for result in results):
             raise RuntimeError("Missing output for one or more images.")
 
-        first_shape = results[0].shape
-        if any(result.shape != first_shape for result in results):
+        # Type narrowing: after checking no results are None, we can safely cast
+        non_null_results: list[np.ndarray[tuple[int, ...], np.dtype[np.floating]]] = [
+            r for r in results if r is not None
+        ]
+
+        first_shape = non_null_results[0].shape
+        if any(result.shape != first_shape for result in non_null_results):
             raise RuntimeError("Output images have mismatched dimensions.")
 
-        stacked = torch.from_numpy(np.stack(results))
+        stacked = torch.from_numpy(np.stack(non_null_results))
         if stacked.shape[-1] == 4:
             images_out = stacked[..., :3]
             alpha_out = stacked[..., 3]

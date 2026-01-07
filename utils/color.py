@@ -7,12 +7,12 @@ HEX_PATTERN = re.compile(r"^#?[0-9a-fA-F]{1,6}$")
 
 
 def parse_hex_color(
-    hex_color: str, fallback: Iterable[int] = (0, 0, 0)
+    hex_color: str, fallback: Tuple[int, int, int] = (0, 0, 0)
 ) -> Tuple[int, int, int]:
     """Convert a hex string into an RGB tuple (0-255)."""
     hex_color = (hex_color or "").strip()
     if not HEX_PATTERN.match(hex_color):
-        return tuple(fallback)  # type: ignore[return-value]
+        return fallback
 
     normalized = hex_color[1:] if hex_color.startswith("#") else hex_color
     padded = normalized.zfill(6)
@@ -22,7 +22,7 @@ def parse_hex_color(
         b = int(padded[4:6], 16)
         return (r, g, b)
     except ValueError:
-        return tuple(fallback)  # type: ignore[return-value]
+        return fallback
 
 
 def rgb_to_int(r: int, g: int, b: int) -> int:
