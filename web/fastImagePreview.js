@@ -547,6 +547,9 @@ function showOverlay(
   attachNavigationForwarding(overlay);
 
   state.overlayKeyHandler = (e) => {
+    if (node && !node.is_selected) {
+      return;
+    }
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       e.stopPropagation();
@@ -716,6 +719,7 @@ app.registerExtension({
           wrapperEl.addEventListener("click", (event) => {
             if (event.button !== 0) return;
             event.stopPropagation();
+            app.canvas?.selectNode?.(node, false);
             showOverlay(state, container, images, index, true, node);
           });
 
