@@ -1711,6 +1711,7 @@ class BatchImageSave:
                     {"default": False},
                 ),
             },
+            "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
     def save_images(
@@ -1721,6 +1722,7 @@ class BatchImageSave:
         delimiter: str,
         extension: str,
         link_to_input: bool,
+        unique_id: str | None = None,
     ):
         """Save batch of images with sequential naming.
 
@@ -1756,21 +1758,24 @@ class BatchImageSave:
         format_map = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
         pil_format = format_map.get(ext, "PNG")
 
-        # Create full directory path, reusing the same resolved folder within a prompt run.
+        # Create full directory path, reusing the same resolved folder across list-index calls.
         resolved_path = path
         full_dir = output_dir
         if path:
-            cache_key = None
-            use_cached_folder = False
             executing_context = get_executing_context()
-            if executing_context is not None and executing_context.prompt_id:
-                cache_key = (executing_context.prompt_id, path)
-                cached = _BATCH_IMAGE_SAVE_CACHE.get(cache_key)
-                if cached is not None:
-                    resolved_path, full_dir = cached
-                    use_cached_folder = True
+            list_index = executing_context.list_index if executing_context else None
+            cache_owner = unique_id
+            if cache_owner is None and executing_context is not None:
+                cache_owner = executing_context.node_id
+            cache_key = (cache_owner or "unknown", path)
+            use_cached_folder = (
+                list_index is not None
+                and list_index > 0
+                and cache_key in _BATCH_IMAGE_SAVE_CACHE
+            )
 
             if use_cached_folder:
+                resolved_path, full_dir = _BATCH_IMAGE_SAVE_CACHE[cache_key]
                 os.makedirs(full_dir, exist_ok=True)
             else:
                 def format_path(template: str, idx: int) -> str:
@@ -1818,7 +1823,7 @@ class BatchImageSave:
                         full_dir = candidate_dir
 
                 os.makedirs(full_dir, exist_ok=True)
-                if cache_key is not None:
+                if list_index is not None:
                     _BATCH_IMAGE_SAVE_CACHE[cache_key] = (resolved_path, full_dir)
 
         if link_to_input and resolved_path:
