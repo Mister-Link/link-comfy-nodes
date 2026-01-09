@@ -418,19 +418,27 @@ class ResizeImageAndMaskBySideNode:
         images_chw = images.permute(0, 3, 1, 2)
         mask_chw = mask.unsqueeze(1)
 
+        mode = self._INTERPOLATION_MODES[interpolation]
+        align_corners = (
+            False if mode in {"linear", "bilinear", "bicubic", "trilinear"} else None
+        )
+        interpolate_kwargs = {}
+        if align_corners is not None:
+            interpolate_kwargs["align_corners"] = align_corners
+
         resized_images = F.interpolate(
             images_chw,
             size=(target_height, target_width),
-            mode=self._INTERPOLATION_MODES[interpolation],
-            align_corners=False,
+            mode=mode,
             antialias=False,
+            **interpolate_kwargs,
         )
         resized_mask = F.interpolate(
             mask_chw,
             size=(target_height, target_width),
-            mode=self._INTERPOLATION_MODES[interpolation],
-            align_corners=False,
+            mode=mode,
             antialias=False,
+            **interpolate_kwargs,
         )
 
         result_images = resized_images.permute(0, 2, 3, 1)

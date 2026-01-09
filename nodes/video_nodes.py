@@ -1761,7 +1761,7 @@ class BatchImageSave:
 
         if link_to_input and path:
             input_dir = folder_paths.get_input_directory()
-            link_path = os.path.join(input_dir, path)
+            link_path = os.path.join(input_dir, f"[O]{path}")
             link_parent = os.path.dirname(link_path)
             os.makedirs(link_parent, exist_ok=True)
 
