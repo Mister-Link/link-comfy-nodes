@@ -237,11 +237,20 @@ function resetPreview(state, message) {
   state.container.innerHTML = "";
 }
 
-function preloadAllImages(images) {
-  // Preload all full-resolution images
-  images.forEach((imageData) => {
+function preloadAllImages(images, cache) {
+  // Preload all full-resolution images and store them in cache
+  images.forEach((imageData, idx) => {
     const img = new Image();
+    img.decode = img.decode || (() => Promise.resolve()); // Fallback for older browsers
     img.src = buildFullImageUrl(imageData);
+
+    // Store the image element in cache for immediate reuse
+    cache[idx] = img;
+
+    // Force decode to ensure image is ready
+    img.decode().catch(() => {
+      // Decode failed, but image will still load normally
+    });
   });
 }
 
@@ -264,15 +273,21 @@ function showOverlay(
 
   // Preload all full-resolution images on first thumbnail click
   if (isFirstOpen && !state.imagesPreloaded) {
-    preloadAllImages(images);
+    preloadAllImages(images, state.imageCache);
     state.imagesPreloaded = true;
   }
 
   const overlay = document.createElement("div");
   overlay.className = "lc-fast-preview-overlay";
 
-  const fullImg = document.createElement("img");
-  fullImg.src = buildFullImageUrl(images[currentIndex]);
+  // Use cached image if available, otherwise create new one
+  const fullImg = state.imageCache[currentIndex]
+    ? state.imageCache[currentIndex].cloneNode()
+    : document.createElement("img");
+
+  if (!state.imageCache[currentIndex]) {
+    fullImg.src = buildFullImageUrl(images[currentIndex]);
+  }
   fullImg.alt = "";
 
   const closeButton = document.createElement("button");
@@ -375,6 +390,7 @@ app.registerExtension({
       resizeObserver: null,
       overlay: null,
       imagesPreloaded: false,
+      imageCache: {},
     };
     node._fastPreviewState = state;
 
@@ -404,6 +420,7 @@ app.registerExtension({
       container.innerHTML = "";
       state.overlay = null;
       state.imagesPreloaded = false;
+      state.imageCache = {};
 
       if (!images.length) {
         resetPreview(state);
