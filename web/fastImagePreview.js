@@ -323,99 +323,96 @@ function updateInfoDisplay(state, currentIndex = null) {
   }
 }
 
-function forwardNavigationToGraphCanvas(el) {
+let isMiddleMouseForwarding = false;
+
+function forwardEventToGraphCanvas(e) {
   const canvas = document.getElementById("graph-canvas");
-  if (!el || !canvas) return;
+  if (!canvas) return;
 
-  el.addEventListener(
-    "wheel",
-    (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+  e.preventDefault();
+  e.stopPropagation();
 
-      canvas.focus?.();
+  canvas.focus?.();
 
-      canvas.dispatchEvent(
-        new WheelEvent("wheel", {
-          deltaX: e.deltaX,
-          deltaY: e.deltaY,
-          deltaZ: e.deltaZ,
-          deltaMode: e.deltaMode,
+  if (e.type === "wheel") {
+    canvas.dispatchEvent(
+      new WheelEvent("wheel", {
+        deltaX: e.deltaX,
+        deltaY: e.deltaY,
+        deltaZ: e.deltaZ,
+        deltaMode: e.deltaMode,
 
-          clientX: e.clientX,
-          clientY: e.clientY,
-          screenX: e.screenX,
-          screenY: e.screenY,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        screenX: e.screenX,
+        screenY: e.screenY,
 
-          ctrlKey: e.ctrlKey,
-          shiftKey: e.shiftKey,
-          altKey: e.altKey,
-          metaKey: e.metaKey,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        metaKey: e.metaKey,
 
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    },
-    { passive: false },
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return;
+  }
+
+  if ((e.type === "pointerdown" || e.type === "mousedown") && e.button === 1) {
+    isMiddleMouseForwarding = true;
+  }
+
+  if ((e.type === "pointerup" || e.type === "mouseup") && e.button === 1) {
+    isMiddleMouseForwarding = false;
+  }
+
+  canvas.dispatchEvent(
+    new PointerEvent(e.type, {
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      isPrimary: e.isPrimary,
+      button: e.button,
+      buttons: e.buttons,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      screenX: e.screenX,
+      screenY: e.screenY,
+
+      ctrlKey: e.ctrlKey,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      metaKey: e.metaKey,
+
+      bubbles: true,
+      cancelable: true,
+    }),
   );
+}
 
-  el.addEventListener(
-    "mousedown",
-    (e) => {
-      if (e.button !== 1) return; // middle mouse only
+function attachNavigationForwarding(el) {
+  el.addEventListener("wheel", forwardEventToGraphCanvas, { passive: false });
 
-      e.preventDefault();
-      e.stopPropagation();
+  const pointerEvents = [
+    "pointerdown",
+    "pointermove",
+    "pointerup",
+    "pointercancel",
+  ];
 
-      canvas.focus?.();
-
-      canvas.dispatchEvent(
-        new MouseEvent("mousedown", {
-          button: 1,
-          buttons: e.buttons,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          screenX: e.screenX,
-          screenY: e.screenY,
-
-          ctrlKey: e.ctrlKey,
-          shiftKey: e.shiftKey,
-          altKey: e.altKey,
-          metaKey: e.metaKey,
-
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    },
-    true,
-  );
-
-  el.addEventListener(
-    "mouseup",
-    (e) => {
-      if (e.button !== 1) return;
-
-      e.preventDefault();
-      e.stopPropagation();
-
-      canvas.dispatchEvent(
-        new MouseEvent("mouseup", {
-          button: 1,
-          buttons: 0,
-          clientX: e.clientX,
-          clientY: e.clientY,
-          screenX: e.screenX,
-          screenY: e.screenY,
-
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    },
-    true,
-  );
+  pointerEvents.forEach((type) => {
+    el.addEventListener(type, (e) => {
+      if (type === "pointerdown" && e.button === 1) {
+        forwardEventToGraphCanvas(e);
+      } else if (type === "pointerup" && e.button === 1) {
+        forwardEventToGraphCanvas(e);
+      } else if (type === "pointermove" && isMiddleMouseForwarding) {
+        forwardEventToGraphCanvas(e);
+      } else if (type === "pointercancel" && isMiddleMouseForwarding) {
+        forwardEventToGraphCanvas(e);
+      }
+    });
+  });
 }
 
 function preloadAllImages(images, cache, state) {
@@ -483,11 +480,12 @@ function showOverlay(
     updateInfoDisplay(state);
   };
 
-  overlay.addEventListener("click", () => {
+  overlay.addEventListener("click", (event) => {
+    if (event.button !== 0) return;
     closeOverlay();
   });
 
-  forwardNavigationToGraphCanvas(overlay);
+  attachNavigationForwarding(overlay);
 
   state.overlayKeyHandler = (e) => {
     if (e.key === "ArrowLeft") {
@@ -650,13 +648,12 @@ app.registerExtension({
 
         if (!isSingleFrame) {
           wrapperEl.addEventListener("click", (event) => {
+            if (event.button !== 0) return;
             event.stopPropagation();
             showOverlay(state, container, images, index, true);
           });
 
-          const canvas = document.getElementById("graph-canvas");
-
-          forwardNavigationToGraphCanvas(wrapperEl);
+          attachNavigationForwarding(wrapperEl);
         } else {
           wrapperEl.style.pointerEvents = "none";
           wrapperEl.style.cursor = "default";
