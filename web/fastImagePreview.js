@@ -323,6 +323,47 @@ function updateInfoDisplay(state, currentIndex = null) {
   }
 }
 
+function forwardWheelToGraphCanvas(el) {
+  const canvas = document.getElementById("graph-canvas");
+  if (!canvas || !el) return;
+
+  el.addEventListener(
+    "wheel",
+    (e) => {
+      // Block the UI layer from consuming the wheel
+      e.preventDefault();
+      e.stopPropagation();
+
+      // Ensure canvas has focus (important for some zoom paths)
+      canvas.focus?.();
+
+      // Forward a native-like wheel event
+      canvas.dispatchEvent(
+        new WheelEvent("wheel", {
+          deltaX: e.deltaX,
+          deltaY: e.deltaY,
+          deltaZ: e.deltaZ,
+          deltaMode: e.deltaMode,
+
+          clientX: e.clientX,
+          clientY: e.clientY,
+          screenX: e.screenX,
+          screenY: e.screenY,
+
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    { passive: false },
+  );
+}
+
 function preloadAllImages(images, cache, state) {
   images.forEach((imageData, idx) => {
     const img = new Image();
@@ -392,14 +433,7 @@ function showOverlay(
     closeOverlay();
   });
 
-  overlay.addEventListener(
-    "wheel",
-    (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-    },
-    { passive: false },
-  );
+  forwardWheelToGraphCanvas(overlay);
 
   state.overlayKeyHandler = (e) => {
     if (e.key === "ArrowLeft") {
@@ -568,36 +602,7 @@ app.registerExtension({
 
           const canvas = document.getElementById("graph-canvas");
 
-          wrapperEl.addEventListener(
-            "wheel",
-            (e) => {
-              e.preventDefault();
-              e.stopPropagation();
-
-              const forwarded = new WheelEvent("wheel", {
-                deltaX: e.deltaX,
-                deltaY: e.deltaY,
-                deltaZ: e.deltaZ,
-                deltaMode: e.deltaMode,
-
-                clientX: e.clientX,
-                clientY: e.clientY,
-                screenX: e.screenX,
-                screenY: e.screenY,
-
-                ctrlKey: e.ctrlKey,
-                shiftKey: e.shiftKey,
-                altKey: e.altKey,
-                metaKey: e.metaKey,
-
-                bubbles: true,
-                cancelable: true,
-              });
-
-              canvas.dispatchEvent(forwarded);
-            },
-            { passive: false },
-          );
+          forwardWheelToGraphCanvas(wrapperEl);
         } else {
           wrapperEl.style.pointerEvents = "none";
           wrapperEl.style.cursor = "default";
