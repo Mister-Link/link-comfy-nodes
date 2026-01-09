@@ -13,6 +13,9 @@ function ensureStyles() {
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = `
+    .lc-fast-preview-wrapper {
+      pointer-events: none;
+    }
     .lc-fast-preview {
       box-sizing: border-box;
       width: calc(100% + .6em);
@@ -26,6 +29,7 @@ function ensureStyles() {
       gap: 0;
       overflow: hidden;
       position: relative;
+      pointer-events: none;
     }
     .lc-fast-preview-info {
       color: #c0c0c0;
@@ -62,6 +66,7 @@ function ensureStyles() {
       background: transparent;
       border: none;
       cursor: pointer;
+      pointer-events: auto;
     }
     .lc-fast-preview-item img {
       width: 100%;
@@ -81,6 +86,7 @@ function ensureStyles() {
       justify-content: center;
       z-index: 5;
       box-sizing: border-box;
+      pointer-events: auto;
     }
     .lc-fast-preview-overlay img {
       max-width: 100%;
@@ -106,6 +112,17 @@ function ensureStyles() {
   `;
 
   document.head.appendChild(style);
+
+  if (!document.getElementById("force-dom-widget-pointer-events")) {
+    const domWidgetStyle = document.createElement("style");
+    domWidgetStyle.id = "force-dom-widget-pointer-events";
+    domWidgetStyle.textContent = `
+      .dom-widget {
+        pointer-events: none !important;
+      }
+    `;
+    document.head.appendChild(domWidgetStyle);
+  }
 }
 
 function findBestFit(containerW, containerH, itemCount, aspectRatio) {
@@ -361,10 +378,6 @@ function showOverlay(
   }
   fullImg.alt = "";
 
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.textContent = "×";
-
   const closeOverlay = () => {
     overlay.remove();
     state.overlay = null;
@@ -375,14 +388,18 @@ function showOverlay(
     updateInfoDisplay(state);
   };
 
-  closeButton.addEventListener("click", (e) => {
-    e.stopPropagation();
-    closeOverlay();
-  });
-
   overlay.addEventListener("click", () => {
     closeOverlay();
   });
+
+  overlay.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    { passive: false },
+  );
 
   state.overlayKeyHandler = (e) => {
     if (e.key === "ArrowLeft") {
@@ -407,7 +424,6 @@ function showOverlay(
   document.addEventListener("keydown", state.overlayKeyHandler, true);
 
   overlay.appendChild(fullImg);
-  overlay.appendChild(closeButton);
   container.appendChild(overlay);
   state.overlay = overlay;
 }
@@ -443,6 +459,15 @@ app.registerExtension({
       },
     );
 
+    if (previewWidget.element && previewWidget.element.parentElement) {
+      previewWidget.element.parentElement.style.setProperty(
+        "pointer-events",
+        "none",
+        "important",
+      );
+    }
+
+    console.log(previewWidget);
     previewWidget.computeSize = function (width) {
       const available = Math.max(
         0,
@@ -507,13 +532,17 @@ app.registerExtension({
         return;
       }
 
+      const isSingleFrame = images.length === 1;
+
       images.forEach((imageData, index) => {
         const wrapperEl = document.createElement("div");
         wrapperEl.className = "lc-fast-preview-item";
 
         const img = document.createElement("img");
         img.loading = "lazy";
-        img.src = buildImageUrl(imageData);
+        img.src = isSingleFrame
+          ? buildFullImageUrl(imageData)
+          : buildImageUrl(imageData);
 
         if (imageData.width && imageData.height) {
           state.imageDimensions[index] = {
@@ -531,10 +560,48 @@ app.registerExtension({
           }
         });
 
-        wrapperEl.addEventListener("click", (event) => {
-          event.stopPropagation();
-          showOverlay(state, container, images, index, true);
-        });
+        if (!isSingleFrame) {
+          wrapperEl.addEventListener("click", (event) => {
+            event.stopPropagation();
+            showOverlay(state, container, images, index, true);
+          });
+
+          const canvas = document.getElementById("graph-canvas");
+
+          wrapperEl.addEventListener(
+            "wheel",
+            (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+
+              const forwarded = new WheelEvent("wheel", {
+                deltaX: e.deltaX,
+                deltaY: e.deltaY,
+                deltaZ: e.deltaZ,
+                deltaMode: e.deltaMode,
+
+                clientX: e.clientX,
+                clientY: e.clientY,
+                screenX: e.screenX,
+                screenY: e.screenY,
+
+                ctrlKey: e.ctrlKey,
+                shiftKey: e.shiftKey,
+                altKey: e.altKey,
+                metaKey: e.metaKey,
+
+                bubbles: true,
+                cancelable: true,
+              });
+
+              canvas.dispatchEvent(forwarded);
+            },
+            { passive: false },
+          );
+        } else {
+          wrapperEl.style.pointerEvents = "none";
+          wrapperEl.style.cursor = "default";
+        }
 
         wrapperEl.appendChild(img);
         container.appendChild(wrapperEl);
