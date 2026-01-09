@@ -237,30 +237,11 @@ function resetPreview(state, message) {
   state.container.innerHTML = "";
 }
 
-function preloadImages(images, startIndex) {
-  // Preload images starting from startIndex, prioritizing nearby images
-  const preloadOrder = [];
-
-  // Add current image first
-  preloadOrder.push(startIndex);
-
-  // Add alternating next/prev images
-  for (let offset = 1; offset < images.length; offset++) {
-    const nextIdx = (startIndex + offset) % images.length;
-    const prevIdx = (startIndex - offset + images.length) % images.length;
-
-    if (nextIdx !== startIndex && !preloadOrder.includes(nextIdx)) {
-      preloadOrder.push(nextIdx);
-    }
-    if (prevIdx !== startIndex && !preloadOrder.includes(prevIdx)) {
-      preloadOrder.push(prevIdx);
-    }
-  }
-
-  // Preload in order
-  preloadOrder.forEach((idx) => {
+function preloadAllImages(images) {
+  // Preload all full-resolution images
+  images.forEach((imageData) => {
     const img = new Image();
-    img.src = buildFullImageUrl(images[idx]);
+    img.src = buildFullImageUrl(imageData);
   });
 }
 
@@ -281,9 +262,10 @@ function showOverlay(
     state.overlayKeyHandler = null;
   }
 
-  // Preload images on first open
-  if (isFirstOpen) {
-    preloadImages(images, currentIndex);
+  // Preload all full-resolution images on first thumbnail click
+  if (isFirstOpen && !state.imagesPreloaded) {
+    preloadAllImages(images);
+    state.imagesPreloaded = true;
   }
 
   const overlay = document.createElement("div");
@@ -392,6 +374,7 @@ app.registerExtension({
       layoutRaf: null,
       resizeObserver: null,
       overlay: null,
+      imagesPreloaded: false,
     };
     node._fastPreviewState = state;
 
@@ -420,6 +403,7 @@ app.registerExtension({
       state.items = [];
       container.innerHTML = "";
       state.overlay = null;
+      state.imagesPreloaded = false;
 
       if (!images.length) {
         resetPreview(state);
