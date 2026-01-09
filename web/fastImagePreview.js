@@ -510,7 +510,10 @@ function showOverlay(
     state.overlay = null;
   }
 
-  state.overlayKeyHandler = null;
+  if (state.overlayKeyHandler) {
+    document.removeEventListener("keydown", state.overlayKeyHandler, true);
+    state.overlayKeyHandler = null;
+  }
 
   if (isFirstOpen && !state.imagesPreloaded) {
     preloadAllImages(images, state.imageCache, state);
@@ -535,7 +538,10 @@ function showOverlay(
   const closeOverlay = () => {
     overlay.remove();
     state.overlay = null;
-    state.overlayKeyHandler = null;
+    if (state.overlayKeyHandler) {
+      document.removeEventListener("keydown", state.overlayKeyHandler, true);
+      state.overlayKeyHandler = null;
+    }
     updateInfoDisplay(state);
   };
 
@@ -570,7 +576,7 @@ function showOverlay(
     }
   };
 
-  overlay.addEventListener("keydown", state.overlayKeyHandler);
+  document.addEventListener("keydown", state.overlayKeyHandler, true);
 
   overlay.appendChild(fullImg);
   container.appendChild(overlay);
