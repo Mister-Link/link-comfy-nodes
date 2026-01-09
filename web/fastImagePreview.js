@@ -473,9 +473,6 @@ function showOverlay(
   attachNavigationForwarding(overlay);
 
   state.overlayKeyHandler = (e) => {
-    if (node && !node.is_selected) {
-      return;
-    }
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       e.stopPropagation();
