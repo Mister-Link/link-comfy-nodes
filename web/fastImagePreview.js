@@ -112,17 +112,6 @@ function ensureStyles() {
   `;
 
   document.head.appendChild(style);
-
-  if (!document.getElementById("force-dom-widget-pointer-events")) {
-    const domWidgetStyle = document.createElement("style");
-    domWidgetStyle.id = "force-dom-widget-pointer-events";
-    domWidgetStyle.textContent = `
-      .dom-widget {
-        pointer-events: none !important;
-      }
-    `;
-    document.head.appendChild(domWidgetStyle);
-  }
 }
 
 function findBestFit(containerW, containerH, itemCount, aspectRatio) {
@@ -440,16 +429,14 @@ function showOverlay(
   images,
   currentIndex,
   isFirstOpen = false,
+  node = null,
 ) {
   if (state.overlay) {
     state.overlay.remove();
     state.overlay = null;
   }
 
-  if (state.overlayKeyHandler) {
-    document.removeEventListener("keydown", state.overlayKeyHandler, true);
-    state.overlayKeyHandler = null;
-  }
+  state.overlayKeyHandler = null;
 
   if (isFirstOpen && !state.imagesPreloaded) {
     preloadAllImages(images, state.imageCache, state);
@@ -460,6 +447,7 @@ function showOverlay(
 
   const overlay = document.createElement("div");
   overlay.className = "lc-fast-preview-overlay";
+  overlay.tabIndex = 0;
 
   const fullImg = state.imageCache[currentIndex]
     ? state.imageCache[currentIndex].cloneNode()
@@ -473,10 +461,7 @@ function showOverlay(
   const closeOverlay = () => {
     overlay.remove();
     state.overlay = null;
-    if (state.overlayKeyHandler) {
-      document.removeEventListener("keydown", state.overlayKeyHandler, true);
-      state.overlayKeyHandler = null;
-    }
+    state.overlayKeyHandler = null;
     updateInfoDisplay(state);
   };
 
@@ -488,29 +473,36 @@ function showOverlay(
   attachNavigationForwarding(overlay);
 
   state.overlayKeyHandler = (e) => {
+    if (node && !node.is_selected) {
+      return;
+    }
     if (e.key === "ArrowLeft") {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
       const newIndex = (currentIndex - 1 + images.length) % images.length;
-      showOverlay(state, container, images, newIndex, false);
+      showOverlay(state, container, images, newIndex, false, node);
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
       const newIndex = (currentIndex + 1) % images.length;
-      showOverlay(state, container, images, newIndex, false);
+      showOverlay(state, container, images, newIndex, false, node);
     } else if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
+      e.stopImmediatePropagation();
       closeOverlay();
     }
   };
 
-  document.addEventListener("keydown", state.overlayKeyHandler, true);
+  overlay.addEventListener("keydown", state.overlayKeyHandler);
 
   overlay.appendChild(fullImg);
   container.appendChild(overlay);
+  requestAnimationFrame(() => {
+    overlay.focus({ preventScroll: true });
+  });
   state.overlay = overlay;
 }
 
@@ -650,7 +642,7 @@ app.registerExtension({
           wrapperEl.addEventListener("click", (event) => {
             if (event.button !== 0) return;
             event.stopPropagation();
-            showOverlay(state, container, images, index, true);
+            showOverlay(state, container, images, index, true, node);
           });
 
           attachNavigationForwarding(wrapperEl);
