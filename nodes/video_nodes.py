@@ -1969,17 +1969,51 @@ class SaveImageSequenceZip:
 
         # Process zip_path: add .zip extension if not present
         zip_path = zip_path.strip()
-        if not zip_path.endswith(".zip"):
-            zip_path = f"{zip_path}.zip"
+
+        def format_path(template: str, idx: int) -> str:
+            if "{index" in template:
+                return template.format_map({"index": idx})
+            return template.format(idx)
 
         # Get output directory and construct full path
         output_dir = folder_paths.get_output_directory()
 
-        # If zip_path is absolute, use it as-is; otherwise make it relative to output_dir
-        if os.path.isabs(zip_path):
-            full_zip_path = zip_path
-        else:
-            full_zip_path = os.path.join(output_dir, zip_path)
+        uses_template = False
+        if "{" in zip_path and "}" in zip_path:
+            try:
+                test_candidate = format_path(zip_path, 1)
+                uses_template = test_candidate != zip_path
+            except (ValueError, KeyError, IndexError):
+                uses_template = False
+
+        if uses_template:
+            index = 1
+            while True:
+                try:
+                    candidate = format_path(zip_path, index)
+                except (ValueError, KeyError, IndexError):
+                    uses_template = False
+                    break
+                if not candidate.endswith(".zip"):
+                    candidate = f"{candidate}.zip"
+                full_candidate = (
+                    candidate
+                    if os.path.isabs(candidate)
+                    else os.path.join(output_dir, candidate)
+                )
+                if not os.path.exists(full_candidate):
+                    zip_path = candidate
+                    full_zip_path = full_candidate
+                    break
+                index += 1
+
+        if not uses_template:
+            if not zip_path.endswith(".zip"):
+                zip_path = f"{zip_path}.zip"
+            if os.path.isabs(zip_path):
+                full_zip_path = zip_path
+            else:
+                full_zip_path = os.path.join(output_dir, zip_path)
 
         # Create parent directory if it doesn't exist
         zip_dir = os.path.dirname(full_zip_path)
