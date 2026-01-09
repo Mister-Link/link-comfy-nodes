@@ -15,10 +15,10 @@ function ensureStyles() {
   style.textContent = `
     .lc-fast-preview {
       box-sizing: border-box;
-      width: calc(100% + .75em);
+      width: calc(100% + .6em);
       height: calc(100% + 2em);
-      margin-left: -5px;
-      margin-top: -5px;
+      margin-left: -.3em;
+      margin-top: -.75em;
       display: grid;
       grid-auto-flow: row;
       align-content: center;
@@ -26,6 +26,26 @@ function ensureStyles() {
       gap: 0;
       overflow: hidden;
       position: relative;
+    }
+    .lc-fast-preview-info {
+      color: #c0c0c0;
+      font-size: 8px;
+      padding: 2px 4px;
+      line-height: 1.2;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+    }
+    .lc-fast-preview-info-center {
+      flex-shrink: 0;
+    }
+    .lc-fast-preview-info-center.vary {
+      color: #ff0000;
+    }
+    .lc-fast-preview-info-right {
+      position: absolute;
+      right: 0px;
     }
     .lc-fast-preview-empty {
       color: #9a9a9a;
@@ -233,24 +253,75 @@ function updateLayout(state) {
   });
 }
 
-function resetPreview(state, message) {
+function resetPreview(state) {
   state.container.innerHTML = "";
 }
 
-function preloadAllImages(images, cache) {
-  // Preload all full-resolution images and store them in cache
+function updateInfoDisplay(state, currentIndex = null) {
+  const { infoDiv, imageDimensions } = state;
+
+  if (!imageDimensions.length) {
+    infoDiv.innerHTML = "";
+    return;
+  }
+
+  if (currentIndex !== null) {
+    const dim = imageDimensions[currentIndex];
+    if (dim) {
+      const centerSpan = document.createElement("span");
+      centerSpan.className = "lc-fast-preview-info-center";
+      centerSpan.textContent = `${dim.width}x${dim.height}`;
+
+      const rightSpan = document.createElement("span");
+      rightSpan.className = "lc-fast-preview-info-right";
+      rightSpan.textContent = `${currentIndex + 1}/${imageDimensions.length}`;
+
+      infoDiv.innerHTML = "";
+      infoDiv.appendChild(centerSpan);
+      infoDiv.appendChild(rightSpan);
+    }
+  } else {
+    const firstDim = imageDimensions[0];
+    const allSame = imageDimensions.every(
+      (dim) => dim.width === firstDim.width && dim.height === firstDim.height,
+    );
+
+    const centerSpan = document.createElement("span");
+    centerSpan.className = "lc-fast-preview-info-center";
+
+    if (allSame) {
+      centerSpan.textContent = `${firstDim.width}x${firstDim.height}`;
+    } else {
+      centerSpan.textContent = "dimensions vary";
+      centerSpan.classList.add("vary");
+    }
+
+    const rightSpan = document.createElement("span");
+    rightSpan.className = "lc-fast-preview-info-right";
+    rightSpan.textContent = `#: ${imageDimensions.length}`;
+
+    infoDiv.innerHTML = "";
+    infoDiv.appendChild(centerSpan);
+    infoDiv.appendChild(rightSpan);
+  }
+}
+
+function preloadAllImages(images, cache, state) {
   images.forEach((imageData, idx) => {
     const img = new Image();
-    img.decode = img.decode || (() => Promise.resolve()); // Fallback for older browsers
+    img.decode = img.decode || (() => Promise.resolve());
     img.src = buildFullImageUrl(imageData);
 
-    // Store the image element in cache for immediate reuse
     cache[idx] = img;
 
-    // Force decode to ensure image is ready
-    img.decode().catch(() => {
-      // Decode failed, but image will still load normally
-    });
+    img.onload = () => {
+      state.imageDimensions[idx] = {
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+      };
+    };
+
+    img.decode().catch(() => {});
   });
 }
 
@@ -271,16 +342,16 @@ function showOverlay(
     state.overlayKeyHandler = null;
   }
 
-  // Preload all full-resolution images on first thumbnail click
   if (isFirstOpen && !state.imagesPreloaded) {
-    preloadAllImages(images, state.imageCache);
+    preloadAllImages(images, state.imageCache, state);
     state.imagesPreloaded = true;
   }
+
+  updateInfoDisplay(state, currentIndex);
 
   const overlay = document.createElement("div");
   overlay.className = "lc-fast-preview-overlay";
 
-  // Use cached image if available, otherwise create new one
   const fullImg = state.imageCache[currentIndex]
     ? state.imageCache[currentIndex].cloneNode()
     : document.createElement("img");
@@ -301,6 +372,7 @@ function showOverlay(
       document.removeEventListener("keydown", state.overlayKeyHandler, true);
       state.overlayKeyHandler = null;
     }
+    updateInfoDisplay(state);
   };
 
   closeButton.addEventListener("click", (e) => {
@@ -357,6 +429,10 @@ app.registerExtension({
     container.className = "lc-fast-preview";
     wrapper.appendChild(container);
 
+    const infoDiv = document.createElement("div");
+    infoDiv.className = "lc-fast-preview-info";
+    wrapper.appendChild(infoDiv);
+
     const previewWidget = node.addDOMWidget(
       "fast_preview",
       "fast_preview",
@@ -384,6 +460,7 @@ app.registerExtension({
 
     const state = {
       container,
+      infoDiv,
       items: [],
       aspectRatio: 1,
       layoutRaf: null,
@@ -391,6 +468,7 @@ app.registerExtension({
       overlay: null,
       imagesPreloaded: false,
       imageCache: {},
+      imageDimensions: [],
     };
     node._fastPreviewState = state;
 
@@ -421,9 +499,11 @@ app.registerExtension({
       state.overlay = null;
       state.imagesPreloaded = false;
       state.imageCache = {};
+      state.imageDimensions = [];
 
       if (!images.length) {
         resetPreview(state);
+        updateInfoDisplay(state);
         return;
       }
 
@@ -434,6 +514,13 @@ app.registerExtension({
         const img = document.createElement("img");
         img.loading = "lazy";
         img.src = buildImageUrl(imageData);
+
+        if (imageData.width && imageData.height) {
+          state.imageDimensions[index] = {
+            width: imageData.width,
+            height: imageData.height,
+          };
+        }
 
         const item = { wrapper: wrapperEl, img, ratio: null, imageData };
         img.addEventListener("load", () => {
@@ -453,6 +540,10 @@ app.registerExtension({
         container.appendChild(wrapperEl);
         state.items.push(item);
       });
+
+      if (state.imageDimensions.filter((d) => d).length === images.length) {
+        updateInfoDisplay(state);
+      }
 
       scheduleLayout(state);
     };

@@ -73,6 +73,8 @@ class FastImagePreviewNode:
                     "full_filename": full_filename,
                     "subfolder": "",
                     "type": "temp",
+                    "width": pil_full.width,
+                    "height": pil_full.height,
                 }
             )
 
