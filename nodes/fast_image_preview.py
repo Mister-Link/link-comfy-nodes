@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 
 import numpy as np
 import torch
@@ -46,11 +47,12 @@ class FastImagePreviewNode:
         FULL_QUALITY = 95
 
         preview_data = []
+        unique_id = uuid.uuid4().hex[:8]
         for idx, img_tensor in enumerate(images):
             img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
             pil_img = Image.fromarray(img_np)
 
-            full_filename = f"fast_preview_{idx:04d}_full.webp"
+            full_filename = f"fast_preview_{unique_id}_{idx:04d}_full.webp"
             full_filepath = os.path.join(temp_dir, full_filename)
             pil_full = pil_img.copy()
             pil_full.thumbnail((FULL_SIZE, FULL_SIZE), Image.Resampling.LANCZOS)
@@ -59,7 +61,7 @@ class FastImagePreviewNode:
             pil_thumb = pil_img.copy()
             pil_thumb.thumbnail((THUMB_SIZE, THUMB_SIZE), Image.Resampling.LANCZOS)
 
-            thumb_filename = f"fast_preview_{idx:04d}.webp"
+            thumb_filename = f"fast_preview_{unique_id}_{idx:04d}.webp"
             thumb_filepath = os.path.join(temp_dir, thumb_filename)
             pil_thumb.save(
                 thumb_filepath, format="WEBP", quality=THUMB_QUALITY, method=4
