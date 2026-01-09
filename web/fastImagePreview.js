@@ -323,21 +323,18 @@ function updateInfoDisplay(state, currentIndex = null) {
   }
 }
 
-function forwardWheelToGraphCanvas(el) {
+function forwardNavigationToGraphCanvas(el) {
   const canvas = document.getElementById("graph-canvas");
-  if (!canvas || !el) return;
+  if (!el || !canvas) return;
 
   el.addEventListener(
     "wheel",
     (e) => {
-      // Block the UI layer from consuming the wheel
       e.preventDefault();
       e.stopPropagation();
 
-      // Ensure canvas has focus (important for some zoom paths)
       canvas.focus?.();
 
-      // Forward a native-like wheel event
       canvas.dispatchEvent(
         new WheelEvent("wheel", {
           deltaX: e.deltaX,
@@ -361,6 +358,63 @@ function forwardWheelToGraphCanvas(el) {
       );
     },
     { passive: false },
+  );
+
+  el.addEventListener(
+    "mousedown",
+    (e) => {
+      if (e.button !== 1) return; // middle mouse only
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      canvas.focus?.();
+
+      canvas.dispatchEvent(
+        new MouseEvent("mousedown", {
+          button: 1,
+          buttons: e.buttons,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          screenX: e.screenX,
+          screenY: e.screenY,
+
+          ctrlKey: e.ctrlKey,
+          shiftKey: e.shiftKey,
+          altKey: e.altKey,
+          metaKey: e.metaKey,
+
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    true,
+  );
+
+  el.addEventListener(
+    "mouseup",
+    (e) => {
+      if (e.button !== 1) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      canvas.dispatchEvent(
+        new MouseEvent("mouseup", {
+          button: 1,
+          buttons: 0,
+          clientX: e.clientX,
+          clientY: e.clientY,
+          screenX: e.screenX,
+          screenY: e.screenY,
+
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    },
+    true,
   );
 }
 
@@ -433,7 +487,7 @@ function showOverlay(
     closeOverlay();
   });
 
-  forwardWheelToGraphCanvas(overlay);
+  forwardNavigationToGraphCanvas(overlay);
 
   state.overlayKeyHandler = (e) => {
     if (e.key === "ArrowLeft") {
@@ -602,7 +656,7 @@ app.registerExtension({
 
           const canvas = document.getElementById("graph-canvas");
 
-          forwardWheelToGraphCanvas(wrapperEl);
+          forwardNavigationToGraphCanvas(wrapperEl);
         } else {
           wrapperEl.style.pointerEvents = "none";
           wrapperEl.style.cursor = "default";
