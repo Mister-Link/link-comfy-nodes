@@ -15,8 +15,8 @@ function ensureStyles() {
   style.textContent = `
     .lc-fast-preview {
       box-sizing: border-box;
-      width: calc(100% + 15px);
-      height: calc(100% + 30px);
+      width: calc(100% + .75em);
+      height: calc(100% + 2em);
       margin-left: -5px;
       margin-top: -5px;
       display: grid;
