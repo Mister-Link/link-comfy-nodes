@@ -17,6 +17,7 @@ import torch
 from PIL import Image
 
 import folder_paths  # type: ignore[import-untyped]
+from comfy_execution.utils import get_executing_context
 
 from ..utils import parse_hex_color
 
@@ -35,6 +36,7 @@ DIMMAX = 8192
 DEFAULT_PREVIEW_FRAME_LIMIT = 120
 PREVIEW_CACHE_MAX_ITEMS = 5  # Increased since WebP is smaller
 PREVIEW_CACHE_MAX_BYTES = 20_000_000  # Reduced since WebP is more efficient
+_BATCH_IMAGE_SAVE_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
 
 
 def _log(message: str) -> None:
@@ -1728,7 +1730,6 @@ class BatchImageSave:
             filename_prefix: Prefix for filenames
             delimiter: Character(s) between prefix and number
             extension: File extension (png, jpg, jpeg, webp)
-
         Returns:
             UI response with saved file information and outputs
         """
@@ -1755,55 +1756,70 @@ class BatchImageSave:
         format_map = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
         pil_format = format_map.get(ext, "PNG")
 
-        # Create full directory path, always using a new folder when a path is provided
+        # Create full directory path, reusing the same resolved folder within a prompt run.
         resolved_path = path
         full_dir = output_dir
         if path:
-            def format_path(template: str, idx: int) -> str:
-                if "{index" in template:
-                    return template.format_map({"index": idx})
-                return template.format(idx)
+            cache_key = None
+            use_cached_folder = False
+            executing_context = get_executing_context()
+            if executing_context is not None and executing_context.prompt_id:
+                cache_key = (executing_context.prompt_id, path)
+                cached = _BATCH_IMAGE_SAVE_CACHE.get(cache_key)
+                if cached is not None:
+                    resolved_path, full_dir = cached
+                    use_cached_folder = True
 
-            uses_template = False
-            if "{" in path and "}" in path:
-                try:
-                    test_candidate = format_path(path, 1)
-                    uses_template = test_candidate != path
-                except (ValueError, KeyError, IndexError):
-                    uses_template = False
+            if use_cached_folder:
+                os.makedirs(full_dir, exist_ok=True)
+            else:
+                def format_path(template: str, idx: int) -> str:
+                    if "{index" in template:
+                        return template.format_map({"index": idx})
+                    return template.format(idx)
 
-            if uses_template:
-                index = 1
-                while True:
+                uses_template = False
+                if "{" in path and "}" in path:
                     try:
-                        candidate = format_path(path, index)
+                        test_candidate = format_path(path, 1)
+                        uses_template = test_candidate != path
                     except (ValueError, KeyError, IndexError):
                         uses_template = False
-                        break
-                    candidate_dir = os.path.join(output_dir, candidate)
-                    if not os.path.exists(candidate_dir):
-                        resolved_path = candidate
-                        full_dir = candidate_dir
-                        break
-                    index += 1
 
-            if not uses_template:
-                candidate_dir = os.path.join(output_dir, path)
-                if os.path.exists(candidate_dir):
-                    suffix = 1
+                if uses_template:
+                    index = 1
                     while True:
-                        candidate = f"{path}_{suffix}"
+                        try:
+                            candidate = format_path(path, index)
+                        except (ValueError, KeyError, IndexError):
+                            uses_template = False
+                            break
                         candidate_dir = os.path.join(output_dir, candidate)
                         if not os.path.exists(candidate_dir):
                             resolved_path = candidate
                             full_dir = candidate_dir
                             break
-                        suffix += 1
-                else:
-                    resolved_path = path
-                    full_dir = candidate_dir
+                        index += 1
 
-            os.makedirs(full_dir, exist_ok=True)
+                if not uses_template:
+                    candidate_dir = os.path.join(output_dir, path)
+                    if os.path.exists(candidate_dir):
+                        suffix = 1
+                        while True:
+                            candidate = f"{path}_{suffix}"
+                            candidate_dir = os.path.join(output_dir, candidate)
+                            if not os.path.exists(candidate_dir):
+                                resolved_path = candidate
+                                full_dir = candidate_dir
+                                break
+                            suffix += 1
+                    else:
+                        resolved_path = path
+                        full_dir = candidate_dir
+
+                os.makedirs(full_dir, exist_ok=True)
+                if cache_key is not None:
+                    _BATCH_IMAGE_SAVE_CACHE[cache_key] = (resolved_path, full_dir)
 
         if link_to_input and resolved_path:
             input_dir = folder_paths.get_input_directory()
