@@ -16,6 +16,9 @@ function ensureStyles() {
     .lc-fast-preview-wrapper {
       pointer-events: none;
     }
+    .dom-widget:has(.lc-fast-preview-wrapper) {
+      pointer-events: none !important;
+    }
     .lc-fast-preview {
       box-sizing: border-box;
       width: calc(100% + .6em);
@@ -112,6 +115,77 @@ function ensureStyles() {
   `;
 
   document.head.appendChild(style);
+}
+
+let pointerEventsEnforced = false;
+
+function enforcePointerEventsNone(el) {
+  if (!el) {
+    return;
+  }
+
+  const apply = () => {
+    el.style.setProperty("pointer-events", "none", "important");
+  };
+
+  apply();
+
+  if (el._lcPointerEventsObserver) {
+    return;
+  }
+
+  const observer = new MutationObserver(() => apply());
+  observer.observe(el, {
+    attributes: true,
+    attributeFilter: ["style", "class"],
+  });
+
+  el._lcPointerEventsObserver = observer;
+}
+
+function initPointerEventsEnforcement() {
+  if (pointerEventsEnforced) {
+    return;
+  }
+  pointerEventsEnforced = true;
+
+  const applyForWrapper = (wrapper) => {
+    const parent = wrapper?.parentElement;
+    if (parent && parent.classList.contains("dom-widget")) {
+      enforcePointerEventsNone(parent);
+    }
+  };
+
+  document
+    .querySelectorAll(".lc-fast-preview-wrapper")
+    .forEach(applyForWrapper);
+
+  const observer = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+      mutation.addedNodes.forEach((node) => {
+        if (!(node instanceof Element)) {
+          return;
+        }
+        if (node.classList?.contains("lc-fast-preview-wrapper")) {
+          applyForWrapper(node);
+          return;
+        }
+        if (node.classList?.contains("dom-widget")) {
+          const wrapper = node.querySelector(".lc-fast-preview-wrapper");
+          if (wrapper) {
+            applyForWrapper(wrapper);
+          }
+          return;
+        }
+        const wrappers = node.querySelectorAll?.(".lc-fast-preview-wrapper");
+        if (wrappers?.length) {
+          wrappers.forEach(applyForWrapper);
+        }
+      });
+    });
+  });
+
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function findBestFit(containerW, containerH, itemCount, aspectRatio) {
@@ -512,6 +586,7 @@ app.registerExtension({
     }
 
     ensureStyles();
+    initPointerEventsEnforcement();
 
     const wrapper = document.createElement("div");
     wrapper.className = "lc-fast-preview-wrapper";
@@ -535,12 +610,14 @@ app.registerExtension({
     );
 
     if (previewWidget.element && previewWidget.element.parentElement) {
-      previewWidget.element.parentElement.style.setProperty(
-        "pointer-events",
-        "none",
-        "important",
-      );
+      enforcePointerEventsNone(previewWidget.element.parentElement);
     }
+    requestAnimationFrame(() => {
+      const parent = wrapper.closest?.(".dom-widget");
+      if (parent) {
+        enforcePointerEventsNone(parent);
+      }
+    });
 
     console.log(previewWidget);
     previewWidget.computeSize = function (width) {
