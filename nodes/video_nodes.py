@@ -1759,17 +1759,35 @@ class BatchImageSave:
         resolved_path = path
         full_dir = output_dir
         if path:
-            if "{:" in path and "}" in path:
+            def format_path(template: str, idx: int) -> str:
+                if "{index" in template:
+                    return template.format_map({"index": idx})
+                return template.format(idx)
+
+            uses_template = False
+            if "{" in path and "}" in path:
+                try:
+                    test_candidate = format_path(path, 1)
+                    uses_template = test_candidate != path
+                except (ValueError, KeyError, IndexError):
+                    uses_template = False
+
+            if uses_template:
                 index = 1
                 while True:
-                    candidate = path.format(index)
+                    try:
+                        candidate = format_path(path, index)
+                    except (ValueError, KeyError, IndexError):
+                        uses_template = False
+                        break
                     candidate_dir = os.path.join(output_dir, candidate)
                     if not os.path.exists(candidate_dir):
                         resolved_path = candidate
                         full_dir = candidate_dir
                         break
                     index += 1
-            else:
+
+            if not uses_template:
                 candidate_dir = os.path.join(output_dir, path)
                 if os.path.exists(candidate_dir):
                     suffix = 1
