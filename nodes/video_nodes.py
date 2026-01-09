@@ -1704,6 +1704,10 @@ class BatchImageSave:
                     ["png", "jpg", "jpeg", "webp"],
                     {"default": "png"},
                 ),
+                "link_to_input": (
+                    "BOOLEAN",
+                    {"default": False},
+                ),
             },
         }
 
@@ -1714,6 +1718,7 @@ class BatchImageSave:
         filename_prefix: str,
         delimiter: str,
         extension: str,
+        link_to_input: bool,
     ):
         """Save batch of images with sequential naming.
 
@@ -1753,6 +1758,32 @@ class BatchImageSave:
         # Create full directory path
         full_dir = os.path.join(output_dir, path) if path else output_dir
         os.makedirs(full_dir, exist_ok=True)
+
+        if link_to_input and path:
+            input_dir = folder_paths.get_input_directory()
+            link_path = os.path.join(input_dir, path)
+            link_parent = os.path.dirname(link_path)
+            os.makedirs(link_parent, exist_ok=True)
+
+            if os.path.lexists(link_path):
+                if os.path.islink(link_path):
+                    existing_target = os.readlink(link_path)
+                    if not os.path.isabs(existing_target):
+                        existing_target = os.path.join(
+                            os.path.dirname(link_path),
+                            existing_target,
+                        )
+                    if os.path.abspath(existing_target) == os.path.abspath(full_dir):
+                        link_path = None
+                if link_path:
+                    suffix = 1
+                    base = link_path
+                    while os.path.lexists(link_path):
+                        link_path = f"{base}__link_{suffix}"
+                        suffix += 1
+
+            if link_path:
+                os.symlink(full_dir, link_path)
 
         # Find the next available index to avoid overwriting existing files
         existing_max = 0
