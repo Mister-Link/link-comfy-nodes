@@ -1755,13 +1755,41 @@ class BatchImageSave:
         format_map = {"png": "PNG", "jpeg": "JPEG", "webp": "WEBP"}
         pil_format = format_map.get(ext, "PNG")
 
-        # Create full directory path
-        full_dir = os.path.join(output_dir, path) if path else output_dir
-        os.makedirs(full_dir, exist_ok=True)
+        # Create full directory path, always using a new folder when a path is provided
+        resolved_path = path
+        full_dir = output_dir
+        if path:
+            if "{:" in path and "}" in path:
+                index = 1
+                while True:
+                    candidate = path.format(index)
+                    candidate_dir = os.path.join(output_dir, candidate)
+                    if not os.path.exists(candidate_dir):
+                        resolved_path = candidate
+                        full_dir = candidate_dir
+                        break
+                    index += 1
+            else:
+                candidate_dir = os.path.join(output_dir, path)
+                if os.path.exists(candidate_dir):
+                    suffix = 1
+                    while True:
+                        candidate = f"{path}_{suffix}"
+                        candidate_dir = os.path.join(output_dir, candidate)
+                        if not os.path.exists(candidate_dir):
+                            resolved_path = candidate
+                            full_dir = candidate_dir
+                            break
+                        suffix += 1
+                else:
+                    resolved_path = path
+                    full_dir = candidate_dir
 
-        if link_to_input and path:
+            os.makedirs(full_dir, exist_ok=True)
+
+        if link_to_input and resolved_path:
             input_dir = folder_paths.get_input_directory()
-            link_path = os.path.join(input_dir, f"[O]{path}")
+            link_path = os.path.join(input_dir, f"[O]{resolved_path}")
             link_parent = os.path.dirname(link_path)
             os.makedirs(link_parent, exist_ok=True)
 
@@ -1840,13 +1868,15 @@ class BatchImageSave:
             _log(f"Saved image {index}/{num_images} to {full_path}")
 
         # Determine the folder path (relative to output folder)
-        folder_path = path if path else ""
+        folder_path = resolved_path if resolved_path else ""
 
         # Join file names with newlines
         file_names = "\n".join([os.path.basename(f) for f in saved_files])
 
         return {
-            "ui": {"text": [f"Saved {num_images} images to {path or 'output'}"]},
+            "ui": {
+                "text": [f"Saved {num_images} images to {resolved_path or 'output'}"]
+            },
             "result": (folder_path, file_names),
         }
 
