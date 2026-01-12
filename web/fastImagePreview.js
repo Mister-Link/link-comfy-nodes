@@ -112,9 +112,51 @@ function ensureStyles() {
       cursor: pointer;
       line-height: 1;
     }
+    .lc-spritesheet-anim {
+      background-repeat: no-repeat;
+      background-position: 0 0;
+      image-rendering: pixelated;
+      image-rendering: -moz-crisp-edges;
+      image-rendering: crisp-edges;
+      pointer-events: auto;
+      cursor: pointer;
+      overflow: hidden;
+      flex-shrink: 0;
+      display: block;
+      position: relative;
+    }
+    .lc-spritesheet-anim:hover {
+      filter: brightness(1.15);
+    }
+    .lc-fast-preview.spritesheet-mode {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden !important;
+      width: 100% !important;
+      height: 100% !important;
+      margin: 0 !important;
+      max-height: 100% !important;
+    }
+    .lc-fast-preview-wrapper.spritesheet-mode {
+      overflow: hidden !important;
+    }
+    .lc-fast-preview-wrapper.spritesheet-mode .lc-fast-preview-info {
+      display: none !important;
+    }
   `;
 
   document.head.appendChild(style);
+}
+
+// Create a single style element for spritesheet animations
+let animationStyleSheet = null;
+function ensureAnimationStyles() {
+  if (!animationStyleSheet) {
+    animationStyleSheet = document.createElement("style");
+    animationStyleSheet.id = "lc_spritesheet_animations";
+    document.head.appendChild(animationStyleSheet);
+  }
 }
 
 let pointerEventsEnforced = false;
@@ -590,12 +632,22 @@ app.registerExtension({
   name: "FastImagePreview.Render",
 
   async nodeCreated(node) {
-    if (node.comfyClass !== "Fast Image Preview") {
+    if (
+      node.comfyClass !== "Fast Image Preview" &&
+      node.comfyClass !== "Spritesheet Preview"
+    ) {
       return;
     }
 
     ensureStyles();
-    initPointerEventsEnforcement();
+
+    const isSpritesheet = node.comfyClass === "Spritesheet Preview";
+
+    if (isSpritesheet) {
+      ensureAnimationStyles();
+    } else {
+      initPointerEventsEnforcement();
+    }
 
     const wrapper = document.createElement("div");
     wrapper.className = "lc-fast-preview-wrapper";
@@ -618,31 +670,19 @@ app.registerExtension({
       },
     );
 
-    if (previewWidget.element && previewWidget.element.parentElement) {
-      enforcePointerEventsNone(previewWidget.element.parentElement);
-    }
-    requestAnimationFrame(() => {
-      const parent = wrapper.closest?.(".dom-widget");
-      if (parent) {
-        enforcePointerEventsNone(parent);
+    if (!isSpritesheet) {
+      if (previewWidget.element && previewWidget.element.parentElement) {
+        enforcePointerEventsNone(previewWidget.element.parentElement);
       }
-    });
+      requestAnimationFrame(() => {
+        const parent = wrapper.closest?.(".dom-widget");
+        if (parent) {
+          enforcePointerEventsNone(parent);
+        }
+      });
+    }
 
     console.log(previewWidget);
-    previewWidget.computeSize = function (width) {
-      const available = Math.max(
-        0,
-        (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
-      );
-      const height = Math.max(PREVIEW_MIN_HEIGHT, available);
-      this.computedHeight = height;
-      return [width, height];
-    };
-
-    const minNodeHeight = PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING;
-    if ((node?.size?.[1] ?? 0) < minNodeHeight) {
-      node.setSize([node.size?.[0] ?? 240, minNodeHeight]);
-    }
 
     const state = {
       container,
@@ -655,8 +695,35 @@ app.registerExtension({
       imagesPreloaded: false,
       imageCache: {},
       imageDimensions: [],
+      isSpritesheet,
+      animationNames: null,
+      frameHeight: 120,
     };
     node._fastPreviewState = state;
+
+    previewWidget.computeSize = function (width) {
+      if (isSpritesheet) {
+        // Return height for the frame plus some padding to prevent cropping
+        const frameHeight = state.frameHeight || 120;
+        const widgetHeight = frameHeight + 20; // Add 20px buffer to prevent cropping
+        this.computedHeight = widgetHeight;
+        return [width, widgetHeight];
+      }
+      const available = Math.max(
+        0,
+        (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
+      );
+      const height = Math.max(PREVIEW_MIN_HEIGHT, available);
+      this.computedHeight = height;
+      return [width, height];
+    };
+
+    const minNodeHeight = isSpritesheet
+      ? 150
+      : PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING;
+    if ((node?.size?.[1] ?? 0) < minNodeHeight) {
+      node.setSize([node.size?.[0] ?? 240, minNodeHeight]);
+    }
 
     if (typeof ResizeObserver !== "undefined") {
       state.resizeObserver = new ResizeObserver(() => scheduleLayout(state));
@@ -679,6 +746,117 @@ app.registerExtension({
         originalOnExecuted.apply(this, arguments);
       }
 
+      // Handle spritesheet animation separately
+      if (state.isSpritesheet) {
+        const images = message?.spritesheet_data ?? [];
+
+        // Clean up previous animation
+        if (state.animationNames) {
+          container.innerHTML = "";
+        }
+
+        if (!images.length || !images[0]) {
+          container.innerHTML = "";
+          return;
+        }
+
+        const imageInfo = images[0];
+        const { frame_width, frame_height, columns, total_frames, fps } =
+          imageInfo;
+        const hasAnimationData =
+          frame_width && frame_height && columns && total_frames && fps;
+
+        if (!hasAnimationData) {
+          console.warn("[Spritesheet] Missing animation metadata");
+          return;
+        }
+
+        const imageUrl = buildFullImageUrl(imageInfo);
+        state.aspectRatio = frame_width / frame_height;
+        state.frameHeight = frame_height;
+
+        // Set container to spritesheet mode
+        container.classList.add("spritesheet-mode");
+        wrapper.classList.add("spritesheet-mode");
+        container.innerHTML = "";
+        infoDiv.innerHTML = "";
+        infoDiv.style.display = "none";
+
+        const animDiv = document.createElement("div");
+        animDiv.className = "lc-spritesheet-anim";
+        animDiv.style.width = `${frame_width}px`;
+        animDiv.style.height = `${frame_height}px`;
+        animDiv.style.minWidth = `${frame_width}px`;
+        animDiv.style.minHeight = `${frame_height}px`;
+        animDiv.style.maxWidth = `${frame_width}px`;
+        animDiv.style.maxHeight = `${frame_height}px`;
+        animDiv.style.backgroundImage = `url("${imageUrl}")`;
+        animDiv.style.backgroundRepeat = "no-repeat";
+        animDiv.style.overflow = "hidden";
+
+        const rows = Math.ceil(total_frames / columns);
+        const animName = `spritesheet-anim-${node.id}-${Date.now()}`;
+        state.animationNames = [animName];
+
+        const duration = total_frames / fps;
+
+        // Calculate the full spritesheet dimensions
+        const sheetWidth = frame_width * columns;
+        const sheetHeight = frame_height * rows;
+
+        // Generate keyframes that go left-to-right, then move down to next row
+        let keyframeSteps = "";
+        for (let i = 0; i < total_frames; i++) {
+          const col = i % columns;
+          const row = Math.floor(i / columns);
+          const xPos = -(col * frame_width);
+          const yPos = -(row * frame_height);
+          const percent = (i / total_frames) * 100;
+          keyframeSteps += `${percent.toFixed(2)}% { background-position: ${xPos}px ${yPos}px; }\n`;
+        }
+        // Add final keyframe to loop back
+        keyframeSteps += `100% { background-position: 0px 0px; }`;
+
+        const keyframes = `
+          @keyframes ${animName} {
+            ${keyframeSteps}
+          }
+        `;
+        animationStyleSheet.innerHTML += keyframes;
+
+        // Critical: Set background-size to match the FULL spritesheet dimensions
+        animDiv.style.backgroundSize = `${sheetWidth}px ${sheetHeight}px`;
+        animDiv.style.animation = `${animName} ${duration}s steps(1) infinite`;
+
+        animDiv.addEventListener("click", () => {
+          // Open the animated WebP if available, otherwise the spritesheet
+          const animationFilename = imageInfo.animation_filename;
+          if (animationFilename) {
+            const animationUrl = api.apiURL(
+              `/view?filename=${encodeURIComponent(animationFilename)}&type=temp&subfolder=&t=${Date.now()}`,
+            );
+            window.open(animationUrl, "_blank");
+          } else {
+            window.open(imageUrl, "_blank");
+          }
+        });
+
+        container.appendChild(animDiv);
+
+        // Resize node to fit frame with proper padding
+        const minNodeHeight = frame_height + 80; // Frame height + padding for controls and margins
+        const minNodeWidth = frame_width + 40; // Frame width + padding
+        if (node.size?.[1] < minNodeHeight || node.size?.[0] < minNodeWidth) {
+          node.setSize([
+            Math.max(node.size?.[0] ?? 240, minNodeWidth),
+            Math.max(node.size?.[1] ?? minNodeHeight, minNodeHeight),
+          ]);
+        }
+        node.setDirtyCanvas(true, true);
+        return;
+      }
+
+      // Standard Fast Image Preview behavior
       const images = message?.fast_images ?? [];
       state.items = [];
       container.innerHTML = "";

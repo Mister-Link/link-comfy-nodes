@@ -13,6 +13,7 @@ from .image_nodes import (
     SpritesheetBuilderNode,
 )
 from .pixel_art.node import ConvertToPixelArt
+from .spritesheet_preview import SpritesheetPreviewNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
 from .video_nodes import (
     BatchImageSave,
@@ -35,6 +36,7 @@ __all__ = [
     "PoseImageSetupNode",
     "ResizeImageAndMaskBySideNode",
     "SpritesheetBuilderNode",
+    "SpritesheetPreviewNode",
     "ConvertToPixelArt",
     "AdvancedStringConcat",
     "PreviewAsMarkdown",

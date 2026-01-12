@@ -21,6 +21,7 @@ from .nodes import (
     SaveFolderAsZip,
     SaveImageSequenceZip,
     SpritesheetBuilderNode,
+    SpritesheetPreviewNode,
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
@@ -38,6 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "Pose Image Setup": PoseImageSetupNode,
     "Resize Image and Mask by Side": ResizeImageAndMaskBySideNode,
     "Spritesheet Builder": SpritesheetBuilderNode,
+    "Spritesheet Preview": SpritesheetPreviewNode,
     "VideoMaskEditor": VideoMaskEditor,
     "PreviewImageAlpha": PreviewImageAlpha,
     "ReplaceAlpha": ReplaceAlpha,
@@ -63,6 +65,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Pose Image Setup": "Pose Image Setup",
     "Resize Image and Mask by Side": "Resize Image and Mask by Side",
     "Spritesheet Builder": "Spritesheet Builder",
+    "Spritesheet Preview": "Spritesheet Preview",
     "VideoMaskEditor": "Video Mask Editor",
     "PreviewImageAlpha": "Preview Image (Alpha)",
     "ReplaceAlpha": "Replace Alpha",
