@@ -11,7 +11,7 @@ from .nodes import (
     FarthestColorNode,
     FastImagePreviewNode,
     ImageRotatorNode,
-    PaletteMatchNode,
+    MatchColorPaletteNode,
     PixelationDimensionsNode,
     PoseImageSetupNode,
     PreviewAsMarkdown,
@@ -29,7 +29,7 @@ from .nodes.pixel_art.node import ConvertToPixelArt
 NODE_CLASS_MAPPINGS = {
     "Hex or 24 Bit Color": ColorParserNode,
     "Farthest Color": FarthestColorNode,
-    "Match Palette to Master": PaletteMatchNode,
+    "Match Color Palette": MatchColorPaletteNode,
     "WAN Frame Calculator": WANFrameCalculatorNode,
     "Image Rotator": ImageRotatorNode,
     "Remove Background": BulkBackgroundRemoverBgEraserNode,
@@ -54,7 +54,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Hex or 24 Bit Color": "Convert Color Format",
     "Farthest Color": "Find Furthest Color",
-    "Match Palette to Master": "Match Palette to Master",
+    "Match Color Palette": "Match Color Palette",
     "WAN Frame Calculator": "WAN Frame Calculator",
     "Image Rotator": "Rotate Image",
     "Remove Background": "Remove Background",
