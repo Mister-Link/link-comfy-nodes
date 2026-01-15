@@ -488,13 +488,23 @@ def _load_frames_from_folder(
             else preview_max_frames
         )
 
+    # Calculate frame sampling based on framerate
+    # Assume 24 fps for image sequences
+    assumed_fps = 24.0
+    frame_step = (
+        max(1, int(round(assumed_fps / framerate)))
+        if framerate and framerate > 0
+        else 1
+    )
+    combined_step = max(1, select_every_nth) * frame_step
+
     # Process images
     for frame_index, img_path in enumerate(image_files):
         if frame_index < skip_first_frames:
             continue
 
         relative_index = frame_index - skip_first_frames
-        if relative_index % select_every_nth != 0:
+        if relative_index % combined_step != 0:
             continue
 
         try:
@@ -529,21 +539,20 @@ def _load_frames_from_folder(
     if not frames_list:
         raise RuntimeError("No frames loaded from folder")
 
-    # For image sequences, we don't have a native FPS, so use a sensible default
-    # If framerate is 0 or not specified, default to 18 fps for image folders
-    base_fps = framerate if framerate > 0 else 18
-    effective_fps = base_fps / max(1, select_every_nth)
+    # For image sequences, assume 24 fps
+    # effective_fps is the target framerate if specified, otherwise assumed_fps
+    effective_fps = framerate if framerate > 0 else assumed_fps
 
     return {
         "frames": frames_list,
         "selected_indices": selected_frame_indices,
         "target_width": target_width,
         "target_height": target_height,
-        "original_fps": base_fps,  # Use specified or default FPS
+        "original_fps": int(assumed_fps),  # Assumed FPS for image sequences
         "effective_fps": effective_fps,
         "total_frames": len(image_files),
-        "frame_step": 1,
-        "combined_step": select_every_nth,
+        "frame_step": frame_step,
+        "combined_step": combined_step,
     }
 
 
@@ -579,13 +588,14 @@ def _load_video_frames(
         width, height, custom_width, custom_height
     )
 
+    # Calculate frame sampling based on framerate
+    # Use the video's actual fps as the assumed fps
     frame_step = (
         max(1, int(round(original_fps / framerate)))
-        if framerate and original_fps > 0
+        if framerate and framerate > 0 and original_fps > 0
         else 1
     )
     combined_step = max(1, select_every_nth) * frame_step
-    offset_adjustment = 1 if frame_step > 1 else 0
 
     frames_list: list[np.ndarray] = []
     selected_frame_indices: list[int] = []
@@ -610,12 +620,7 @@ def _load_video_frames(
                 continue
 
             relative_index = frame_index - skip_first_frames
-            if offset_adjustment and relative_index == 0:
-                frame_index += 1
-                continue
-
-            adjusted_index = relative_index - offset_adjustment
-            if adjusted_index < 0 or adjusted_index % combined_step != 0:
+            if relative_index % combined_step != 0:
                 frame_index += 1
                 continue
 
@@ -643,8 +648,8 @@ def _load_video_frames(
     if not frames_list:
         raise RuntimeError("No frames loaded from video")
 
-    base_fps = framerate if framerate != 0 else int(original_fps)
-    effective_fps = base_fps / max(1, select_every_nth)
+    # effective_fps is the target framerate if specified, otherwise original fps
+    effective_fps = framerate if framerate > 0 else original_fps
 
     return {
         "frames": frames_list,
@@ -692,14 +697,6 @@ class VideoMaskEditor:
                     "INT",
                     {"default": 0, "min": 0, "max": 60, "step": 1, "disable": 0},
                 ),
-                "custom_width": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": DIMMAX, "disable": 0},
-                ),
-                "custom_height": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": DIMMAX, "disable": 0},
-                ),
                 "frame_load_cap": (
                     "INT",
                     {"default": 0, "min": 0, "max": BIGMAX, "step": 1, "disable": 0},
@@ -722,8 +719,6 @@ class VideoMaskEditor:
         self,
         source: str,
         framerate: int,
-        custom_width: int,
-        custom_height: int,
         frame_load_cap: int,
         skip_first_frames: int,
         select_every_nth: int,
@@ -757,22 +752,84 @@ class VideoMaskEditor:
                 if video_cap is not None:
                     video_cap.release()
 
-        if is_wan and frame_load_cap > 0 and source_total_frames > 0:
+        if is_wan and source_total_frames > 0:
             original_cap = frame_load_cap
-            # Snap to nearest WAN count
-            snapped_cap = 1 + (round((frame_load_cap - 1) / 4) * 4)
-            if snapped_cap <= 0:
-                snapped_cap = 1
 
-            # If snapped cap is more than we have, snap down to max possible WAN count
-            if snapped_cap > source_total_frames:
-                snapped_cap = 1 + (int(np.floor((source_total_frames - 1) / 4)) * 4)
-                if snapped_cap <= 0:
-                    snapped_cap = 1
+            # Calculate frame_step based on framerate (same logic as in loading functions)
+            if os.path.isdir(video_path):
+                # For image folders, assume 24 fps
+                assumed_fps = 24.0
+                frame_step = (
+                    max(1, int(round(assumed_fps / framerate)))
+                    if framerate and framerate > 0
+                    else 1
+                )
+            else:
+                # For videos, we already have source_total_frames from video_cap above
+                # Need to reopen to get fps for frame_step calculation
+                video_cap = None
+                try:
+                    video_cap = cv2.VideoCapture(video_path)
+                    if video_cap.isOpened():
+                        original_fps = video_cap.get(cv2.CAP_PROP_FPS)
+                        frame_step = (
+                            max(1, int(round(original_fps / framerate)))
+                            if framerate and framerate > 0 and original_fps > 0
+                            else 1
+                        )
+                    else:
+                        frame_step = 1
+                finally:
+                    if video_cap is not None:
+                        video_cap.release()
+
+            # Calculate available frames after skipping and sampling
+            # combined_step accounts for both framerate and select_every_nth
+            combined_step = max(1, select_every_nth) * frame_step
+            available_frames = max(0, source_total_frames - skip_first_frames)
+            # Account for combined_step: we get frames at indices 0, combined_step, 2*combined_step, ...
+            available_sampled = (available_frames + combined_step - 1) // combined_step
+
+            # If frame_load_cap is 0, use all available sampled frames
+            target_frames = frame_load_cap if frame_load_cap > 0 else available_sampled
+
+            # WAN formula: 4n+1 where n>=1, so valid values are: 5, 9, 13, 17, 21, ...
+            # Minimum is 5 (n=1)
+            if target_frames < 5:
+                snapped_cap = 5
+            else:
+                # Find n where 4n+1 <= target_frames, then use that value
+                # Solve: 4n+1 = target_frames => n = (target_frames - 1) / 4
+                n = (target_frames - 1) // 4
+                if n < 1:
+                    n = 1
+                snapped_cap = 4 * n + 1
+
+            # Make sure we don't exceed available frames
+            while snapped_cap > available_sampled and snapped_cap > 5:
+                # Go to previous WAN number
+                n = (snapped_cap - 1) // 4 - 1
+                if n < 1:
+                    snapped_cap = 5
+                    break
+                snapped_cap = 4 * n + 1
+
+            # WAN mode requires minimum of 5 frames
+            # If less than 5 frames available, still use 5 (WAN requirement)
+            if snapped_cap < 5:
+                snapped_cap = 5
+
+            _log(
+                f"WAN calculation: source={source_total_frames}, skip={skip_first_frames}, "
+                f"framerate={framerate}, frame_step={frame_step}, select_every_nth={select_every_nth}, "
+                f"combined_step={combined_step}, available_sampled={available_sampled}, "
+                f"target_frames={target_frames}, snapped_cap={snapped_cap}"
+            )
 
             if frame_load_cap != snapped_cap:
                 _log(
-                    f"WAN mode enabled. Snapped frame_load_cap from {original_cap} to {snapped_cap} (total frames: {source_total_frames})"
+                    f"WAN mode enabled. Snapped frame_load_cap from {original_cap} to {snapped_cap} "
+                    f"(total frames: {source_total_frames}, after skip/sample: {available_sampled})"
                 )
                 frame_load_cap = snapped_cap
 
@@ -791,8 +848,8 @@ class VideoMaskEditor:
             processing_result = _load_frames_from_folder(
                 video_path,
                 framerate,
-                custom_width,
-                custom_height,
+                0,  # custom_width (0 = use original)
+                0,  # custom_height (0 = use original)
                 frame_load_cap,
                 skip_first_frames,
                 select_every_nth,
@@ -807,8 +864,8 @@ class VideoMaskEditor:
             processing_result = _load_video_frames(
                 video_path,
                 framerate,
-                custom_width,
-                custom_height,
+                0,  # custom_width (0 = use original)
+                0,  # custom_height (0 = use original)
                 frame_load_cap,
                 skip_first_frames,
                 select_every_nth,
@@ -940,8 +997,6 @@ class VideoMaskEditor:
             source,
             round(video_mtime, 3),
             kwargs.get("framerate", 0),
-            kwargs.get("custom_width", 0),
-            kwargs.get("custom_height", 0),
             kwargs.get("frame_load_cap", 0),
             kwargs.get("skip_first_frames", 0),
             kwargs.get("select_every_nth", 1),
@@ -1401,6 +1456,96 @@ def _register_keyframe_routes():
             return aiohttp_web.json_response({"keyframes": keyframes})
         except Exception as exc:
             _log(f"Error getting keyframes: {exc}")
+            return aiohttp_web.json_response({"error": str(exc)}, status=500)
+
+    @server.instance.routes.get("/videomaskeditor/calculate_wan_cap")
+    async def video_mask_editor_calculate_wan_cap(request: _Request):
+        """Calculate the appropriate WAN frame cap based on video parameters."""
+        try:
+            params = request.rel_url.query
+            video_name = params.get("video")
+            framerate = _coerce_int(params.get("framerate", 0))
+            skip_first_frames = _coerce_int(params.get("skip_first_frames", 0))
+            select_every_nth = max(1, _coerce_int(params.get("select_every_nth", 1)))
+
+            if not video_name:
+                return aiohttp_web.json_response(
+                    {"error": "Missing video parameter"}, status=400
+                )
+
+            if not folder_paths.exists_annotated_filepath(video_name):
+                return aiohttp_web.json_response(
+                    {"error": "Video not found"}, status=404
+                )
+
+            video_path = folder_paths.get_annotated_filepath(video_name)
+            source_total_frames = 0
+
+            # Determine total frames
+            if os.path.isdir(video_path):
+                image_files = [
+                    f
+                    for f in os.listdir(video_path)
+                    if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
+                ]
+                source_total_frames = len(image_files)
+                # For image folders, assume 24 fps
+                assumed_fps = 24.0
+                frame_step = (
+                    max(1, int(round(assumed_fps / framerate)))
+                    if framerate and framerate > 0
+                    else 1
+                )
+            elif os.path.isfile(video_path):
+                video_cap = None
+                try:
+                    video_cap = cv2.VideoCapture(video_path)
+                    if not video_cap.isOpened():
+                        return aiohttp_web.json_response(
+                            {"error": "Could not open video"}, status=500
+                        )
+                    source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    original_fps = video_cap.get(cv2.CAP_PROP_FPS)
+                    frame_step = (
+                        max(1, int(round(original_fps / framerate)))
+                        if framerate and framerate > 0 and original_fps > 0
+                        else 1
+                    )
+                finally:
+                    if video_cap is not None:
+                        video_cap.release()
+            else:
+                return aiohttp_web.json_response(
+                    {"error": "Invalid video path"}, status=400
+                )
+
+            # Calculate available frames
+            combined_step = max(1, select_every_nth) * frame_step
+            available_frames = max(0, source_total_frames - skip_first_frames)
+            available_sampled = (available_frames + combined_step - 1) // combined_step
+
+            # Calculate WAN cap
+            if available_sampled < 5:
+                wan_cap = -1  # Invalid - not enough frames
+            else:
+                # WAN formula: 4n+1 where n>=1
+                n = (available_sampled - 1) // 4
+                if n < 1:
+                    wan_cap = -1
+                else:
+                    wan_cap = 4 * n + 1
+
+            return aiohttp_web.json_response(
+                {
+                    "wan_cap": wan_cap,
+                    "available_sampled": available_sampled,
+                    "source_total_frames": source_total_frames,
+                    "frame_step": frame_step,
+                    "combined_step": combined_step,
+                }
+            )
+        except Exception as exc:
+            _log(f"Error calculating WAN cap: {exc}")
             return aiohttp_web.json_response({"error": str(exc)}, status=500)
 
     @server.instance.routes.post("/videomaskeditor/restorekeyframes")

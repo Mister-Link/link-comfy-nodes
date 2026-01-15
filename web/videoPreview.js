@@ -2194,48 +2194,195 @@ app.registerExtension({
       const frameLoadCapWidget = this.widgets.find(
         (w) => w.name === "frame_load_cap",
       );
+      const framerateWidget = this.widgets.find((w) => w.name === "framerate");
+      const skipFirstFramesWidget = this.widgets.find(
+        (w) => w.name === "skip_first_frames",
+      );
+      const selectEveryNthWidget = this.widgets.find(
+        (w) => w.name === "select_every_nth",
+      );
 
       if (isWanWidget && frameLoadCapWidget) {
         let lastKnownValue = Number(frameLoadCapWidget.value);
+        let maxWanCap = null; // Store the maximum allowed WAN cap
 
-        const snapLogic = () => {
+        const updateWidgetLimits = (minVal, maxVal) => {
+          // Update the widget's min/max options if they exist
+          if (frameLoadCapWidget.options) {
+            frameLoadCapWidget.options.min = minVal;
+            frameLoadCapWidget.options.max = maxVal;
+          }
+          // Store max for validation
+          maxWanCap = maxVal;
+        };
+
+        const snapLogic = async () => {
           if (!isWanWidget.value) {
-            // When WAN is off, just track the value.
-            lastKnownValue = Number(frameLoadCapWidget.value);
+            // When WAN is off, reset limits to allow any frame count
+            // Get parameters to calculate actual max frames
+            const source = getWidgetValue("source", "");
+            const framerate = Number(framerateWidget?.value || 0);
+            const skipFirstFrames = Number(skipFirstFramesWidget?.value || 0);
+            const selectEveryNth = Math.max(
+              1,
+              Number(selectEveryNthWidget?.value || 1),
+            );
+
+            if (source) {
+              try {
+                const response = await api.fetchApi(
+                  `/videomaskeditor/calculate_wan_cap?video=${encodeURIComponent(source)}&framerate=${framerate}&skip_first_frames=${skipFirstFrames}&select_every_nth=${selectEveryNth}`,
+                );
+
+                if (response.ok) {
+                  const data = await response.json();
+                  const maxFrames = data.available_sampled;
+
+                  // Update limits: min=1, max=actual available frames
+                  updateWidgetLimits(1, maxFrames);
+
+                  console.log(
+                    `[WAN OFF] Set limits to 1-${maxFrames} (available frames)`,
+                  );
+
+                  // Clamp current value to the new limits
+                  const currentValue = Number(frameLoadCapWidget.value);
+                  let clampedValue = currentValue;
+
+                  if (currentValue < 1) {
+                    clampedValue = 1;
+                  } else if (currentValue > maxFrames) {
+                    clampedValue = maxFrames;
+                  }
+
+                  if (clampedValue !== currentValue) {
+                    frameLoadCapWidget.value = clampedValue;
+                    if (frameLoadCapWidget.inputEl) {
+                      frameLoadCapWidget.inputEl.value = clampedValue;
+                    }
+                    console.log(
+                      `[WAN OFF] Clamped frame_load_cap from ${currentValue} to ${clampedValue}`,
+                    );
+                  }
+
+                  lastKnownValue = clampedValue;
+                }
+              } catch (error) {
+                console.error("[WAN OFF] Failed to get frame count:", error);
+                updateWidgetLimits(1, 999999);
+                lastKnownValue = Number(frameLoadCapWidget.value);
+              }
+            } else {
+              updateWidgetLimits(1, 999999);
+              lastKnownValue = Number(frameLoadCapWidget.value);
+            }
+
             return;
           }
 
           const currentValue = Number(frameLoadCapWidget.value);
           if (isNaN(currentValue)) return;
 
-          let snappedValue;
-          const delta = currentValue - lastKnownValue;
+          // Get parameters
+          const source = getWidgetValue("source", "");
+          const framerate = Number(framerateWidget?.value || 0);
+          const skipFirstFrames = Number(skipFirstFramesWidget?.value || 0);
+          const selectEveryNth = Math.max(
+            1,
+            Number(selectEveryNthWidget?.value || 1),
+          );
 
-          // Heuristic: A change of exactly +1 or -1 indicates an arrow click.
-          if (delta === 1) {
+          if (!source) {
+            return; // Can't calculate without a source
+          }
+
+          const delta = currentValue - lastKnownValue;
+          let snappedValue;
+
+          // If user is incrementing/decrementing with arrows, use local logic
+          if (delta === 1 && lastKnownValue >= 5) {
             // Incrementing: find next WAN count up from the last valid number.
             const n = Math.floor((lastKnownValue - 1) / 4);
             snappedValue = 1 + (n + 1) * 4;
-          } else if (delta === -1) {
+
+            // Enforce max limit if we have it
+            if (maxWanCap !== null && snappedValue > maxWanCap) {
+              snappedValue = lastKnownValue; // Don't allow increment beyond max
+              return;
+            }
+
+            // Update immediately for responsiveness
+            frameLoadCapWidget.value = snappedValue;
+            if (frameLoadCapWidget.inputEl) {
+              frameLoadCapWidget.inputEl.value = snappedValue;
+            }
+            lastKnownValue = snappedValue;
+            return;
+          } else if (delta === -1 && lastKnownValue > 5) {
             // Decrementing: find next WAN count down.
             const n = Math.ceil((lastKnownValue - 1) / 4);
             snappedValue = 1 + (n - 1) * 4;
-          } else {
-            // Typing or other direct change: snap to nearest valid value.
-            snappedValue =
-              currentValue <= 1
-                ? 1
-                : 1 + Math.round((currentValue - 1) / 4) * 4;
+
+            // Make sure we don't go below 5
+            snappedValue = Math.max(5, snappedValue);
+
+            // Update immediately for responsiveness
+            frameLoadCapWidget.value = snappedValue;
+            if (frameLoadCapWidget.inputEl) {
+              frameLoadCapWidget.inputEl.value = snappedValue;
+            }
+            lastKnownValue = snappedValue;
+            return;
           }
 
-          snappedValue = Math.max(1, snappedValue);
+          // For other cases (toggle, type value, or frame_load_cap=0), ask backend
+          try {
+            const response = await api.fetchApi(
+              `/videomaskeditor/calculate_wan_cap?video=${encodeURIComponent(source)}&framerate=${framerate}&skip_first_frames=${skipFirstFrames}&select_every_nth=${selectEveryNth}`,
+            );
 
-          // Update widget value and internal state
-          frameLoadCapWidget.value = snappedValue;
-          if (frameLoadCapWidget.inputEl) {
-            frameLoadCapWidget.inputEl.value = snappedValue;
+            if (response.ok) {
+              const data = await response.json();
+              snappedValue = data.wan_cap;
+
+              console.log(
+                `[WAN] Calculated cap: ${snappedValue}, available: ${data.available_sampled}, step: ${data.combined_step}`,
+              );
+
+              // Update widget limits based on calculation
+              if (snappedValue >= 5) {
+                updateWidgetLimits(5, snappedValue);
+              } else {
+                updateWidgetLimits(-1, -1);
+              }
+
+              // If the calculation resulted in invalid value, set to -1
+              if (snappedValue < 5) {
+                snappedValue = -1;
+              } else if (currentValue > 0 && currentValue !== 0) {
+                // If user typed a specific value (not 0), snap to nearest valid WAN number
+                // that doesn't exceed the calculated cap
+                const targetFrames = currentValue;
+                if (targetFrames < 5) {
+                  snappedValue = Math.min(5, snappedValue);
+                } else {
+                  const n = Math.floor((targetFrames - 1) / 4);
+                  const userSnapped = 1 + Math.max(1, n) * 4;
+                  snappedValue = Math.min(userSnapped, snappedValue);
+                }
+              }
+              // else: currentValue is 0, use the calculated max wan_cap
+
+              // Update widget value and internal state
+              frameLoadCapWidget.value = snappedValue;
+              if (frameLoadCapWidget.inputEl) {
+                frameLoadCapWidget.inputEl.value = snappedValue;
+              }
+              lastKnownValue = snappedValue;
+            }
+          } catch (error) {
+            console.error("[WAN] Failed to calculate WAN cap:", error);
           }
-          lastKnownValue = snappedValue;
         };
 
         // Monkey-patch callbacks to inject our logic
@@ -2251,8 +2398,58 @@ app.registerExtension({
         const originalFrameCapCallback = frameLoadCapWidget.callback;
         frameLoadCapWidget.callback = function (value) {
           originalFrameCapCallback?.apply(this, arguments);
+
+          // If WAN is off, clamp to max available frames
+          if (!isWanWidget.value && maxWanCap !== null) {
+            const currentValue = Number(value);
+            if (!isNaN(currentValue)) {
+              let clampedValue = currentValue;
+
+              if (currentValue < 1) {
+                clampedValue = 1;
+              } else if (currentValue > maxWanCap) {
+                clampedValue = maxWanCap;
+              }
+
+              if (clampedValue !== currentValue) {
+                frameLoadCapWidget.value = clampedValue;
+                if (frameLoadCapWidget.inputEl) {
+                  frameLoadCapWidget.inputEl.value = clampedValue;
+                }
+                lastKnownValue = clampedValue;
+                return;
+              }
+            }
+          }
+
           snapLogic();
         };
+
+        // Also trigger snap logic when other relevant parameters change
+        if (framerateWidget) {
+          const originalFramerateCallback = framerateWidget.callback;
+          framerateWidget.callback = function (value) {
+            originalFramerateCallback?.apply(this, arguments);
+            // Always re-run snapLogic to update limits (both WAN on and off)
+            snapLogic();
+          };
+        }
+        if (skipFirstFramesWidget) {
+          const originalSkipCallback = skipFirstFramesWidget.callback;
+          skipFirstFramesWidget.callback = function (value) {
+            originalSkipCallback?.apply(this, arguments);
+            // Always re-run snapLogic to update limits (both WAN on and off)
+            snapLogic();
+          };
+        }
+        if (selectEveryNthWidget) {
+          const originalSelectCallback = selectEveryNthWidget.callback;
+          selectEveryNthWidget.callback = function (value) {
+            originalSelectCallback?.apply(this, arguments);
+            // Always re-run snapLogic to update limits (both WAN on and off)
+            snapLogic();
+          };
+        }
 
         // Perform an initial check in case the node loads with is_wan enabled.
         if (isWanWidget.value) {
