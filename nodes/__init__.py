@@ -5,6 +5,7 @@ from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
 from .fast_image_preview import FastImagePreviewNode
 from .image_nodes import (
+    AddImageToBatchNode,
     CropToContentNode,
     ImageRotatorNode,
     PixelationDimensionsNode,
@@ -27,6 +28,7 @@ from .video_nodes import (
 )
 
 __all__ = [
+    "AddImageToBatchNode",
     "ColorParserNode",
     "FarthestColorNode",
     "MatchColorPaletteNode",

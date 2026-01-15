@@ -576,3 +576,60 @@ class SpritesheetBuilderNode:
                 best_rows = rows
 
         return best_cols, best_rows
+
+
+class AddImageToBatchNode:
+    """Add a single image to a batch at a specific index. Returns a list, not a tensor batch."""
+
+    RETURN_TYPES: ClassVar[tuple[str, ...]] = ("IMAGE",)
+    RETURN_NAMES: ClassVar[tuple[str, ...]] = ("images",)
+    FUNCTION: ClassVar[str] = "add_image"
+    CATEGORY: ClassVar[str] = "image/batch"
+    OUTPUT_IS_LIST: ClassVar[tuple[bool, ...]] = (True,)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "batch": ("IMAGE",),
+                "index": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": 999, "step": 1},
+                ),
+            }
+        }
+
+    def add_image(self, image: Tensor, batch: Tensor, index: int):
+        # Ensure both are in the same format
+        img = image.detach().float()
+        bat = batch.detach().float()
+
+        # Handle single image vs batch
+        if img.ndim == 3:
+            img = img.unsqueeze(0)
+        if bat.ndim == 3:
+            bat = bat.unsqueeze(0)
+
+        if img.ndim != 4 or bat.ndim != 4:
+            raise ValueError("Expected images with shape (N, H, W, C)")
+
+        # Take only the first image from the image input
+        single_image = img[0:1]
+
+        # Convert batch to list of individual images
+        batch_list = [bat[i : i + 1] for i in range(bat.shape[0])]
+
+        # Clamp index to valid range
+        batch_size = len(batch_list)
+        index = max(0, min(index, batch_size))
+
+        # Insert at index
+        if index == 0:
+            result_list = [single_image] + batch_list
+        elif index >= batch_size:
+            result_list = batch_list + [single_image]
+        else:
+            result_list = batch_list[:index] + [single_image] + batch_list[index:]
+
+        return (result_list,)

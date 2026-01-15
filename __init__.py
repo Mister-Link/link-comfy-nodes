@@ -2,6 +2,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 from .nodes import (
+    AddImageToBatchNode,
     AdvancedStringConcat,
     AutoCropperNode,
     BatchImageSave,
@@ -31,6 +32,7 @@ from .nodes import (
 from .nodes.pixel_art.node import ConvertToPixelArt
 
 NODE_CLASS_MAPPINGS = {
+    "Add Image to Batch": AddImageToBatchNode,
     "Hex or 24 Bit Color": ColorParserNode,
     "Farthest Color": FarthestColorNode,
     "Match Color Palette": MatchColorPaletteNode,
@@ -60,6 +62,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "Add Image to Batch": "Add Image to Batch",
     "Hex or 24 Bit Color": "Convert Color Format",
     "Farthest Color": "Find Furthest Color",
     "Match Color Palette": "Match Color Palette",
