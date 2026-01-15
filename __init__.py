@@ -25,7 +25,6 @@ from .nodes import (
     StabilizerTrimNode,
     VideoMaskEditor,
     WANFrameCalculatorNode,
-    SEGSNormalizeForAnimateDiffNode,
 )
 from .nodes.pixel_art.node import ConvertToPixelArt
 
@@ -54,7 +53,6 @@ NODE_CLASS_MAPPINGS = {
     "Auto Cropper": AutoCropperNode,
     "Fast Image Preview": FastImagePreviewNode,
     "Stabilizer Trim": StabilizerTrimNode,
-    "SEGS Normalize for Video": SEGSNormalizeForAnimateDiffNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -82,7 +80,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Auto Cropper": "Auto Cropper",
     "Fast Image Preview": "Fast Image Preview",
     "Stabilizer Trim": "Stabilizer Trim",
-    "SEGS Normalize for Video": "SEGS Normalize for Video",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

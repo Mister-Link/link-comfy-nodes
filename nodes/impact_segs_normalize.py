@@ -12,7 +12,6 @@ def _normalize_cropped_image(image: Any) -> Any:
 
     if isinstance(image, (np.ndarray, torch.Tensor)):
         arr = image
-        original_arr = arr
         # Squeeze singleton dims until we reach 4D if possible.
         while arr.ndim > 4:
             squeeze_dim = None
@@ -28,17 +27,8 @@ def _normalize_cropped_image(image: Any) -> Any:
         if arr.ndim == 3:
             arr = arr[None, ...]
 
-        # If still can't normalize to 4D, return the best attempt or original
         if arr.ndim > 4:
-            # Try to just take the first element repeatedly until we get to 4D or less
-            while arr.ndim > 4:
-                arr = arr[0]
-            # If we ended up with 3D, add batch dimension
-            if arr.ndim == 3:
-                arr = arr[None, ...]
-            # If still not 4D, return original as last resort
-            if arr.ndim != 4:
-                return original_arr
+            return None
 
         return arr
 
@@ -72,70 +62,85 @@ class SEGSNormalizeForAnimateDiffNode:
         header, seg_list = segs
         new_segs = []
 
-        for i, seg in enumerate(seg_list):
-            original_cropped_image = getattr(seg, "cropped_image", None)
-            cropped_mask = getattr(seg, "cropped_mask", None)
 
-            print(
-                f"[SEGS Normalize] Seg {i}: original_cropped_image type: {type(original_cropped_image)}"
+
+
+
+
+
+
+
+
+                and and ))
             )
-            if original_cropped_image is not None:
-                if isinstance(original_cropped_image, (np.ndarray, torch.Tensor)):
-                    print(
-                        f"[SEGS Normalize] Seg {i}: original image shape: {original_cropped_image.shape}"
-                    )
-            if cropped_mask is not None:
-                if isinstance(cropped_mask, (np.ndarray, torch.Tensor)):
-                    print(f"[SEGS Normalize] Seg {i}: mask shape: {cropped_mask.shape}")
 
-            # Check if cropped_image is None (common with video detector modes)
-            if original_cropped_image is None:
-                print(f"[SEGS Normalize] Seg {i}: WARNING - No cropped_image found!")
-                print(
-                    f"[SEGS Normalize] This is normal for 'Combine neighboring frames' mode."
-                )
-                print(
-                    f"[SEGS Normalize] SOLUTION: Connect image_frames to 'fallback_image_opt' on SEGSPreview"
-                )
 
-            cropped_image = _normalize_cropped_image(original_cropped_image)
 
-            # Handle dimension mismatch: if image batch size doesn't match mask batch size, replicate the image
-            if (
-                cropped_image is not None
-                and cropped_mask is not None
-                and isinstance(cropped_image, (np.ndarray, torch.Tensor))
-                and isinstance(cropped_mask, (np.ndarray, torch.Tensor))
-            ):
-                image_batch = len(cropped_image)
-                mask_batch = len(cropped_mask)
 
-                if image_batch != mask_batch:
-                    print(
-                        f"[SEGS Normalize] Seg {i}: Batch mismatch! Image: {image_batch}, Mask: {mask_batch}"
-                    )
-                    # Replicate the image to match mask batch size
-                    if image_batch == 1 and mask_batch > 1:
-                        # Convert to torch if numpy
-                        if isinstance(cropped_image, np.ndarray):
-                            cropped_image = torch.from_numpy(cropped_image)
-                        # Repeat the single image for all frames
-                        cropped_image = cropped_image.repeat(mask_batch, 1, 1, 1)
-                        print(
-                            f"[SEGS Normalize] Seg {i}: Replicated image to shape: {cropped_image.shape}"
-                        )
 
-            if cropped_image is not None:
-                if isinstance(cropped_image, (np.ndarray, torch.Tensor)):
-                    print(
-                        f"[SEGS Normalize] Seg {i}: final normalized shape: {cropped_image.shape}"
-                    )
+
+                            for seg in seg_list:
+            cropped_image = _normalize_cropped_image(
+                getattr(seg, "cropped_image", None)
+            )
+            new_segs.append(_replace_seg(seg, cropped_image=cropped_image))
+
+        return ((header, new_segs),)
+
+
+class SEGSNormalizeBeforeDetailerNode:
+    """
+    Normalizes SEGS before passing to Detailer by ensuring cropped_image exists.
+    If cropped_image is None, crops from the provided image_frames.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "segs": ("SEGS",),
+                "image_frames": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("SEGS",)
+    FUNCTION = "execute"
+    CATEGORY = "link/Impact"
+
+    def execute(self, segs: tuple, image_frames: Any):
+        import sys
+        sys.path.insert(0, "/home/developer/ComfyUI/custom_nodes/comfyui-impact-pack/modules")
+        from impact import utils as impact_utils
+
+        header, seg_list = segs
+        new_segs = []
+
+        print(f"[SEGS Normalize Before Detailer] Processing {len(seg_list)} segments")
+
+        for i, seg in enumerate(seg_list):
+            cropped_image = getattr(seg, "cropped_image", None)
+
+            # If no cropped_image, create it by cropping from image_frames
+            if cropped_image is None:
+                print(f"[SEGS Normalize Before Detailer] Seg {i}: Creating cropped_image from image_frames")
+                crop_region = getattr(seg, "crop_region", None)
+                if crop_region is not None:
+                    # Crop from each frame
+                    cropped_frames = None
+                    for frame_idx, frame in enumerate(image_frames):
+                        frame = frame.unsqueeze(0)
+                        cropped = impact_utils.crop_tensor4(frame, crop_region)
+                        if cropped_frames is None:
+                            cropped_frames = cropped
+                        else:
+                            cropped_frames = torch.cat((cropped_frames, cropped), dim=0)
+                    cropped_image = cropped_frames
+                    print(f"[SEGS Normalize Before Detailer] Seg {i}: Created cropped_image with shape {cropped_image.shape}")
             else:
-                print(f"[SEGS Normalize] Seg {i}: normalized to None!")
+                print(f"[SEGS Normalize Before Detailer] Seg {i}: cropped_image already exists with shape {cropped_image.shape}")
 
             new_segs.append(_replace_seg(seg, cropped_image=cropped_image))
 
         return ((header, new_segs),)
 
 
-__all__ = ["SEGSNormalizeForAnimateDiffNode"]
+__all__ = ["SEGSNormalizeForAnimateDiffNode", "SEGSNormalizeBeforeDetailerNode"]
