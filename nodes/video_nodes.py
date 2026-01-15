@@ -801,34 +801,30 @@ class VideoMaskEditor:
             # Account for combined_step: we get frames at indices 0, combined_step, 2*combined_step, ...
             available_sampled = (available_frames + combined_step - 1) // combined_step
 
-            # If frame_load_cap is 0, use all available sampled frames
+            # If frame_load_cap is 0, use all available sampled frames as target
             target_frames = frame_load_cap if frame_load_cap > 0 else available_sampled
 
-            # WAN formula: 4n+1 where n>=1, so valid values are: 5, 9, 13, 17, 21, ...
-            # Minimum is 5 (n=1)
-            if target_frames < 5:
-                snapped_cap = 5
-            else:
-                # Find n where 4n+1 <= target_frames, then use that value
-                # Solve: 4n+1 = target_frames => n = (target_frames - 1) / 4
-                n = (target_frames - 1) // 4
-                if n < 1:
-                    n = 1
-                snapped_cap = 4 * n + 1
+            # WAN snapping: snap to 4n+1 formula where n>=1
+            # Valid WAN values: 5, 9, 13, 17, 21, 25, ...
+            # Always snap to nearest valid WAN value that doesn't exceed target_frames
 
-            # Make sure we don't exceed available frames
-            while snapped_cap > available_sampled and snapped_cap > 5:
-                # Go to previous WAN number
-                n = (snapped_cap - 1) // 4 - 1
-                if n < 1:
-                    snapped_cap = 5
-                    break
-                snapped_cap = 4 * n + 1
+            # Find the largest valid WAN value <= target_frames
+            # Formula: 4n+1 <= target_frames => n <= (target_frames - 1) / 4
+            n = max(1, (target_frames - 1) // 4)
+            snapped_cap = 4 * n + 1
 
-            # WAN mode requires minimum of 5 frames
-            # If less than 5 frames available, still use 5 (WAN requirement)
+            # Ensure minimum WAN value
             if snapped_cap < 5:
                 snapped_cap = 5
+
+            # If snapped value exceeds available frames, snap down to largest valid WAN value
+            # that fits within available_sampled
+            if snapped_cap > available_sampled:
+                n = max(1, (available_sampled - 1) // 4)
+                snapped_cap = 4 * n + 1
+                # Final safety check: if still < 5, use 5 (even if not enough frames available)
+                if snapped_cap < 5:
+                    snapped_cap = 5
 
             _log(
                 f"WAN calculation: source={source_total_frames}, skip={skip_first_frames}, "
