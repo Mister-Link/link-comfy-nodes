@@ -22,6 +22,7 @@ from .nodes import (
     SaveImageSequenceZip,
     SpritesheetBuilderNode,
     SpritesheetPreviewNode,
+    StabilizerTrimNode,
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
@@ -51,6 +52,7 @@ NODE_CLASS_MAPPINGS = {
     "PreviewAsMarkdown": PreviewAsMarkdown,
     "Auto Cropper": AutoCropperNode,
     "Fast Image Preview": FastImagePreviewNode,
+    "Stabilizer Trim": StabilizerTrimNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -77,6 +79,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "PreviewAsMarkdown": "Preview as Markdown",
     "Auto Cropper": "Auto Cropper",
     "Fast Image Preview": "Fast Image Preview",
+    "Stabilizer Trim": "Stabilizer Trim",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

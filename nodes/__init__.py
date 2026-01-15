@@ -14,6 +14,7 @@ from .image_nodes import (
 )
 from .pixel_art.node import ConvertToPixelArt
 from .spritesheet_preview import SpritesheetPreviewNode
+from .stabilizer_trim import StabilizerTrimNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
 from .video_nodes import (
     BatchImageSave,
@@ -46,6 +47,7 @@ __all__ = [
     "PreviewImageAlpha",
     "ReplaceAlpha",
     "SaveImageSequenceZip",
+    "StabilizerTrimNode",
     "VideoMaskEditor",
     "WANFrameCalculatorNode",
 ]
