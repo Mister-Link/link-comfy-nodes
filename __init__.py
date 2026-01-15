@@ -111,4 +111,31 @@ def _load_model_downloader():
 
 _load_model_downloader()
 
+
+# Auto-patch Impact Pack for 5D tensor support
+def _apply_impact_pack_patches():
+    """Apply compatibility patches to Impact Pack on startup."""
+    try:
+        from pathlib import Path
+
+        install_script = Path(__file__).parent / "install.py"
+        if install_script.exists():
+            import subprocess
+
+            result = subprocess.run(
+                ["python3", str(install_script)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                print("[link-comfy-nodes] Impact Pack patches applied successfully")
+            else:
+                print(f"[link-comfy-nodes] Patch script warning: {result.stdout}")
+    except Exception as exc:
+        print(f"[link-comfy-nodes] Could not apply patches: {exc}")
+
+
+_apply_impact_pack_patches()
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
