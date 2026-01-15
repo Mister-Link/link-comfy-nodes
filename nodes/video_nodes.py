@@ -489,8 +489,14 @@ def _load_frames_from_folder(
         )
 
     # Calculate frame sampling based on framerate
-    # Assume 24 fps for image sequences
-    assumed_fps = 24.0
+    # For image folders, assume 18 fps (not 24 as previously)
+    # If framerate is 0 or not specified, use all frames (frame_step = 1)
+    # If framerate > 0, calculate which frames to select:
+    # - We want to select frames at time intervals of 1/framerate seconds
+    # - At the assumed fps, this means selecting every (assumed_fps / framerate) frames
+    # Example: assumed_fps=18, framerate=3 -> frame_step = 18/3 = 6
+    # So we select frames 0, 6, 12, 18, ... (at times 0, 1/3s, 2/3s, 1s, ...)
+    assumed_fps = 18.0
     frame_step = (
         max(1, int(round(assumed_fps / framerate)))
         if framerate and framerate > 0
@@ -589,7 +595,12 @@ def _load_video_frames(
     )
 
     # Calculate frame sampling based on framerate
-    # Use the video's actual fps as the assumed fps
+    # If framerate is 0 or not specified, use original fps (frame_step = 1)
+    # If framerate > 0, calculate which frames to select:
+    # - We want to select frames at time intervals of 1/framerate seconds
+    # - At the original fps, this means selecting every (original_fps / framerate) frames
+    # Example: original_fps=18, framerate=3 -> frame_step = 18/3 = 6
+    # So we select frames 0, 6, 12, 18, ... (at times 0, 1/3s, 2/3s, 1s, ...)
     frame_step = (
         max(1, int(round(original_fps / framerate)))
         if framerate and framerate > 0 and original_fps > 0
@@ -757,8 +768,8 @@ class VideoMaskEditor:
 
             # Calculate frame_step based on framerate (same logic as in loading functions)
             if os.path.isdir(video_path):
-                # For image folders, assume 24 fps
-                assumed_fps = 24.0
+                # For image folders, assume 18 fps
+                assumed_fps = 18.0
                 frame_step = (
                     max(1, int(round(assumed_fps / framerate)))
                     if framerate and framerate > 0
@@ -1489,8 +1500,8 @@ def _register_keyframe_routes():
                     if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
                 ]
                 source_total_frames = len(image_files)
-                # For image folders, assume 24 fps
-                assumed_fps = 24.0
+                # For image folders, assume 18 fps
+                assumed_fps = 18.0
                 frame_step = (
                     max(1, int(round(assumed_fps / framerate)))
                     if framerate and framerate > 0
