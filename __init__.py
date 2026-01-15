@@ -20,6 +20,8 @@ from .nodes import (
     ResizeImageAndMaskBySideNode,
     SaveFolderAsZip,
     SaveImageSequenceZip,
+    SEGSEnsureCroppedImageNode,
+    SEGSFixDimensionsNode,
     SpritesheetBuilderNode,
     SpritesheetPreviewNode,
     StabilizerTrimNode,
@@ -53,6 +55,8 @@ NODE_CLASS_MAPPINGS = {
     "Auto Cropper": AutoCropperNode,
     "Fast Image Preview": FastImagePreviewNode,
     "Stabilizer Trim": StabilizerTrimNode,
+    "SEGS Fix Dimensions": SEGSFixDimensionsNode,
+    "SEGS Ensure Cropped Image": SEGSEnsureCroppedImageNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -80,6 +84,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Auto Cropper": "Auto Cropper",
     "Fast Image Preview": "Fast Image Preview",
     "Stabilizer Trim": "Stabilizer Trim",
+    "SEGS Fix Dimensions": "SEGS Fix Dimensions",
+    "SEGS Ensure Cropped Image": "SEGS Ensure Cropped Image",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

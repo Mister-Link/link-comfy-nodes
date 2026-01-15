@@ -13,6 +13,7 @@ from .image_nodes import (
     SpritesheetBuilderNode,
 )
 from .pixel_art.node import ConvertToPixelArt
+from .segs_fixer import SEGSEnsureCroppedImageNode, SEGSFixDimensionsNode
 from .spritesheet_preview import SpritesheetPreviewNode
 from .stabilizer_trim import StabilizerTrimNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
@@ -50,4 +51,6 @@ __all__ = [
     "StabilizerTrimNode",
     "VideoMaskEditor",
     "WANFrameCalculatorNode",
+    "SEGSFixDimensionsNode",
+    "SEGSEnsureCroppedImageNode",
 ]
