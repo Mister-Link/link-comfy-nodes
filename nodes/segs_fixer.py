@@ -164,6 +164,9 @@ class SEGSEnsureCroppedImageNode:
                         else:
                             cropped_frames = torch.cat((cropped_frames, cropped), dim=0)
 
+                    # Convert to numpy to match Impact Pack's expected format
+                    cropped_frames = cropped_frames.cpu().numpy()
+
                     print(
                         f"[SEGS Ensure Cropped] Seg {i}: Created cropped_image with shape {cropped_frames.shape}"
                     )
