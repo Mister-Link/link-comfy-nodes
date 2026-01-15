@@ -586,6 +586,7 @@ class AddImageToBatchNode:
     FUNCTION: ClassVar[str] = "add_image"
     CATEGORY: ClassVar[str] = "image/batch"
     OUTPUT_IS_LIST: ClassVar[tuple[bool, ...]] = (True,)
+    INPUT_IS_LIST: ClassVar[bool] = True
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -600,36 +601,37 @@ class AddImageToBatchNode:
             }
         }
 
-    def add_image(self, image: Tensor, batch: Tensor, index: int):
-        # Ensure both are in the same format
-        img = image.detach().float()
-        bat = batch.detach().float()
+    def add_image(self, image: list, batch: list, index: list):
+        # Get the first image tensor from the image input
+        img = image[0].detach().float()
 
-        # Handle single image vs batch
+        # Handle single image vs batch for the image to insert
         if img.ndim == 3:
             img = img.unsqueeze(0)
-        if bat.ndim == 3:
-            bat = bat.unsqueeze(0)
+        if img.ndim != 4:
+            raise ValueError("Expected image with shape (N, H, W, C)")
 
-        if img.ndim != 4 or bat.ndim != 4:
-            raise ValueError("Expected images with shape (N, H, W, C)")
-
-        # Take only the first image from the image input
+        # Take only the first image from the first tensor
         single_image = img[0:1]
 
-        # Convert batch to list of individual images
-        batch_list = [bat[i : i + 1] for i in range(bat.shape[0])]
+        # Get the index value
+        idx = index[0] if isinstance(index[0], int) else int(index[0].item())
+        idx = max(0, idx)
 
-        # Clamp index to valid range
-        batch_size = len(batch_list)
-        index = max(0, min(index, batch_size))
+        # Collect all batch images
+        batch_images = []
+        for bat_tensor in batch:
+            bat = bat_tensor.detach().float()
+            if bat.ndim == 3:
+                bat = bat.unsqueeze(0)
+            if bat.ndim == 4:
+                for i in range(bat.shape[0]):
+                    batch_images.append(bat[i : i + 1])
 
-        # Insert at index
-        if index == 0:
-            result_list = [single_image] + batch_list
-        elif index >= batch_size:
-            result_list = batch_list + [single_image]
-        else:
-            result_list = batch_list[:index] + [single_image] + batch_list[index:]
+        # Clamp index
+        idx = min(idx, len(batch_images))
+
+        # Build final list with image inserted at index
+        result_list = batch_images[:idx] + [single_image] + batch_images[idx:]
 
         return (result_list,)
