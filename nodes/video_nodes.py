@@ -34,8 +34,8 @@ IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp"]
 BIGMAX = 2**53 - 1
 DIMMAX = 8192
 DEFAULT_PREVIEW_FRAME_LIMIT = 120
-PREVIEW_CACHE_MAX_ITEMS = 5  # Increased since WebP is smaller
-PREVIEW_CACHE_MAX_BYTES = 20_000_000  # Reduced since WebP is more efficient
+PREVIEW_CACHE_MAX_ITEMS = 10  # Cache more previews with optimized WebP compression
+PREVIEW_CACHE_MAX_BYTES = 30_000_000  # Allow larger cache since WebP is very efficient
 _BATCH_IMAGE_SAVE_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
 
 
@@ -739,35 +739,21 @@ class VideoMaskEditor:
         unique_id: str | None = None,
     ):
         _ = force_size  # Suppress unused parameter warning
+
         video_path = folder_paths.get_annotated_filepath(source)
-        source_total_frames = 0
 
-        # Determine total frames for WAN snapping logic
-        if os.path.isdir(video_path):
-            image_files = [
-                f
-                for f in os.listdir(video_path)
-                if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
-            ]
-            source_total_frames = len(image_files)
-        elif os.path.isfile(video_path):
-            video_cap = None
-            try:
-                video_cap = cv2.VideoCapture(video_path)
-                if not video_cap.isOpened():
-                    raise ValueError(
-                        f"Could not open video for frame count: {video_path}"
-                    )
-                source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            finally:
-                if video_cap is not None:
-                    video_cap.release()
-
-        if is_wan and source_total_frames > 0:
-            original_cap = frame_load_cap
-
-            # Calculate frame_step based on framerate (same logic as in loading functions)
+        # WAN mode: enforce frame_load_cap follows 4n+1 formula (minimum 5)
+        # Must consider available frames after skipping
+        if is_wan:
+            # Get total frames from source
+            source_total_frames = 0
             if os.path.isdir(video_path):
+                image_files = [
+                    f
+                    for f in os.listdir(video_path)
+                    if f.split(".")[-1].lower() in IMAGE_EXTENSIONS
+                ]
+                source_total_frames = len(image_files)
                 # For image folders, assume 18 fps
                 assumed_fps = 18.0
                 frame_step = (
@@ -775,13 +761,12 @@ class VideoMaskEditor:
                     if framerate and framerate > 0
                     else 1
                 )
-            else:
-                # For videos, we already have source_total_frames from video_cap above
-                # Need to reopen to get fps for frame_step calculation
+            elif os.path.isfile(video_path):
                 video_cap = None
                 try:
                     video_cap = cv2.VideoCapture(video_path)
                     if video_cap.isOpened():
+                        source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                         original_fps = video_cap.get(cv2.CAP_PROP_FPS)
                         frame_step = (
                             max(1, int(round(original_fps / framerate)))
@@ -793,50 +778,33 @@ class VideoMaskEditor:
                 finally:
                     if video_cap is not None:
                         video_cap.release()
+            else:
+                frame_step = 1
 
             # Calculate available frames after skipping and sampling
-            # combined_step accounts for both framerate and select_every_nth
             combined_step = max(1, select_every_nth) * frame_step
             available_frames = max(0, source_total_frames - skip_first_frames)
             # Account for combined_step: we get frames at indices 0, combined_step, 2*combined_step, ...
             available_sampled = (available_frames + combined_step - 1) // combined_step
 
-            # If frame_load_cap is 0, use all available sampled frames as target
-            target_frames = frame_load_cap if frame_load_cap > 0 else available_sampled
+            # If frame_load_cap is 0, snap to largest WAN value that fits
+            # If frame_load_cap > 0, snap to nearest WAN value that doesn't exceed available frames
+            if frame_load_cap == 0:
+                target_frames = available_sampled
+            else:
+                target_frames = min(frame_load_cap, available_sampled)
 
-            # WAN snapping: snap to 4n+1 formula where n>=1
+            # Snap to largest valid WAN value <= target_frames
             # Valid WAN values: 5, 9, 13, 17, 21, 25, ...
-            # Always snap to nearest valid WAN value that doesn't exceed target_frames
-
-            # Find the largest valid WAN value <= target_frames
-            # Formula: 4n+1 <= target_frames => n <= (target_frames - 1) / 4
             n = max(1, (target_frames - 1) // 4)
             snapped_cap = 4 * n + 1
-
-            # Ensure minimum WAN value
             if snapped_cap < 5:
                 snapped_cap = 5
 
-            # If snapped value exceeds available frames, snap down to largest valid WAN value
-            # that fits within available_sampled
-            if snapped_cap > available_sampled:
-                n = max(1, (available_sampled - 1) // 4)
-                snapped_cap = 4 * n + 1
-                # Final safety check: if still < 5, use 5 (even if not enough frames available)
-                if snapped_cap < 5:
-                    snapped_cap = 5
-
-            _log(
-                f"WAN calculation: source={source_total_frames}, skip={skip_first_frames}, "
-                f"framerate={framerate}, frame_step={frame_step}, select_every_nth={select_every_nth}, "
-                f"combined_step={combined_step}, available_sampled={available_sampled}, "
-                f"target_frames={target_frames}, snapped_cap={snapped_cap}"
-            )
-
             if frame_load_cap != snapped_cap:
                 _log(
-                    f"WAN mode enabled. Snapped frame_load_cap from {original_cap} to {snapped_cap} "
-                    f"(total frames: {source_total_frames}, after skip/sample: {available_sampled})"
+                    f"WAN mode: Snapped frame_load_cap from {frame_load_cap} to {snapped_cap} "
+                    f"(4n+1 formula, available after skip/sample: {available_sampled})"
                 )
                 frame_load_cap = snapped_cap
 
@@ -1084,13 +1052,14 @@ def _register_preview_route():
         )
         skip_mask = params.get("skip_mask", "false").lower() == "true"
 
-        # Performance optimization: aggressive downscaling for dialog previews
-        preview_downscale = 2 if skip_mask else 1
+        # Performance optimization: aggressive downscaling for faster preview loading
+        # Scale down by 2x for mask editor, 1.5x for dialog to reduce file size and load time
+        preview_downscale = 2.0 if skip_mask else 1.5
         if preview_downscale > 1:
             if custom_width > 0:
-                custom_width = max(64, custom_width // preview_downscale)
+                custom_width = max(64, int(custom_width / preview_downscale))
             if custom_height > 0:
-                custom_height = max(64, custom_height // preview_downscale)
+                custom_height = max(64, int(custom_height / preview_downscale))
 
         mask_version = _get_mask_version(node_id)
         cache_key = None
@@ -1240,8 +1209,9 @@ def _register_preview_route():
 
             buffer = BytesIO()
             # Use WebP for better compression and faster transfer
-            # Quality 80 provides good balance between size and quality
-            pil_img.save(buffer, format="WEBP", quality=80, method=4)
+            # Quality 70 with fast method (0) for quick preview generation
+            # This significantly reduces file size and encoding time
+            pil_img.save(buffer, format="WEBP", quality=70, method=0)
             encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
             frames_payload.append(
                 {
