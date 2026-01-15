@@ -4,7 +4,6 @@ from .auto_cropper import AutoCropperNode
 from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
 from .fast_image_preview import FastImagePreviewNode
-from .impact_segs_normalize import SEGSNormalizeForAnimateDiffNode
 from .image_nodes import (
     CropToContentNode,
     ImageRotatorNode,
@@ -51,5 +50,4 @@ __all__ = [
     "StabilizerTrimNode",
     "VideoMaskEditor",
     "WANFrameCalculatorNode",
-    "SEGSNormalizeForAnimateDiffNode",
 ]
