@@ -12,6 +12,7 @@ def _normalize_cropped_image(image: Any) -> Any:
 
     if isinstance(image, (np.ndarray, torch.Tensor)):
         arr = image
+        original_arr = arr
         # Squeeze singleton dims until we reach 4D if possible.
         while arr.ndim > 4:
             squeeze_dim = None
@@ -27,8 +28,17 @@ def _normalize_cropped_image(image: Any) -> Any:
         if arr.ndim == 3:
             arr = arr[None, ...]
 
+        # If still can't normalize to 4D, return the best attempt or original
         if arr.ndim > 4:
-            return None
+            # Try to just take the first element repeatedly until we get to 4D or less
+            while arr.ndim > 4:
+                arr = arr[0]
+            # If we ended up with 3D, add batch dimension
+            if arr.ndim == 3:
+                arr = arr[None, ...]
+            # If still not 4D, return original as last resort
+            if arr.ndim != 4:
+                return original_arr
 
         return arr
 
@@ -63,7 +73,9 @@ class SEGSNormalizeForAnimateDiffNode:
         new_segs = []
 
         for seg in seg_list:
-            cropped_image = _normalize_cropped_image(getattr(seg, "cropped_image", None))
+            cropped_image = _normalize_cropped_image(
+                getattr(seg, "cropped_image", None)
+            )
             new_segs.append(_replace_seg(seg, cropped_image=cropped_image))
 
         return ((header, new_segs),)
