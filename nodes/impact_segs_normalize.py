@@ -88,6 +88,16 @@ class SEGSNormalizeForAnimateDiffNode:
                 if isinstance(cropped_mask, (np.ndarray, torch.Tensor)):
                     print(f"[SEGS Normalize] Seg {i}: mask shape: {cropped_mask.shape}")
 
+            # Check if cropped_image is None (common with video detector modes)
+            if original_cropped_image is None:
+                print(f"[SEGS Normalize] Seg {i}: WARNING - No cropped_image found!")
+                print(
+                    f"[SEGS Normalize] This is normal for 'Combine neighboring frames' mode."
+                )
+                print(
+                    f"[SEGS Normalize] SOLUTION: Connect image_frames to 'fallback_image_opt' on SEGSPreview"
+                )
+
             cropped_image = _normalize_cropped_image(original_cropped_image)
 
             # Handle dimension mismatch: if image batch size doesn't match mask batch size, replicate the image
