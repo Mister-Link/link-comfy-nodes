@@ -33,7 +33,7 @@ function ensureStyles() {
 app.registerExtension({
   name: "LinkComfy.PreviewAnimation",
 
-  async beforeRegisterNodeDef(nodeType, nodeData, app) {
+  beforeRegisterNodeDef: async function (nodeType, nodeData, app) {
     if (nodeData.name === "PreviewAnimation") {
       // Add callback for when the node is executed
       const onExecuted = nodeType.prototype.onExecuted;
@@ -42,19 +42,22 @@ app.registerExtension({
           onExecuted.apply(this, arguments);
         }
 
-        const gifs = message?.gifs ?? message?.ui?.gifs ?? [];
+        const gifs =
+          (message && message.gifs) ||
+          (message && message.ui && message.ui.gifs) ||
+          [];
         const clearExisting = () => {
-          if (this.widgets?.length) {
+          if (this.widgets && this.widgets.length) {
             this.widgets = this.widgets.filter((widget) => {
               if (widget.type !== "preview_animation") return true;
-              if (widget.element?.parentNode) {
+              if (widget.element && widget.element.parentNode) {
                 widget.element.parentNode.removeChild(widget.element);
               }
               return false;
             });
           }
 
-          if (this._previewAnimationVideos?.length) {
+          if (this._previewAnimationVideos && this._previewAnimationVideos.length) {
             this._previewAnimationVideos.forEach((video) => {
               video.pause();
               video.src = "";
@@ -73,11 +76,11 @@ app.registerExtension({
         ensureStyles();
         clearExisting();
 
-          // Create preview widget for each gif/video
-          for (let i = 0; i < gifs.length; i++) {
-            const gif = gifs[i];
-            const wrapper = document.createElement("div");
-            wrapper.className = "lc-preview-animation-wrapper";
+        // Create preview widget for each gif/video
+        for (let i = 0; i < gifs.length; i++) {
+          const gif = gifs[i];
+          const wrapper = document.createElement("div");
+          wrapper.className = "lc-preview-animation-wrapper";
 
             const videoElement = document.createElement("video");
             videoElement.className = "lc-preview-animation-video";
@@ -93,12 +96,12 @@ app.registerExtension({
               "preview_" + i,
               "preview_animation",
               wrapper,
-              { serialize: false },
+              { serialize: false }
             );
 
             widget.videoElement = videoElement;
             widget.computeSize = function (width) {
-              if (this.videoElement?.videoWidth > 0) {
+              if (this.videoElement && this.videoElement.videoWidth > 0) {
                 const aspectRatio =
                   this.videoElement.videoHeight / this.videoElement.videoWidth;
                 const previewWidth = width - 20;
@@ -127,9 +130,13 @@ app.registerExtension({
               videoElement
                 .play()
                 .catch((e) => console.log("Auto-play failed:", e));
-              const newSize = widget.computeSize(this.size?.[0] ?? 240);
-              if (this.size?.[1] < newSize[1]) {
-                this.setSize([this.size?.[0] ?? 240, newSize[1]]);
+              const nodeWidth =
+                this.size && this.size[0] ? this.size[0] : 240;
+              const nodeHeight =
+                this.size && this.size[1] ? this.size[1] : 0;
+              const newSize = widget.computeSize(nodeWidth);
+              if (nodeHeight < newSize[1]) {
+                this.setSize([nodeWidth, newSize[1]]);
               }
               this.setDirtyCanvas(true, true);
             });
@@ -137,7 +144,7 @@ app.registerExtension({
             // Clean up on widget removal
             const originalOnRemove = this.onRemoved;
             this.onRemoved = function () {
-              if (this._previewAnimationVideos?.length) {
+              if (this._previewAnimationVideos && this._previewAnimationVideos.length) {
                 this._previewAnimationVideos.forEach((video) => {
                   video.pause();
                   video.src = "";
@@ -152,10 +159,10 @@ app.registerExtension({
 
             // Add context menu options
             const originalGetExtraMenuOptions = this.getExtraMenuOptions;
-            this.getExtraMenuOptions = function (_, options) {
-              if (originalGetExtraMenuOptions) {
-                originalGetExtraMenuOptions.apply(this, arguments);
-              }
+          this.getExtraMenuOptions = function (_, options) {
+            if (originalGetExtraMenuOptions) {
+              originalGetExtraMenuOptions.apply(this, arguments);
+            }
 
               // Add video-specific options
               options.unshift(
@@ -204,18 +211,20 @@ app.registerExtension({
                     widget.videoElement.muted = !widget.videoElement.muted;
                   },
                 },
-                null, // separator
-              );
-            };
-          }
-
-          const minNodeHeight = 260;
-          if ((this.size?.[1] ?? 0) < minNodeHeight) {
-            this.setSize([this.size?.[0] ?? 240, minNodeHeight]);
-          }
-          this.setDirtyCanvas(true, true);
+                null // separator
+            );
+          };
         }
+
+        const minNodeHeight = 260;
+        const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
+        const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
+        if (nodeHeight < minNodeHeight) {
+          this.setSize([nodeWidth, minNodeHeight]);
+        }
+        this.setDirtyCanvas(true, true);
+      }
       };
     }
   },
-});
+  });
