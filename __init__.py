@@ -27,6 +27,7 @@ from .nodes import (
     SpritesheetPreviewNode,
     StabilizerTrimNode,
     VideoMaskEditor,
+    WANAnimateToVideoPoseStrengthNode,
     WANFrameCalculatorNode,
     WANPoseStrengthConditioningNode,
 )
@@ -38,6 +39,7 @@ NODE_CLASS_MAPPINGS = {
     "Farthest Color": FarthestColorNode,
     "Match Color Palette": MatchColorPaletteNode,
     "WAN Frame Calculator": WANFrameCalculatorNode,
+    "Wan Animate To Video (Pose Strength)": WANAnimateToVideoPoseStrengthNode,
     "Wan Animate Pose Strength": WANPoseStrengthConditioningNode,
     "Image Rotator": ImageRotatorNode,
     "Remove Background": BulkBackgroundRemoverBgEraserNode,
@@ -69,6 +71,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Farthest Color": "Find Furthest Color",
     "Match Color Palette": "Match Color Palette",
     "WAN Frame Calculator": "WAN Frame Calculator",
+    "Wan Animate To Video (Pose Strength)": "Wan Animate To Video (Pose Strength)",
     "Wan Animate Pose Strength": "Wan Animate Pose Strength",
     "Image Rotator": "Rotate Image",
     "Remove Background": "Remove Background",
