@@ -80,6 +80,8 @@ app.registerExtension({
         ensureStyles();
         clearExisting();
 
+        const minNodeHeight = 260;
+
         // Create preview widget for each gif/video
         for (let i = 0; i < gifs.length; i++) {
           const gif = gifs[i];
@@ -145,8 +147,9 @@ app.registerExtension({
             const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
             const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
             const newSize = widget.computeSize(nodeWidth);
-            if (nodeHeight < newSize[1]) {
-              this.setSize([nodeWidth, newSize[1]]);
+            const requiredHeight = Math.max(minNodeHeight, newSize[1]);
+            if (nodeHeight < requiredHeight) {
+              this.setSize([nodeWidth, requiredHeight]);
             }
             this.setDirtyCanvas(true, true);
           };
@@ -247,7 +250,6 @@ app.registerExtension({
           };
         }
 
-        const minNodeHeight = 260;
         const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
         const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
         if (nodeHeight < minNodeHeight) {
