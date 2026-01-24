@@ -143,12 +143,13 @@ app.registerExtension({
           videoElement.load();
 
           // Play when loaded
-          const updateSize = () => {
+          const updateSize = (forceResize = false) => {
             const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
             const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
             const newSize = widget.computeSize(nodeWidth);
             const requiredHeight = Math.max(minNodeHeight, newSize[1]);
-            if (nodeHeight < requiredHeight) {
+            // Resize if height is insufficient OR if video dimensions are now available (forceResize)
+            if (nodeHeight < requiredHeight || forceResize) {
               this.setSize([nodeWidth, requiredHeight]);
             }
             this.setDirtyCanvas(true, true);
@@ -156,7 +157,8 @@ app.registerExtension({
 
           const scheduleSizeUpdate = (attempts = 0) => {
             if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-              updateSize();
+              // Force resize when video dimensions are available
+              updateSize(true);
               return;
             }
             if (attempts < 60) {
