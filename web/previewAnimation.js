@@ -106,7 +106,11 @@ app.registerExtension({
           widget.videoElement = videoElement;
           widget.wrapperElement = wrapper;
           widget.computeSize = function (width) {
-            if (this.videoElement && this.videoElement.videoWidth > 0) {
+            if (
+              this.videoElement &&
+              this.videoElement.videoWidth > 0 &&
+              this.videoElement.videoHeight > 0
+            ) {
               const aspectRatio =
                 this.videoElement.videoHeight / this.videoElement.videoWidth;
               const previewWidth = Math.max(1, width - 20);
@@ -118,6 +122,9 @@ app.registerExtension({
             }
             return [width, 220];
           };
+          if (!this._previewAnimationVideos) {
+            this._previewAnimationVideos = [];
+          }
           this._previewAnimationVideos.push(videoElement);
 
           // Build the URL for the preview
@@ -144,12 +151,22 @@ app.registerExtension({
             this.setDirtyCanvas(true, true);
           };
 
-          videoElement.addEventListener("loadedmetadata", updateSize);
+          const scheduleSizeUpdate = (attempts = 0) => {
+            if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+              updateSize();
+              return;
+            }
+            if (attempts < 10) {
+              requestAnimationFrame(() => scheduleSizeUpdate(attempts + 1));
+            }
+          };
+
+          videoElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
           videoElement.addEventListener("loadeddata", () => {
             videoElement
               .play()
               .catch((e) => console.log("Auto-play failed:", e));
-            updateSize();
+            scheduleSizeUpdate();
           });
 
           // Clean up on widget removal
