@@ -85,49 +85,7 @@ app.registerExtension({
         // Create preview widget for each gif/video
         for (let i = 0; i < gifs.length; i++) {
           const gif = gifs[i];
-          const wrapper = document.createElement("div");
-          wrapper.className = "lc-preview-animation-wrapper";
-
-          const videoElement = document.createElement("video");
-          videoElement.className = "lc-preview-animation-video";
-          videoElement.autoplay = true;
-          videoElement.loop = true;
-          videoElement.muted = true;
-          videoElement.playsInline = true;
-          videoElement.controls = false;
-
-          wrapper.appendChild(videoElement);
-
-          const widget = this.addDOMWidget(
-            "preview_" + i,
-            "preview_animation",
-            wrapper,
-            { serialize: false },
-          );
-
-          widget.videoElement = videoElement;
-          widget.wrapperElement = wrapper;
-          widget.computeSize = function (width) {
-            if (
-              this.videoElement &&
-              this.videoElement.videoWidth > 0 &&
-              this.videoElement.videoHeight > 0
-            ) {
-              const aspectRatio =
-                this.videoElement.videoHeight / this.videoElement.videoWidth;
-              const previewWidth = Math.max(1, width - 20);
-              const previewHeight = Math.round(previewWidth * aspectRatio);
-              if (this.wrapperElement) {
-                this.wrapperElement.style.height = `${previewHeight}px`;
-              }
-              return [width, previewHeight + 20];
-            }
-            return [width, 220];
-          };
-          if (!this._previewAnimationVideos) {
-            this._previewAnimationVideos = [];
-          }
-          this._previewAnimationVideos.push(videoElement);
+          const node = this;
 
           // Build the URL for the preview
           const params = new URLSearchParams({
@@ -135,76 +93,90 @@ app.registerExtension({
             type: gif.type,
             subfolder: gif.subfolder || "",
           });
-
           const url = api.apiURL(`/view?${params.toString()}`);
 
-          // Load the video
-          videoElement.src = url;
-          videoElement.load();
+          // Create video element and load it first (not attached to DOM yet)
+          const videoElement = document.createElement("video");
+          videoElement.className = "lc-preview-animation-video";
+          videoElement.loop = true;
+          videoElement.muted = true;
+          videoElement.playsInline = true;
+          videoElement.controls = false;
+          videoElement.preload = "metadata";
 
-          // Play when loaded
-          const updateSize = (forceResize = false) => {
-            const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
-            const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
+          if (!this._previewAnimationVideos) {
+            this._previewAnimationVideos = [];
+          }
+          this._previewAnimationVideos.push(videoElement);
+
+          let widgetCreated = false;
+
+          // Create widget only when video dimensions are available
+          const createWidgetWhenReady = () => {
+            if (widgetCreated) return;
+            if (
+              videoElement.videoWidth === 0 ||
+              videoElement.videoHeight === 0
+            ) {
+              return;
+            }
+            widgetCreated = true;
+
+            // Create wrapper and add video to it
+            const wrapper = document.createElement("div");
+            wrapper.className = "lc-preview-animation-wrapper";
+            wrapper.appendChild(videoElement);
+
+            const widget = node.addDOMWidget(
+              "preview_" + i,
+              "preview_animation",
+              wrapper,
+              { serialize: false },
+            );
+
+            widget.videoElement = videoElement;
+            widget.wrapperElement = wrapper;
+            widget.computeSize = function (width) {
+              if (
+                this.videoElement &&
+                this.videoElement.videoWidth > 0 &&
+                this.videoElement.videoHeight > 0
+              ) {
+                const aspectRatio =
+                  this.videoElement.videoHeight / this.videoElement.videoWidth;
+                const previewWidth = Math.max(1, width - 20);
+                const previewHeight = Math.round(previewWidth * aspectRatio);
+                if (this.wrapperElement) {
+                  this.wrapperElement.style.height = `${previewHeight}px`;
+                }
+                return [width, previewHeight + 20];
+              }
+              return [width, 220];
+            };
+
+            // Resize node to fit video
+            const nodeWidth = node.size && node.size[0] ? node.size[0] : 240;
             const newSize = widget.computeSize(nodeWidth);
             const requiredHeight = Math.max(minNodeHeight, newSize[1]);
-            // Resize if height is insufficient OR if video dimensions are now available (forceResize)
-            if (nodeHeight < requiredHeight || forceResize) {
-              this.setSize([nodeWidth, requiredHeight]);
-            }
-            this.setDirtyCanvas(true, true);
-          };
+            node.setSize([nodeWidth, requiredHeight]);
+            node.setDirtyCanvas(true, true);
 
-          // Track last known dimensions to detect actual changes
-          let lastVideoWidth = 0;
-          let lastVideoHeight = 0;
-
-          const scheduleSizeUpdate = () => {
-            const checkAndUpdate = (attempts = 0) => {
-              if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-                // Only update if dimensions actually changed
-                if (
-                  videoElement.videoWidth !== lastVideoWidth ||
-                  videoElement.videoHeight !== lastVideoHeight
-                ) {
-                  lastVideoWidth = videoElement.videoWidth;
-                  lastVideoHeight = videoElement.videoHeight;
-                  updateSize(true);
-                }
-                return;
-              }
-              if (attempts < 60) {
-                requestAnimationFrame(() => checkAndUpdate(attempts + 1));
-              }
-            };
-            checkAndUpdate(0);
-          };
-
-          videoElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
-          videoElement.addEventListener("resize", scheduleSizeUpdate);
-          videoElement.addEventListener("canplay", scheduleSizeUpdate);
-          videoElement.addEventListener("loadeddata", () => {
+            // Start playback
             videoElement
               .play()
               .catch((e) => console.log("Auto-play failed:", e));
-            scheduleSizeUpdate();
-          });
-          // Also check periodically in case events are missed
-          const checkInterval = setInterval(() => {
-            if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-              if (
-                videoElement.videoWidth !== lastVideoWidth ||
-                videoElement.videoHeight !== lastVideoHeight
-              ) {
-                lastVideoWidth = videoElement.videoWidth;
-                lastVideoHeight = videoElement.videoHeight;
-                updateSize(true);
-              }
-              clearInterval(checkInterval);
-            }
-          }, 100);
-          // Clear interval after 5 seconds regardless
-          setTimeout(() => clearInterval(checkInterval), 5000);
+          };
+
+          videoElement.addEventListener(
+            "loadedmetadata",
+            createWidgetWhenReady,
+          );
+          videoElement.addEventListener("canplay", createWidgetWhenReady);
+          videoElement.addEventListener("loadeddata", createWidgetWhenReady);
+
+          // Start loading the video
+          videoElement.src = url;
+          videoElement.load();
 
           // Clean up on widget removal
           const originalOnRemove = this.onRemoved;
@@ -262,21 +234,19 @@ app.registerExtension({
               },
               null, // separator
               {
-                content: widget.videoElement.paused
-                  ? "Play preview"
-                  : "Pause preview",
+                content: videoElement.paused ? "Play preview" : "Pause preview",
                 callback: () => {
-                  if (widget.videoElement.paused) {
-                    widget.videoElement.play();
+                  if (videoElement.paused) {
+                    videoElement.play();
                   } else {
-                    widget.videoElement.pause();
+                    videoElement.pause();
                   }
                 },
               },
               {
                 content: "Mute Preview",
                 callback: () => {
-                  widget.videoElement.muted = !widget.videoElement.muted;
+                  videoElement.muted = !videoElement.muted;
                 },
               },
               null, // separator
