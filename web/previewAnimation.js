@@ -58,20 +58,16 @@ app.registerExtension({
             });
           }
 
-          const existingMedia =
-            this._previewAnimationElements ||
-            this._previewAnimationVideos ||
-            [];
-          if (existingMedia.length) {
-            existingMedia.forEach((element) => {
-              if (element.tagName === "VIDEO") {
-                element.pause();
-                element.src = "";
-              }
-              element.remove();
+          if (
+            this._previewAnimationVideos &&
+            this._previewAnimationVideos.length
+          ) {
+            this._previewAnimationVideos.forEach((video) => {
+              video.pause();
+              video.src = "";
+              video.remove();
             });
           }
-          this._previewAnimationElements = [];
           this._previewAnimationVideos = [];
         };
 
@@ -90,22 +86,15 @@ app.registerExtension({
           const wrapper = document.createElement("div");
           wrapper.className = "lc-preview-animation-wrapper";
 
-          const isAnimatedImage = /\.(gif|webp|apng)$/i.test(
-            gif.filename || "",
-          );
-          const mediaElement = document.createElement(
-            isAnimatedImage ? "img" : "video",
-          );
-          mediaElement.className = "lc-preview-animation-video";
-          if (!isAnimatedImage) {
-            mediaElement.autoplay = true;
-            mediaElement.loop = true;
-            mediaElement.muted = true;
-            mediaElement.playsInline = true;
-            mediaElement.controls = false;
-          }
+          const videoElement = document.createElement("video");
+          videoElement.className = "lc-preview-animation-video";
+          videoElement.autoplay = true;
+          videoElement.loop = true;
+          videoElement.muted = true;
+          videoElement.playsInline = true;
+          videoElement.controls = false;
 
-          wrapper.appendChild(mediaElement);
+          wrapper.appendChild(videoElement);
 
           const widget = this.addDOMWidget(
             "preview_" + i,
@@ -114,17 +103,16 @@ app.registerExtension({
             { serialize: false },
           );
 
-          widget.mediaElement = mediaElement;
+          widget.videoElement = videoElement;
           widget.wrapperElement = wrapper;
           widget.computeSize = function (width) {
-            const videoWidth = this.mediaElement?.videoWidth || 0;
-            const videoHeight = this.mediaElement?.videoHeight || 0;
-            const naturalWidth = this.mediaElement?.naturalWidth || 0;
-            const naturalHeight = this.mediaElement?.naturalHeight || 0;
-            const mediaWidth = videoWidth || naturalWidth;
-            const mediaHeight = videoHeight || naturalHeight;
-            if (mediaWidth > 0 && mediaHeight > 0) {
-              const aspectRatio = mediaHeight / mediaWidth;
+            if (
+              this.videoElement &&
+              this.videoElement.videoWidth > 0 &&
+              this.videoElement.videoHeight > 0
+            ) {
+              const aspectRatio =
+                this.videoElement.videoHeight / this.videoElement.videoWidth;
               const previewWidth = Math.max(1, width - 20);
               const previewHeight = Math.round(previewWidth * aspectRatio);
               if (this.wrapperElement) {
@@ -134,10 +122,10 @@ app.registerExtension({
             }
             return [width, 220];
           };
-          if (!this._previewAnimationElements) {
-            this._previewAnimationElements = [];
+          if (!this._previewAnimationVideos) {
+            this._previewAnimationVideos = [];
           }
-          this._previewAnimationElements.push(mediaElement);
+          this._previewAnimationVideos.push(videoElement);
 
           // Build the URL for the preview
           const params = new URLSearchParams({
@@ -148,11 +136,9 @@ app.registerExtension({
 
           const url = api.apiURL(`/view?${params.toString()}`);
 
-          // Load the media
-          mediaElement.src = url;
-          if (!isAnimatedImage) {
-            mediaElement.load();
-          }
+          // Load the video
+          videoElement.src = url;
+          videoElement.load();
 
           // Play when loaded
           const updateSize = () => {
@@ -166,14 +152,7 @@ app.registerExtension({
           };
 
           const scheduleSizeUpdate = (attempts = 0) => {
-            const videoWidth = mediaElement.videoWidth || 0;
-            const videoHeight = mediaElement.videoHeight || 0;
-            const naturalWidth = mediaElement.naturalWidth || 0;
-            const naturalHeight = mediaElement.naturalHeight || 0;
-            if (
-              (videoWidth > 0 && videoHeight > 0) ||
-              (naturalWidth > 0 && naturalHeight > 0)
-            ) {
+            if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
               updateSize();
               return;
             }
@@ -182,33 +161,27 @@ app.registerExtension({
             }
           };
 
-          if (isAnimatedImage) {
-            mediaElement.addEventListener("load", scheduleSizeUpdate);
-          } else {
-            mediaElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
-            mediaElement.addEventListener("loadeddata", () => {
-              mediaElement
-                .play()
-                .catch((e) => console.log("Auto-play failed:", e));
-              scheduleSizeUpdate();
-            });
-          }
+          videoElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
+          videoElement.addEventListener("loadeddata", () => {
+            videoElement
+              .play()
+              .catch((e) => console.log("Auto-play failed:", e));
+            scheduleSizeUpdate();
+          });
 
           // Clean up on widget removal
           const originalOnRemove = this.onRemoved;
           this.onRemoved = function () {
             if (
-              this._previewAnimationElements &&
-              this._previewAnimationElements.length
+              this._previewAnimationVideos &&
+              this._previewAnimationVideos.length
             ) {
-              this._previewAnimationElements.forEach((element) => {
-                if (element.tagName === "VIDEO") {
-                  element.pause();
-                  element.src = "";
-                }
-                element.remove();
+              this._previewAnimationVideos.forEach((video) => {
+                video.pause();
+                video.src = "";
+                video.remove();
               });
-              this._previewAnimationElements = [];
+              this._previewAnimationVideos = [];
             }
             if (originalOnRemove) {
               originalOnRemove.apply(this, arguments);
@@ -223,7 +196,6 @@ app.registerExtension({
             }
 
             // Add video-specific options
-            const isVideo = mediaElement.tagName === "VIDEO";
             options.unshift(
               {
                 content: "Open preview",
@@ -251,31 +223,27 @@ app.registerExtension({
                   });
                 },
               },
+              null, // separator
+              {
+                content: widget.videoElement.paused
+                  ? "Play preview"
+                  : "Pause preview",
+                callback: () => {
+                  if (widget.videoElement.paused) {
+                    widget.videoElement.play();
+                  } else {
+                    widget.videoElement.pause();
+                  }
+                },
+              },
+              {
+                content: "Mute Preview",
+                callback: () => {
+                  widget.videoElement.muted = !widget.videoElement.muted;
+                },
+              },
+              null, // separator
             );
-            if (isVideo) {
-              options.unshift(
-                null, // separator
-                {
-                  content: mediaElement.paused
-                    ? "Play preview"
-                    : "Pause preview",
-                  callback: () => {
-                    if (mediaElement.paused) {
-                      mediaElement.play();
-                    } else {
-                      mediaElement.pause();
-                    }
-                  },
-                },
-                {
-                  content: "Mute Preview",
-                  callback: () => {
-                    mediaElement.muted = !mediaElement.muted;
-                  },
-                },
-                null, // separator
-              );
-            }
           };
         }
 
