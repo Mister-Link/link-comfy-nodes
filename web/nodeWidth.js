@@ -8,6 +8,8 @@ app.registerExtension({
       node.setSize([210, node.size[1]]);
     } else if (node.comfyClass === "Pose Image Setup") {
       node.setSize([210, node.size[1]]);
+    } else if (node.comfyClass === "Native Wan Pose Strength") {
+      node.setSize([Math.round(node.size[0] * 1.2), node.size[1]]);
     }
   },
 });

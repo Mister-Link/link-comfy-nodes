@@ -23,13 +23,25 @@ class NativeWanPoseStrength:
                 "model": ("MODEL",),
                 "pose_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "overdrive": (
+                    "FLOAT",
+                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
             },
         }
 
-    def patch_model(self, model, pose_strength: float):
-        if pose_strength == 1.0:
+    def patch_model(self, model, pose_strength: float, overdrive: float):
+        pose_strength = float(pose_strength)
+        overdrive = float(overdrive)
+
+        if pose_strength >= 1.0:
+            effective_strength = 2.5 + (2.0 * max(0.0, min(1.0, overdrive)))
+        else:
+            effective_strength = pose_strength * 2.5
+
+        if abs(effective_strength - 1.0) < 1e-6:
             # No patching needed for default strength
             return (model,)
 
@@ -57,7 +69,7 @@ class NativeWanPoseStrength:
                 # Apply strength scaling AFTER the convolution (correct approach)
                 # Then add to x with the strength factor
                 x[:, :, 1 : pose_latents_embedded.shape[2] + 1] += (
-                    pose_latents_embedded[:, :, : x.shape[2] - 1] * pose_strength
+                    pose_latents_embedded[:, :, : x.shape[2] - 1] * effective_strength
                 )
                 # Now handle face_pixel_values using original logic but skip pose part
                 # We need to call original but prevent it from processing pose again
