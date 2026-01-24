@@ -1698,7 +1698,7 @@ class WANAnimateToVideoPoseStrengthNode:
                 ),
                 "pose_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001},
                 ),
             },
             "optional": {
@@ -1816,17 +1816,15 @@ class WANAnimateToVideoPoseStrengthNode:
                 )
 
             pose_video_latent = vae.encode(pose_video[:, :, :, :3])
-            # Scale the latent directly since comfy core model doesn't use pose_strength param
-            strength = max(0.0, float(pose_strength))
-            if strength != 1.0:
-                pose_video_latent = pose_video_latent * strength
+            # Pass pose_strength in conditioning - model applies it after patch embedding
+            strength = max(0.0, min(1.0, float(pose_strength)))
             positive = conditioning_set_values(
                 positive,
-                {"pose_video_latent": pose_video_latent},
+                {"pose_video_latent": pose_video_latent, "pose_strength": strength},
             )
             negative = conditioning_set_values(
                 negative,
-                {"pose_video_latent": pose_video_latent},
+                {"pose_video_latent": pose_video_latent, "pose_strength": strength},
             )
 
             if trim_to_pose_video:
