@@ -16,8 +16,10 @@ import numpy as np
 import torch
 from PIL import Image
 
+import comfy.utils
 import folder_paths  # type: ignore[import-untyped]
 from comfy_execution.utils import get_executing_context
+from node_helpers import conditioning_set_values  # type: ignore[import-not-found]
 
 from ..utils import parse_hex_color
 
@@ -766,7 +768,9 @@ class VideoMaskEditor:
                 try:
                     video_cap = cv2.VideoCapture(video_path)
                     if video_cap.isOpened():
-                        source_total_frames = int(video_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        source_total_frames = int(
+                            video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        )
                         original_fps = video_cap.get(cv2.CAP_PROP_FPS)
                         frame_step = (
                             max(1, int(round(original_fps / framerate)))
@@ -1644,6 +1648,81 @@ class WANFrameCalculatorNode:
         return (wan_frames,)
 
 
+class WANPoseStrengthConditioningNode:
+    """Inject pose latents into conditioning with a strength multiplier for WanAnimate."""
+
+    RETURN_TYPES: tuple[str, ...] = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES: tuple[str, ...] = ("positive", "negative")
+    FUNCTION: str = "apply_pose_strength"
+    CATEGORY: str = "conditioning/video_models"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "vae": ("VAE",),
+                "pose_images": ("IMAGE",),
+                "width": (
+                    "INT",
+                    {"default": 832, "min": 16, "max": DIMMAX, "step": 16},
+                ),
+                "height": (
+                    "INT",
+                    {"default": 480, "min": 16, "max": DIMMAX, "step": 16},
+                ),
+                "length": (
+                    "INT",
+                    {"default": 77, "min": 1, "max": DIMMAX, "step": 4},
+                ),
+                "pose_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                ),
+                "pad_to_length": ("BOOLEAN", {"default": True}),
+                "video_frame_offset": (
+                    "INT",
+                    {"default": 0, "min": 0, "max": DIMMAX, "step": 1},
+                ),
+            }
+        }
+
+    def apply_pose_strength(
+        self,
+        positive,
+        negative,
+        vae,
+        pose_images,
+        width,
+        height,
+        length,
+        pose_strength,
+        pad_to_length,
+        video_frame_offset,
+    ):
+        if pose_images.shape[0] <= video_frame_offset:
+            return (positive, negative)
+
+        pose_images = pose_images[video_frame_offset:]
+        pose_images = comfy.utils.common_upscale(
+            pose_images[:length].movedim(-1, 1), width, height, "area", "center"
+        ).movedim(1, -1)
+
+        if pad_to_length and pose_images.shape[0] < length:
+            pad = (pose_images[-1:],) * (length - pose_images.shape[0])
+            pose_images = torch.cat((pose_images,) + pad, dim=0)
+
+        pose_latent = vae.encode(pose_images[:, :, :, :3])
+        strength = max(0.0, min(1.0, float(pose_strength)))
+        if strength != 1.0:
+            pose_latent = pose_latent * strength
+
+        positive = conditioning_set_values(positive, {"pose_video_latent": pose_latent})
+        negative = conditioning_set_values(negative, {"pose_video_latent": pose_latent})
+        return (positive, negative)
+
+
 class ReplaceAlpha:
     """Replace alpha channel with a color in masked regions."""
 
@@ -1900,6 +1979,7 @@ class BatchImageSave:
                 resolved_path, full_dir = _BATCH_IMAGE_SAVE_CACHE[cache_key]
                 os.makedirs(full_dir, exist_ok=True)
             else:
+
                 def format_path(template: str, idx: int) -> str:
                     if "{index" in template:
                         return template.format_map({"index": idx})

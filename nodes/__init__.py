@@ -25,6 +25,7 @@ from .video_nodes import (
     SaveImageSequenceZip,
     VideoMaskEditor,
     WANFrameCalculatorNode,
+    WANPoseStrengthConditioningNode,
 )
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "StabilizerTrimNode",
     "VideoMaskEditor",
     "WANFrameCalculatorNode",
+    "WANPoseStrengthConditioningNode",
     "SEGSFixDimensionsNode",
     "SEGSEnsureCroppedImageNode",
 ]
