@@ -24,6 +24,7 @@ from .video_nodes import (
     ReplaceAlpha,
     SaveImageSequenceZip,
     VideoMaskEditor,
+    WANAnimateToVideoPoseStrengthNode,
     WANFrameCalculatorNode,
     WANPoseStrengthConditioningNode,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "SaveImageSequenceZip",
     "StabilizerTrimNode",
     "VideoMaskEditor",
+    "WANAnimateToVideoPoseStrengthNode",
     "WANFrameCalculatorNode",
     "WANPoseStrengthConditioningNode",
     "SEGSFixDimensionsNode",
