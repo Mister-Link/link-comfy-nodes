@@ -159,12 +159,14 @@ app.registerExtension({
               updateSize();
               return;
             }
-            if (attempts < 10) {
+            if (attempts < 60) {
               requestAnimationFrame(() => scheduleSizeUpdate(attempts + 1));
             }
           };
 
           videoElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
+          videoElement.addEventListener("resize", scheduleSizeUpdate);
+          videoElement.addEventListener("canplay", scheduleSizeUpdate);
           videoElement.addEventListener("loadeddata", () => {
             videoElement
               .play()
