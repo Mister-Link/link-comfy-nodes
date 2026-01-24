@@ -16,11 +16,12 @@ function ensureStyles() {
       background: #000000;
       border-radius: 6px;
       overflow: hidden;
+      box-sizing: border-box;
     }
 
     .lc-preview-animation-video {
       width: 100%;
-      height: auto;
+      height: 100%;
       display: block;
       object-fit: contain;
       background: #000000;
@@ -103,12 +104,16 @@ app.registerExtension({
           );
 
           widget.videoElement = videoElement;
+          widget.wrapperElement = wrapper;
           widget.computeSize = function (width) {
             if (this.videoElement && this.videoElement.videoWidth > 0) {
               const aspectRatio =
                 this.videoElement.videoHeight / this.videoElement.videoWidth;
-              const previewWidth = width - 20;
-              const previewHeight = previewWidth * aspectRatio;
+              const previewWidth = Math.max(1, width - 20);
+              const previewHeight = Math.round(previewWidth * aspectRatio);
+              if (this.wrapperElement) {
+                this.wrapperElement.style.height = `${previewHeight}px`;
+              }
               return [width, previewHeight + 20];
             }
             return [width, 220];
@@ -129,10 +134,7 @@ app.registerExtension({
           videoElement.load();
 
           // Play when loaded
-          videoElement.addEventListener("loadeddata", () => {
-            videoElement
-              .play()
-              .catch((e) => console.log("Auto-play failed:", e));
+          const updateSize = () => {
             const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
             const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
             const newSize = widget.computeSize(nodeWidth);
@@ -140,6 +142,14 @@ app.registerExtension({
               this.setSize([nodeWidth, newSize[1]]);
             }
             this.setDirtyCanvas(true, true);
+          };
+
+          videoElement.addEventListener("loadedmetadata", updateSize);
+          videoElement.addEventListener("loadeddata", () => {
+            videoElement
+              .play()
+              .catch((e) => console.log("Auto-play failed:", e));
+            updateSize();
           });
 
           // Clean up on widget removal
