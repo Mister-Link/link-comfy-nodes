@@ -26,7 +26,6 @@ from .video_nodes import (
     VideoMaskEditor,
     WANAnimateToVideoPoseStrengthNode,
     WANFrameCalculatorNode,
-    WANPoseStrengthConditioningNode,
 )
 
 __all__ = [
@@ -56,7 +55,6 @@ __all__ = [
     "VideoMaskEditor",
     "WANAnimateToVideoPoseStrengthNode",
     "WANFrameCalculatorNode",
-    "WANPoseStrengthConditioningNode",
     "SEGSFixDimensionsNode",
     "SEGSEnsureCroppedImageNode",
 ]

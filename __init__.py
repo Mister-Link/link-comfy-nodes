@@ -29,7 +29,6 @@ from .nodes import (
     VideoMaskEditor,
     WANAnimateToVideoPoseStrengthNode,
     WANFrameCalculatorNode,
-    WANPoseStrengthConditioningNode,
 )
 from .nodes.pixel_art.node import ConvertToPixelArt
 
@@ -40,7 +39,6 @@ NODE_CLASS_MAPPINGS = {
     "Match Color Palette": MatchColorPaletteNode,
     "WAN Frame Calculator": WANFrameCalculatorNode,
     "Wan Animate To Video (Pose Strength)": WANAnimateToVideoPoseStrengthNode,
-    "Wan Animate Pose Strength": WANPoseStrengthConditioningNode,
     "Image Rotator": ImageRotatorNode,
     "Remove Background": BulkBackgroundRemoverBgEraserNode,
     "Crop to Content": CropToContentNode,
@@ -72,7 +70,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Match Color Palette": "Match Color Palette",
     "WAN Frame Calculator": "WAN Frame Calculator",
     "Wan Animate To Video (Pose Strength)": "Wan Animate To Video (Pose Strength)",
-    "Wan Animate Pose Strength": "Wan Animate Pose Strength",
     "Image Rotator": "Rotate Image",
     "Remove Background": "Remove Background",
     "Crop to Content": "Crop to Content",

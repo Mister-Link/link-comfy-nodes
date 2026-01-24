@@ -1649,81 +1649,6 @@ class WANFrameCalculatorNode:
         return (wan_frames,)
 
 
-class WANPoseStrengthConditioningNode:
-    """Inject pose latents into conditioning with a strength multiplier for WanAnimate."""
-
-    RETURN_TYPES: tuple[str, ...] = ("CONDITIONING", "CONDITIONING")
-    RETURN_NAMES: tuple[str, ...] = ("positive", "negative")
-    FUNCTION: str = "apply_pose_strength"
-    CATEGORY: str = "conditioning/video_models"
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "vae": ("VAE",),
-                "pose_images": ("IMAGE",),
-                "width": (
-                    "INT",
-                    {"default": 832, "min": 16, "max": DIMMAX, "step": 16},
-                ),
-                "height": (
-                    "INT",
-                    {"default": 480, "min": 16, "max": DIMMAX, "step": 16},
-                ),
-                "length": (
-                    "INT",
-                    {"default": 77, "min": 1, "max": DIMMAX, "step": 4},
-                ),
-                "pose_strength": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
-                ),
-                "pad_to_length": ("BOOLEAN", {"default": True}),
-                "video_frame_offset": (
-                    "INT",
-                    {"default": 0, "min": 0, "max": DIMMAX, "step": 1},
-                ),
-            }
-        }
-
-    def apply_pose_strength(
-        self,
-        positive,
-        negative,
-        vae,
-        pose_images,
-        width,
-        height,
-        length,
-        pose_strength,
-        pad_to_length,
-        video_frame_offset,
-    ):
-        if pose_images.shape[0] <= video_frame_offset:
-            return (positive, negative)
-
-        pose_images = pose_images[video_frame_offset:]
-        pose_images = comfy.utils.common_upscale(
-            pose_images[:length].movedim(-1, 1), width, height, "area", "center"
-        ).movedim(1, -1)
-
-        if pad_to_length and pose_images.shape[0] < length:
-            pad = (pose_images[-1:],) * (length - pose_images.shape[0])
-            pose_images = torch.cat((pose_images,) + pad, dim=0)
-
-        pose_latent = vae.encode(pose_images[:, :, :, :3])
-        strength = max(0.0, float(pose_strength))
-        if strength != 1.0:
-            pose_latent = pose_latent * strength
-
-        positive = conditioning_set_values(positive, {"pose_video_latent": pose_latent})
-        negative = conditioning_set_values(negative, {"pose_video_latent": pose_latent})
-        return (positive, negative)
-
-
 class WANAnimateToVideoPoseStrengthNode:
     """WanAnimateToVideo variant with explicit pose strength scaling."""
 
@@ -1773,7 +1698,7 @@ class WANAnimateToVideoPoseStrengthNode:
                 ),
                 "pose_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001},
                 ),
             },
             "optional": {
