@@ -1698,7 +1698,7 @@ class WANAnimateToVideoPoseStrengthNode:
                 ),
                 "pose_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001},
+                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
                 ),
             },
             "optional": {
