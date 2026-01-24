@@ -25,30 +25,14 @@ class NativeWanPoseStrength:
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
-                "overdrive": (
-                    "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
             },
         }
 
-    def patch_model(self, model, pose_strength: float, overdrive: float):
+    def patch_model(self, model, pose_strength: float):
         pose_strength = float(pose_strength)
-        overdrive = float(overdrive)
 
-        base_scale = 2.5 * 0.75
-        overdrive_scale = 2.5 * 0.25
-
-        if pose_strength >= 1.0:
-            effective_strength = base_scale + (
-                overdrive_scale * max(0.0, min(1.0, overdrive))
-            )
-        else:
-            effective_strength = pose_strength * base_scale
-
-        if abs(effective_strength - 1.0) < 1e-6:
-            # No patching needed for default strength
-            return (model,)
+        max_strength = 0.9
+        effective_strength = max_strength * max(0.0, min(1.0, pose_strength))
 
         # Clone the model to avoid modifying the original
         patched_model = model.clone()
