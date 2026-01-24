@@ -31,6 +31,7 @@ from .nodes import (
     WANFrameCalculatorNode,
 )
 from .nodes.pixel_art.node import ConvertToPixelArt
+from .nodes.simple_video_preview import PreviewAnimation
 
 NODE_CLASS_MAPPINGS = {
     "Add Image to Batch": AddImageToBatchNode,
@@ -61,6 +62,7 @@ NODE_CLASS_MAPPINGS = {
     "Stabilizer Trim": StabilizerTrimNode,
     "SEGS Fix Dimensions": SEGSFixDimensionsNode,
     "SEGS Ensure Cropped Image": SEGSEnsureCroppedImageNode,
+    "PreviewAnimation": PreviewAnimation,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -92,6 +94,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Stabilizer Trim": "Stabilizer Trim",
     "SEGS Fix Dimensions": "SEGS Fix Dimensions",
     "SEGS Ensure Cropped Image": "SEGS Ensure Cropped Image",
+    "PreviewAnimation": "Preview Animation",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
