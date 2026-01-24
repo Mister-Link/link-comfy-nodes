@@ -10,21 +10,20 @@ function ensureStyles() {
   style.textContent = `
     .lc-preview-animation-wrapper {
       width: 100%;
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: #000000;
       border-radius: 6px;
       overflow: hidden;
       box-sizing: border-box;
     }
 
     .lc-preview-animation-video {
-      width: 100%;
-      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
       display: block;
       object-fit: contain;
-      background: #000000;
     }
   `;
   document.head.appendChild(style);
@@ -36,7 +35,31 @@ app.registerExtension({
 
   beforeRegisterNodeDef: async function (nodeType, nodeData, app) {
     if (nodeData.name === "PreviewAnimation") {
-      // Add callback for when the node is executed
+      // Hook into onResize to update video sizing when node is resized
+      const onResize = nodeType.prototype.onResize;
+      nodeType.prototype.onResize = function () {
+        if (onResize) {
+          onResize.apply(this, arguments);
+        }
+        // Update wrapper height to fill available space
+        if (this.widgets) {
+          for (const widget of this.widgets) {
+            if (widget.type === "preview_animation" && widget.wrapperElement) {
+              // Calculate available height for the preview
+              let usedHeight = 26; // header
+              for (const w of this.widgets) {
+                if (w.type !== "preview_animation") {
+                  usedHeight += LiteGraph.NODE_WIDGET_HEIGHT + 4;
+                }
+              }
+              const availableHeight = this.size[1] - usedHeight - 20;
+              widget.wrapperElement.style.height = `${Math.max(50, availableHeight)}px`;
+            }
+          }
+        }
+        this.setDirtyCanvas(true, true);
+      };
+
       const onExecuted = nodeType.prototype.onExecuted;
       nodeType.prototype.onExecuted = function (message) {
         if (onExecuted) {
@@ -47,47 +70,43 @@ app.registerExtension({
           (message && message.gifs) ||
           (message && message.ui && message.ui.gifs) ||
           [];
-        const clearExisting = () => {
-          if (this.widgets && this.widgets.length) {
-            this.widgets = this.widgets.filter((widget) => {
-              if (widget.type !== "preview_animation") return true;
-              if (widget.element && widget.element.parentNode) {
-                widget.element.parentNode.removeChild(widget.element);
-              }
-              return false;
-            });
-          }
 
-          if (
-            this._previewAnimationVideos &&
-            this._previewAnimationVideos.length
-          ) {
-            this._previewAnimationVideos.forEach((video) => {
-              video.pause();
-              video.src = "";
-              video.remove();
-            });
-          }
-          this._previewAnimationVideos = [];
-        };
+        // Clear existing widgets and videos
+        if (this.widgets && this.widgets.length) {
+          this.widgets = this.widgets.filter((widget) => {
+            if (widget.type !== "preview_animation") return true;
+            if (widget.element && widget.element.parentNode) {
+              widget.element.parentNode.removeChild(widget.element);
+            }
+            return false;
+          });
+        }
+        if (
+          this._previewAnimationVideos &&
+          this._previewAnimationVideos.length
+        ) {
+          this._previewAnimationVideos.forEach((video) => {
+            video.pause();
+            video.src = "";
+            video.remove();
+          });
+        }
+        this._previewAnimationVideos = [];
+        this._previewAnimationState = null;
 
         if (!gifs.length) {
-          clearExisting();
           this.setDirtyCanvas(true, true);
           return;
         }
 
         ensureStyles();
-        clearExisting();
 
+        const node = this;
         const minNodeHeight = 260;
 
-        // Create preview widget for each gif/video
         for (let i = 0; i < gifs.length; i++) {
           const gif = gifs[i];
-          const node = this;
 
-          // Build the URL for the preview
           const params = new URLSearchParams({
             filename: gif.filename,
             type: gif.type,
@@ -95,34 +114,36 @@ app.registerExtension({
           });
           const url = api.apiURL(`/view?${params.toString()}`);
 
-          // Create video element and load it first (not attached to DOM yet)
+          // Load video completely off-DOM
           const videoElement = document.createElement("video");
-          videoElement.className = "lc-preview-animation-video";
           videoElement.loop = true;
           videoElement.muted = true;
           videoElement.playsInline = true;
           videoElement.controls = false;
-          videoElement.preload = "metadata";
 
-          if (!this._previewAnimationVideos) {
-            this._previewAnimationVideos = [];
+          if (!node._previewAnimationVideos) {
+            node._previewAnimationVideos = [];
           }
-          this._previewAnimationVideos.push(videoElement);
+          node._previewAnimationVideos.push(videoElement);
 
-          let widgetCreated = false;
+          // Only add widget after first frame is ready
+          const onFirstFrame = () => {
+            videoElement.removeEventListener("canplay", onFirstFrame);
 
-          // Create widget only when video dimensions are available
-          const createWidgetWhenReady = () => {
-            if (widgetCreated) return;
-            if (
-              videoElement.videoWidth === 0 ||
-              videoElement.videoHeight === 0
-            ) {
-              return;
-            }
-            widgetCreated = true;
+            const videoWidth = videoElement.videoWidth;
+            const videoHeight = videoElement.videoHeight;
+            const aspectRatio = videoWidth / videoHeight;
 
-            // Create wrapper and add video to it
+            // Store state for resize handling
+            node._previewAnimationState = {
+              aspectRatio,
+              videoWidth,
+              videoHeight,
+            };
+
+            // Video is ready - now create the widget
+            videoElement.className = "lc-preview-animation-video";
+
             const wrapper = document.createElement("div");
             wrapper.className = "lc-preview-animation-wrapper";
             wrapper.appendChild(videoElement);
@@ -136,81 +157,74 @@ app.registerExtension({
 
             widget.videoElement = videoElement;
             widget.wrapperElement = wrapper;
-            widget.computeSize = function (width) {
-              if (
-                this.videoElement &&
-                this.videoElement.videoWidth > 0 &&
-                this.videoElement.videoHeight > 0
-              ) {
-                const aspectRatio =
-                  this.videoElement.videoHeight / this.videoElement.videoWidth;
-                const previewWidth = Math.max(1, width - 20);
-                const previewHeight = Math.round(previewWidth * aspectRatio);
-                if (this.wrapperElement) {
-                  this.wrapperElement.style.height = `${previewHeight}px`;
-                }
-                return [width, previewHeight + 20];
-              }
-              return [width, 220];
+            widget.aspectRatio = aspectRatio;
+
+            // computeSize tells LiteGraph how much space the widget needs
+            // It receives the node width and returns [width, height]
+            widget.computeSize = function (nodeWidth) {
+              // Return a minimal height - actual sizing handled by wrapper CSS
+              return [nodeWidth, 200];
             };
 
-            // Resize node to fit video
+            // Calculate initial node height
             const nodeWidth = node.size && node.size[0] ? node.size[0] : 240;
-            const newSize = widget.computeSize(nodeWidth);
-            const requiredHeight = Math.max(minNodeHeight, newSize[1]);
+
+            // Get space used by header + other widgets
+            let usedHeight = 26; // header
+            if (node.widgets) {
+              for (const w of node.widgets) {
+                if (w.type !== "preview_animation") {
+                  usedHeight += LiteGraph.NODE_WIDGET_HEIGHT + 4;
+                }
+              }
+            }
+
+            // Calculate preview height to maintain aspect ratio
+            const availableWidth = nodeWidth - 20;
+            const previewHeight = Math.round(availableWidth / aspectRatio);
+            const totalHeight = usedHeight + previewHeight + 20;
+            const requiredHeight = Math.max(minNodeHeight, totalHeight);
+
             node.setSize([nodeWidth, requiredHeight]);
             node.setDirtyCanvas(true, true);
 
-            // Start playback
-            videoElement
-              .play()
-              .catch((e) => console.log("Auto-play failed:", e));
+            videoElement.play().catch(() => {});
           };
 
-          videoElement.addEventListener(
-            "loadedmetadata",
-            createWidgetWhenReady,
-          );
-          videoElement.addEventListener("canplay", createWidgetWhenReady);
-          videoElement.addEventListener("loadeddata", createWidgetWhenReady);
-
-          // Start loading the video
+          videoElement.addEventListener("canplay", onFirstFrame);
           videoElement.src = url;
           videoElement.load();
 
-          // Clean up on widget removal
-          const originalOnRemove = this.onRemoved;
-          this.onRemoved = function () {
+          // Cleanup handler
+          const originalOnRemove = node.onRemoved;
+          node.onRemoved = function () {
             if (
               this._previewAnimationVideos &&
               this._previewAnimationVideos.length
             ) {
-              this._previewAnimationVideos.forEach((video) => {
-                video.pause();
-                video.src = "";
-                video.remove();
+              this._previewAnimationVideos.forEach((v) => {
+                v.pause();
+                v.src = "";
+                v.remove();
               });
               this._previewAnimationVideos = [];
             }
+            this._previewAnimationState = null;
             if (originalOnRemove) {
               originalOnRemove.apply(this, arguments);
             }
           };
 
-          // Add context menu options
-          const originalGetExtraMenuOptions = this.getExtraMenuOptions;
-          this.getExtraMenuOptions = function (_, options) {
+          // Context menu
+          const originalGetExtraMenuOptions = node.getExtraMenuOptions;
+          node.getExtraMenuOptions = function (_, options) {
             if (originalGetExtraMenuOptions) {
               originalGetExtraMenuOptions.apply(this, arguments);
             }
-
-            // Add video-specific options
             options.unshift(
               {
                 content: "Open preview",
-                callback: () => {
-                  window.open(url, "_blank");
-                },
+                callback: () => window.open(url, "_blank"),
               },
               {
                 content: "Save preview",
@@ -227,12 +241,10 @@ app.registerExtension({
                 content: "Copy output filepath",
                 callback: () => {
                   const filepath = `${gif.subfolder ? gif.subfolder + "/" : ""}${gif.filename}`;
-                  navigator.clipboard.writeText(filepath).then(() => {
-                    console.log("Copied to clipboard:", filepath);
-                  });
+                  navigator.clipboard.writeText(filepath);
                 },
               },
-              null, // separator
+              null,
               {
                 content: videoElement.paused ? "Play preview" : "Pause preview",
                 callback: () => {
@@ -249,17 +261,10 @@ app.registerExtension({
                   videoElement.muted = !videoElement.muted;
                 },
               },
-              null, // separator
+              null,
             );
           };
         }
-
-        const nodeWidth = this.size && this.size[0] ? this.size[0] : 240;
-        const nodeHeight = this.size && this.size[1] ? this.size[1] : 0;
-        if (nodeHeight < minNodeHeight) {
-          this.setSize([nodeWidth, minNodeHeight]);
-        }
-        this.setDirtyCanvas(true, true);
       };
     }
   },
