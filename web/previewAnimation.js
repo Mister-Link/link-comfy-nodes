@@ -155,15 +155,29 @@ app.registerExtension({
             this.setDirtyCanvas(true, true);
           };
 
-          const scheduleSizeUpdate = (attempts = 0) => {
-            if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
-              // Force resize when video dimensions are available
-              updateSize(true);
-              return;
-            }
-            if (attempts < 60) {
-              requestAnimationFrame(() => scheduleSizeUpdate(attempts + 1));
-            }
+          // Track last known dimensions to detect actual changes
+          let lastVideoWidth = 0;
+          let lastVideoHeight = 0;
+
+          const scheduleSizeUpdate = () => {
+            const checkAndUpdate = (attempts = 0) => {
+              if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+                // Only update if dimensions actually changed
+                if (
+                  videoElement.videoWidth !== lastVideoWidth ||
+                  videoElement.videoHeight !== lastVideoHeight
+                ) {
+                  lastVideoWidth = videoElement.videoWidth;
+                  lastVideoHeight = videoElement.videoHeight;
+                  updateSize(true);
+                }
+                return;
+              }
+              if (attempts < 60) {
+                requestAnimationFrame(() => checkAndUpdate(attempts + 1));
+              }
+            };
+            checkAndUpdate(0);
           };
 
           videoElement.addEventListener("loadedmetadata", scheduleSizeUpdate);
@@ -175,6 +189,22 @@ app.registerExtension({
               .catch((e) => console.log("Auto-play failed:", e));
             scheduleSizeUpdate();
           });
+          // Also check periodically in case events are missed
+          const checkInterval = setInterval(() => {
+            if (videoElement.videoWidth > 0 && videoElement.videoHeight > 0) {
+              if (
+                videoElement.videoWidth !== lastVideoWidth ||
+                videoElement.videoHeight !== lastVideoHeight
+              ) {
+                lastVideoWidth = videoElement.videoWidth;
+                lastVideoHeight = videoElement.videoHeight;
+                updateSize(true);
+              }
+              clearInterval(checkInterval);
+            }
+          }, 100);
+          // Clear interval after 5 seconds regardless
+          setTimeout(() => clearInterval(checkInterval), 5000);
 
           // Clean up on widget removal
           const originalOnRemove = this.onRemoved;
