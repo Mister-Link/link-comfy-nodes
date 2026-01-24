@@ -13,6 +13,7 @@ from .image_nodes import (
     ResizeImageAndMaskBySideNode,
     SpritesheetBuilderNode,
 )
+from .native_wan import NativeWanPoseStrength
 from .pixel_art.node import ConvertToPixelArt
 from .segs_fixer import SEGSEnsureCroppedImageNode, SEGSFixDimensionsNode
 from .spritesheet_preview import SpritesheetPreviewNode
@@ -24,8 +25,6 @@ from .video_nodes import (
     ReplaceAlpha,
     SaveImageSequenceZip,
     VideoMaskEditor,
-    WANAnimatePoseStrengthModelPatch,
-    WANAnimateToVideoPoseStrengthNode,
     WANFrameCalculatorNode,
 )
 
@@ -54,8 +53,7 @@ __all__ = [
     "SaveImageSequenceZip",
     "StabilizerTrimNode",
     "VideoMaskEditor",
-    "WANAnimatePoseStrengthModelPatch",
-    "WANAnimateToVideoPoseStrengthNode",
+    "NativeWanPoseStrength",
     "WANFrameCalculatorNode",
     "SEGSFixDimensionsNode",
     "SEGSEnsureCroppedImageNode",
