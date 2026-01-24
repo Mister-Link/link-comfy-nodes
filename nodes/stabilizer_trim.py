@@ -156,7 +156,20 @@ class StabilizerTrimNode:
         frames_np = frames.cpu().numpy()
         mask_np = mask.cpu().numpy()
 
-        # Process each frame and mask
+        # Use a single crop based on the union of content across all frames.
+        # This avoids off-by-one differences that break stacking.
+        mask_agg = np.min(mask_np, axis=0)
+        left_pad, right_pad, top_pad, bottom_pad = self._analyze_mask_padding(mask_agg)
+
+        # Calculate pixels to remove based on strength
+        # Inverted: 1.0 = keep all padding, 0.0 = remove all padding
+        # Proportional to the padding on each side
+        left_crop = int(left_pad * (1.0 - horizontal_strength))
+        right_crop = int(right_pad * (1.0 - horizontal_strength))
+        top_crop = int(top_pad * (1.0 - vertical_strength))
+        bottom_crop = int(bottom_pad * (1.0 - vertical_strength))
+
+        # Process each frame and mask with the same crop
         num_frames = frames_np.shape[0]
         cropped_frames = []
         cropped_masks = []
@@ -164,17 +177,6 @@ class StabilizerTrimNode:
         for i in range(num_frames):
             frame = frames_np[i]
             frame_mask = mask_np[i]
-
-            # Analyze padding for this specific frame's mask
-            left_pad, right_pad, top_pad, bottom_pad = self._analyze_mask_padding(frame_mask)
-
-            # Calculate pixels to remove based on strength
-            # Inverted: 1.0 = keep all padding, 0.0 = remove all padding
-            # Proportional to the padding on each side
-            left_crop = int(left_pad * (1.0 - horizontal_strength))
-            right_crop = int(right_pad * (1.0 - horizontal_strength))
-            top_crop = int(top_pad * (1.0 - vertical_strength))
-            bottom_crop = int(bottom_pad * (1.0 - vertical_strength))
 
             cropped_frame, cropped_frame_mask = self._crop_frame_and_mask(
                 frame, frame_mask, left_crop, right_crop, top_crop, bottom_crop
