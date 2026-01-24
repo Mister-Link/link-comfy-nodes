@@ -1678,7 +1678,7 @@ class WANPoseStrengthConditioningNode:
                 ),
                 "pose_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.001},
                 ),
                 "pad_to_length": ("BOOLEAN", {"default": True}),
                 "video_frame_offset": (
@@ -1714,7 +1714,7 @@ class WANPoseStrengthConditioningNode:
             pose_images = torch.cat((pose_images,) + pad, dim=0)
 
         pose_latent = vae.encode(pose_images[:, :, :, :3])
-        strength = max(0.0, min(1.0, float(pose_strength)))
+        strength = max(0.0, float(pose_strength))
         if strength != 1.0:
             pose_latent = pose_latent * strength
 
