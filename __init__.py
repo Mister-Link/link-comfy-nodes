@@ -22,7 +22,7 @@ from .nodes import (
     ResizeImageAndMaskBySideNode,
     SaveFolderAsZip,
     SaveImageSequenceZip,
-    SEGSEnsureCroppedImageNode,
+    SEGSFixCropRegionForNAGNode,
     SEGSFixDimensionsNode,
     SpritesheetBuilderNode,
     SpritesheetPreviewNode,
@@ -62,7 +62,7 @@ NODE_CLASS_MAPPINGS = {
     "Fast Image Preview": FastImagePreviewNode,
     "Stabilizer Trim": StabilizerTrimNode,
     "SEGS Fix Dimensions": SEGSFixDimensionsNode,
-    "SEGS Ensure Cropped Image": SEGSEnsureCroppedImageNode,
+    "SEGS Fix Crop Region for NAG": SEGSFixCropRegionForNAGNode,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
@@ -95,7 +95,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Fast Image Preview": "Fast Image Preview",
     "Stabilizer Trim": "Stabilizer Trim",
     "SEGS Fix Dimensions": "SEGS Fix Dimensions",
-    "SEGS Ensure Cropped Image": "SEGS Ensure Cropped Image",
+    "SEGS Fix Crop Region for NAG": "SEGS Fix Crop Region for NAG",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }
