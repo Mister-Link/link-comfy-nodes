@@ -58,6 +58,10 @@ class AutoCropperNode:
                     "INT",
                     {"default": 5, "min": 0, "max": 500, "step": 1},
                 ),
+                "padding_color": (
+                    "STRING",
+                    {"default": "#000000"},
+                ),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -205,12 +209,27 @@ class AutoCropperNode:
 
         return canvas_img, canvas_alpha
 
+    def _hex_to_rgb(self, hex_color: str):
+        """Convert hex color to RGB tuple (0-1 range)."""
+        hex_color = hex_color.lstrip("#")
+        if len(hex_color) == 6:
+            r, g, b = (
+                int(hex_color[0:2], 16),
+                int(hex_color[2:4], 16),
+                int(hex_color[4:6], 16),
+            )
+            return (r / 255.0, g / 255.0, b / 255.0)
+        else:
+            # Invalid hex, default to black
+            return (0.0, 0.0, 0.0)
+
     def auto_crop(
         self,
         frames: torch.Tensor,
         method: str,
         sensitivity: float,
         padding: int,
+        padding_color: str,
         alpha: torch.Tensor = None,
     ):
         """Auto-crop frames to content bounds with padding."""
@@ -312,10 +331,21 @@ class AutoCropperNode:
                 padded_h = crop_height + (padding * 2)
                 padded_w = crop_width + (padding * 2)
 
-                # Create black/transparent canvas
+                # Get padding color in RGB (0-1 range)
+                r, g, b = self._hex_to_rgb(padding_color)
+
+                # Create canvas filled with padding color
                 padded_frame = np.zeros(
                     (padded_h, padded_w, C), dtype=cropped_frame.dtype
                 )
+                if C >= 3:
+                    padded_frame[:, :, 0] = r  # R
+                    padded_frame[:, :, 1] = g  # G
+                    padded_frame[:, :, 2] = b  # B
+                if C == 4:
+                    padded_frame[:, :, 3] = 0.0  # Alpha = transparent
+
+                # Alpha padding is always transparent (0)
                 padded_alpha = np.zeros((padded_h, padded_w), dtype=cropped_alpha.dtype)
 
                 # Place cropped content in center with padding border
