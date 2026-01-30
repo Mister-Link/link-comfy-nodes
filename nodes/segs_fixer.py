@@ -101,78 +101,46 @@ class SEGSFixDimensionsNode:
 
 
 class SEGSEnsureCroppedImageNode:
-    """
-    Ensures SEGS have cropped_image data by cropping from provided images if missing.
-    Use this BEFORE nodes that require cropped_image (like SEGSPreview without fallback).
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "segs": ("SEGS",),
-                "images": ("IMAGE",),
-            }
-        }
-
-    RETURN_TYPES = ("SEGS",)
-    FUNCTION = "execute"
-    CATEGORY = "link/Impact"
-    DESCRIPTION = "Ensures SEGS have cropped_image by cropping from images if missing. Use before DetailerForVideo."
-
     def execute(self, segs: tuple, images: Any):
-        # Import Impact Pack utils dynamically
-        import sys
-
-        impact_path = "/workspace/ComfyUI/custom_nodes/comfyui-impact-pack/modules"
-        if impact_path not in sys.path:
-            sys.path.insert(0, impact_path)
-
-        try:
-            from impact import utils as impact_utils
-        except ImportError:
-            # Fallback for local development
-            impact_path_local = (
-                "/home/developer/ComfyUI/custom_nodes/comfyui-impact-pack/modules"
-            )
-            if impact_path_local not in sys.path:
-                sys.path.insert(0, impact_path_local)
-            from impact import utils as impact_utils
-
         header, seg_list = segs
         new_segs = []
 
+        # Get actual image dimensions
+        img_height = images.shape[1]
+        img_width = images.shape[2]
+
         for i, seg in enumerate(seg_list):
-            cropped_image = getattr(seg, "cropped_image", None)
+            crop_region = getattr(seg, "crop_region", None)
 
-            if cropped_image is None:
-                crop_region = getattr(seg, "crop_region", None)
-                if crop_region is not None:
-                    print(
-                        f"[SEGS Ensure Cropped] Seg {i}: Creating cropped_image from images"
-                    )
+            if crop_region is not None:
+                x1, y1, x2, y2 = crop_region
 
-                    # Crop from each frame
-                    cropped_frames = None
-                    for frame in images:
-                        frame_unsqueezed = frame.unsqueeze(0)
-                        cropped = impact_utils.crop_tensor4(
-                            frame_unsqueezed, crop_region
-                        )
-                        if cropped_frames is None:
-                            cropped_frames = cropped
-                        else:
-                            cropped_frames = torch.cat((cropped_frames, cropped), dim=0)
+                # Clamp to image bounds
+                x1 = max(0, min(x1, img_width))
+                y1 = max(0, min(y1, img_height))
+                x2 = max(0, min(x2, img_width))
+                y2 = max(0, min(y2, img_height))
 
-                    # Convert to numpy to match Impact Pack's expected format
-                    cropped_frames = cropped_frames.cpu().numpy()
+                # Ensure dimensions are divisible by 8 for VAE
+                width = x2 - x1
+                height = y2 - y1
 
-                    print(
-                        f"[SEGS Ensure Cropped] Seg {i}: Created cropped_image with shape {cropped_frames.shape}"
-                    )
-                    new_segs.append(_replace_seg(seg, cropped_image=cropped_frames))
-                else:
-                    new_segs.append(seg)
+                width = (width // 8) * 8
+                height = (height // 8) * 8
+
+                x2 = x1 + width
+                y2 = y1 + height
+
+                fixed_crop_region = (x1, y1, x2, y2)
+
+                print(
+                    f"[SEGS Ensure Cropped] Seg {i}: Fixed crop_region from {crop_region} to {fixed_crop_region}"
+                )
+
+                # DO NOT create cropped_image - let AnimateDiff handle it
+                new_segs.append(
+                    _replace_seg(seg, crop_region=fixed_crop_region, cropped_image=None)
+                )
             else:
                 new_segs.append(seg)
 
