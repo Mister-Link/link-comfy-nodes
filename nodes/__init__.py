@@ -27,6 +27,7 @@ from .video_nodes import (
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
+from .wan_masked import WanAnimateToVideoMasked
 
 __all__ = [
     "AddImageToBatchNode",
@@ -57,4 +58,5 @@ __all__ = [
     "WANFrameCalculatorNode",
     "SEGSFixDimensionsNode",
     "SEGSEnsureCroppedImageNode",
+    "WanAnimateToVideoMasked",
 ]
