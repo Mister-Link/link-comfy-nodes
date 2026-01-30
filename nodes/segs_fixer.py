@@ -9,7 +9,11 @@ import torch
 
 
 def _normalize_tensor_to_4d(tensor: Any) -> Any:
-    """Normalize a tensor to 4D NHWC format."""
+    """Normalize a tensor to 4D NHWC format.
+
+    For 5D tensors in format [batch, frames, height, width, channels],
+    flattens batch and frames into a single batch dimension.
+    """
     if tensor is None:
         return None
 
@@ -32,7 +36,17 @@ def _normalize_tensor_to_4d(tensor: Any) -> Any:
                 else np.squeeze(arr, axis=squeeze_dim)
             )
         else:
-            arr = arr[0]
+            # If 5D with no singleton dims, assume [batch, frames, H, W, C]
+            # Flatten batch and frames: [batch*frames, H, W, C]
+            if arr.ndim == 5:
+                batch, frames, h, w, c = arr.shape
+                if isinstance(arr, torch.Tensor):
+                    arr = arr.reshape(batch * frames, h, w, c)
+                else:
+                    arr = arr.reshape(batch * frames, h, w, c)
+            else:
+                # Fallback: take first element
+                arr = arr[0]
 
     # Add batch dimension if 3D
     if arr.ndim == 3:
@@ -100,8 +114,33 @@ class SEGSFixDimensionsNode:
         return ((header, new_segs),)
 
 
-class SEGSEnsureCroppedImageNode:
-    def execute(self, segs: tuple, images: Any):
+class SEGSFixCropRegionForNAGNode:
+    """
+    Fixes SEGS crop_region dimensions to be compatible with Normalized Attention Guidance (NAG).
+
+    NAG requires specific tensor dimension divisibility for attention operations.
+    This node ensures crop regions are divisible by 64 (8 for VAE × 8 for attention heads)
+    and clears any pre-cached cropped_image data to force fresh cropping with correct dimensions.
+
+    Use this BEFORE DetailerForAnimateDiff when using NAG-patched models.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "segs": ("SEGS",),
+                "images": ("IMAGE",),
+                "divisor": ("INT", {"default": 64, "min": 8, "max": 512, "step": 8}),
+            }
+        }
+
+    RETURN_TYPES = ("SEGS",)
+    FUNCTION = "execute"
+    CATEGORY = "link/Impact"
+    DESCRIPTION = "Fixes SEGS crop_region to be NAG-compatible (divisible by 64 by default). Clears cropped_image cache to prevent dimension mismatches."
+
+    def execute(self, segs: tuple, images: Any, divisor: int = 64):
         header, seg_list = segs
         new_segs = []
 
@@ -121,23 +160,51 @@ class SEGSEnsureCroppedImageNode:
                 x2 = max(0, min(x2, img_width))
                 y2 = max(0, min(y2, img_height))
 
-                # Ensure dimensions are divisible by 8 for VAE
                 width = x2 - x1
                 height = y2 - y1
 
-                width = (width // 8) * 8
-                height = (height // 8) * 8
+                # Round down to nearest multiple of divisor
+                width = (width // divisor) * divisor
+                height = (height // divisor) * divisor
 
+                # Ensure minimum size
+                if width < divisor:
+                    width = divisor
+                if height < divisor:
+                    height = divisor
+
+                # Recalculate x2, y2 from x1, y1
                 x2 = x1 + width
                 y2 = y1 + height
+
+                # If we overflow image bounds, shift the entire region back
+                if x2 > img_width:
+                    overflow = x2 - img_width
+                    x1 = max(0, x1 - overflow)
+                    x2 = x1 + width
+                    # If still overflowing, reduce width
+                    if x2 > img_width:
+                        width = img_width - x1
+                        width = (width // divisor) * divisor
+                        x2 = x1 + width
+
+                if y2 > img_height:
+                    overflow = y2 - img_height
+                    y1 = max(0, y1 - overflow)
+                    y2 = y1 + height
+                    # If still overflowing, reduce height
+                    if y2 > img_height:
+                        height = img_height - y1
+                        height = (height // divisor) * divisor
+                        y2 = y1 + height
 
                 fixed_crop_region = (x1, y1, x2, y2)
 
                 print(
-                    f"[SEGS Ensure Cropped] Seg {i}: Fixed crop_region from {crop_region} to {fixed_crop_region}"
+                    f"[SEGS Fix NAG] Seg {i}: crop_region {crop_region} → {fixed_crop_region} (divisor={divisor})"
                 )
 
-                # DO NOT create cropped_image - let AnimateDiff handle it
+                # Clear cropped_image cache to force fresh cropping with correct dimensions
                 new_segs.append(
                     _replace_seg(seg, crop_region=fixed_crop_region, cropped_image=None)
                 )
@@ -147,4 +214,4 @@ class SEGSEnsureCroppedImageNode:
         return ((header, new_segs),)
 
 
-__all__ = ["SEGSFixDimensionsNode", "SEGSEnsureCroppedImageNode"]
+__all__ = ["SEGSFixDimensionsNode", "SEGSFixCropRegionForNAGNode"]
