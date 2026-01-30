@@ -287,16 +287,12 @@ class AutoCropperNode:
 
         x1, y1, x2, y2 = global_box
 
-        x1 = max(0, x1 - padding)
-        y1 = max(0, y1 - padding)
-        x2 = min(W, x2 + padding)
-        y2 = min(H, y2 + padding)
-
+        # First crop to exact content bounds
         crop_width = x2 - x1
         crop_height = y2 - y1
 
         print(
-            f"[AutoCropper] Crop region: ({x1}, {y1}) -> ({x2}, {y2}), size: {crop_width}x{crop_height}"
+            f"[AutoCropper] Content bounds: ({x1}, {y1}) -> ({x2}, {y2}), size: {crop_width}x{crop_height}"
         )
 
         cropped_frames = []
@@ -306,11 +302,35 @@ class AutoCropperNode:
             frame = frames_np[i]
             alpha_frame = alpha_np[i]
 
+            # Crop to content bounds
             cropped_frame = frame[y1:y2, x1:x2]
             cropped_alpha = alpha_frame[y1:y2, x1:x2]
 
-            cropped_frames.append(cropped_frame)
-            cropped_alphas.append(cropped_alpha)
+            # Add padding as border
+            if padding > 0:
+                # Create padded canvas
+                padded_h = crop_height + (padding * 2)
+                padded_w = crop_width + (padding * 2)
+
+                # Create black/transparent canvas
+                padded_frame = np.zeros(
+                    (padded_h, padded_w, C), dtype=cropped_frame.dtype
+                )
+                padded_alpha = np.zeros((padded_h, padded_w), dtype=cropped_alpha.dtype)
+
+                # Place cropped content in center with padding border
+                padded_frame[
+                    padding : padding + crop_height, padding : padding + crop_width
+                ] = cropped_frame
+                padded_alpha[
+                    padding : padding + crop_height, padding : padding + crop_width
+                ] = cropped_alpha
+
+                cropped_frames.append(padded_frame)
+                cropped_alphas.append(padded_alpha)
+            else:
+                cropped_frames.append(cropped_frame)
+                cropped_alphas.append(cropped_alpha)
 
         result_frames = torch.from_numpy(np.stack(cropped_frames).astype(np.float32))
         result_alphas = torch.from_numpy(np.stack(cropped_alphas).astype(np.float32))
@@ -318,6 +338,8 @@ class AutoCropperNode:
         final_width = result_frames.shape[2]
         final_height = result_frames.shape[1]
 
-        print(f"[AutoCropper] Done. Output size: {final_width}x{final_height}")
+        print(
+            f"[AutoCropper] Done. Output size: {final_width}x{final_height} (with {padding}px padding)"
+        )
 
         return (result_frames, result_alphas, final_width, final_height)
