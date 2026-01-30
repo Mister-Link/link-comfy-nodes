@@ -27,7 +27,7 @@ from .video_nodes import (
     VideoMaskEditor,
     WANFrameCalculatorNode,
 )
-from .wan_masked import WanAnimateToVideoMasked
+from .wan_frame_adjuster import WANFramesToAddAndCut
 
 __all__ = [
     "AddImageToBatchNode",
@@ -56,7 +56,7 @@ __all__ = [
     "VideoMaskEditor",
     "NativeWanPoseStrength",
     "WANFrameCalculatorNode",
+    "WANFramesToAddAndCut",
     "SEGSFixDimensionsNode",
     "SEGSEnsureCroppedImageNode",
-    "WanAnimateToVideoMasked",
 ]

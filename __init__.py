@@ -28,8 +28,8 @@ from .nodes import (
     SpritesheetPreviewNode,
     StabilizerTrimNode,
     VideoMaskEditor,
-    WanAnimateToVideoMasked,
     WANFrameCalculatorNode,
+    WANFramesToAddAndCut,
 )
 from .nodes.pixel_art.node import ConvertToPixelArt
 from .nodes.simple_video_preview import PreviewAnimation
@@ -64,7 +64,7 @@ NODE_CLASS_MAPPINGS = {
     "SEGS Fix Dimensions": SEGSFixDimensionsNode,
     "SEGS Ensure Cropped Image": SEGSEnsureCroppedImageNode,
     "PreviewAnimation": PreviewAnimation,
-    "WanAnimateToVideoMasked": WanAnimateToVideoMasked,
+    "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -97,7 +97,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SEGS Fix Dimensions": "SEGS Fix Dimensions",
     "SEGS Ensure Cropped Image": "SEGS Ensure Cropped Image",
     "PreviewAnimation": "Preview Animation",
-    "WanAnimateToVideoMasked": "WAN Animate to Video (Masked)",
+    "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
