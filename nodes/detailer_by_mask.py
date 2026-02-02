@@ -28,7 +28,7 @@ class DetailerByMask:
                 "mask": ("MASK",),
                 "guide_size": (
                     "FLOAT",
-                    {"default": 512, "min": 64, "max": 8192, "step": 8},
+                    {"default": 720, "min": 64, "max": 8192, "step": 8},
                 ),
                 "guide_size_for": (
                     "BOOLEAN",
@@ -36,24 +36,24 @@ class DetailerByMask:
                 ),
                 "max_size": (
                     "FLOAT",
-                    {"default": 1024, "min": 64, "max": 8192, "step": 8},
+                    {"default": 720, "min": 64, "max": 8192, "step": 8},
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
-                "scheduler": (core.get_schedulers(),),
+                "steps": ("INT", {"default": 4, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "lcm"}),
+                "scheduler": (core.get_schedulers(), {"default": "simple"}),
                 "denoise": (
                     "FLOAT",
-                    {"default": 0.5, "min": 0.0001, "max": 1.0, "step": 0.01},
+                    {"default": 0.3, "min": 0.0001, "max": 1.0, "step": 0.01},
                 ),
-                "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
+                "feather": ("INT", {"default": 10, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
             },
             "optional": {
                 "noise_mask_feather": (
                     "INT",
-                    {"default": 20, "min": 0, "max": 100, "step": 1},
+                    {"default": 10, "min": 0, "max": 100, "step": 1},
                 ),
             },
         }
@@ -162,7 +162,7 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
-        noise_mask_feather=0,
+        noise_mask_feather=10,
     ):
         """Process all frames as a batch using the mask."""
         try:
@@ -202,7 +202,11 @@ class DetailerByMask:
         # Fix crop region for NAG divisibility
         crop_region = self._fix_crop_region(bbox, img_width, img_height, nag_divisor)
         x1, y1, x2, y2 = crop_region
-        print(f"[Detailer by Mask] Fixed crop region: {crop_region}")
+        crop_width = x2 - x1
+        crop_height = y2 - y1
+        print(
+            f"[Detailer by Mask] Fixed crop region: {crop_region} ({crop_width}x{crop_height})"
+        )
 
         # Crop all frames
         cropped_frames = image_frames[:, y1:y2, x1:x2, :]
@@ -224,7 +228,7 @@ class DetailerByMask:
         dimension_hook = DivisibleDimensionHook(nag_divisor)
 
         # Calculate bbox relative to crop region
-        relative_bbox = (0, 0, x2 - x1, y2 - y1)
+        relative_bbox = (0, 0, crop_width, crop_height)
 
         # Process all frames together
         print(f"[Detailer by Mask] Running enhance_detail_for_animatediff...")
@@ -268,6 +272,25 @@ class DetailerByMask:
             print(f"[Detailer by Mask] Reshaped from 5D to {enhanced_tensor.shape}")
 
         print(f"[Detailer by Mask] Enhanced tensor shape: {enhanced_tensor.shape}")
+
+        # Check if enhanced tensor needs to be resized back to crop dimensions
+        enhanced_h = enhanced_tensor.shape[1]
+        enhanced_w = enhanced_tensor.shape[2]
+
+        if enhanced_h != crop_height or enhanced_w != crop_width:
+            print(
+                f"[Detailer by Mask] Resizing enhanced tensor from {enhanced_h}x{enhanced_w} to {crop_height}x{crop_width}"
+            )
+            # Resize: [F, H, W, C] -> [F, C, H, W] for interpolate, then back
+            enhanced_tensor = enhanced_tensor.permute(0, 3, 1, 2)
+            enhanced_tensor = torch.nn.functional.interpolate(
+                enhanced_tensor,
+                size=(crop_height, crop_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            enhanced_tensor = enhanced_tensor.permute(0, 2, 3, 1)
+            print(f"[Detailer by Mask] Resized to {enhanced_tensor.shape}")
 
         # Paste enhanced regions back
         output_frames = image_frames.clone()
