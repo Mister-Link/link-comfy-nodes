@@ -241,16 +241,12 @@ class DetailerByMask:
             f"[Detailer by Mask] Mask bbox: {bbox}, mask shape: {mask.shape}, image shape: {image_frames.shape}"
         )
 
-        # Crop the mask to the bbox region - this is critical!
-        # The cropped_mask should be the mask within the crop_region, not the full mask
-        cropped_mask = mask[:, y1 : y2 + 1, x1 : x2 + 1]
+        # DON'T crop mask yet - need to fix crop_region first, then crop mask to match
 
-        print(f"[Detailer by Mask] Cropped mask shape: {cropped_mask.shape}")
-
-        # Create a single SEG from the mask
+        # Create a single SEG from the mask (with full mask for now)
         seg = SEG(
             cropped_image=None,
-            cropped_mask=cropped_mask,
+            cropped_mask=mask,  # Full mask for now
             confidence=1.0,
             crop_region=crop_region,
             bbox=bbox,
@@ -275,9 +271,20 @@ class DetailerByMask:
                         f"[NAG Detailer] Seg {i}: Fixed crop_region {crop_region} → {fixed_crop} (divisor={nag_divisor})"
                     )
 
-                # Replace seg with fixed crop and cleared cropped_image
+                # NOW crop the mask to the FIXED crop region
+                fx1, fy1, fx2, fy2 = fixed_crop
+                cropped_mask = mask[:, fy1:fy2, fx1:fx2]
+                print(
+                    f"[Detailer by Mask] Cropped mask to fixed region: {cropped_mask.shape}"
+                )
+
+                # Replace seg with fixed crop and cropped mask
                 if hasattr(seg, "_replace"):
-                    fixed_seg = seg._replace(crop_region=fixed_crop, cropped_image=None)
+                    fixed_seg = seg._replace(
+                        crop_region=fixed_crop,
+                        cropped_image=None,
+                        cropped_mask=cropped_mask,
+                    )
                 else:
                     # Fallback for non-namedtuple SEG
                     from impact.core import SEG
