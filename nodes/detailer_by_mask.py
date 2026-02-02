@@ -228,18 +228,21 @@ class DetailerByMask:
                 )
             else:
                 # Need to crop from the full image_frames
-                cropped_image_frames = None
-                for image in image_frames:
-                    image = image.unsqueeze(0)
+                # Since we have 17 separate segments (one per frame), only process the corresponding frame
+                # Use segment index to determine which frame to process
+                if seg_idx < len(image_frames):
+                    # Crop only the frame that corresponds to this segment
+                    image = image_frames[seg_idx].unsqueeze(0)
                     cropped_image = utils.crop_tensor4(image, seg.crop_region)
-                    cropped_image = utils.to_tensor(cropped_image)
-                    if cropped_image_frames is None:
-                        cropped_image_frames = cropped_image
-                    else:
-                        cropped_image_frames = torch.concat(
-                            (cropped_image_frames, cropped_image), dim=0
-                        )
-                cropped_image_frames = cropped_image_frames.cpu().numpy()
+                    cropped_image_frames = utils.to_tensor(cropped_image).cpu().numpy()
+                    print(
+                        f"[Detailer by Mask] Cropped frame {seg_idx} from full video, shape: {cropped_image_frames.shape}"
+                    )
+                else:
+                    print(
+                        f"[Detailer by Mask] ERROR: Segment index {seg_idx} out of range for {len(image_frames)} frames"
+                    )
+                    continue
 
             # Crop conditioning
             from impact import core
