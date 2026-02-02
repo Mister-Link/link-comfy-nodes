@@ -203,7 +203,7 @@ class DetailerByMask:
         img_width = image_frames.shape[2]
 
         # Convert mask to SEGS
-        # Ensure mask is correct shape - should be [H, W] or [1, H, W]
+        # Ensure mask is correct shape - should be [H, W] or [batch, H, W]
         if mask.dim() == 2:
             mask = mask.unsqueeze(0)  # [H, W] -> [1, H, W]
 
@@ -212,14 +212,17 @@ class DetailerByMask:
             import torch.nn.functional as F
 
             mask = F.interpolate(
-                mask.unsqueeze(0),
+                mask.unsqueeze(1),
                 size=(img_height, img_width),
                 mode="bilinear",
                 align_corners=False,
-            ).squeeze(0)
+            ).squeeze(1)
 
-        # Get mask bounding box
-        mask_np = mask[0].cpu().numpy()
+        # Combine all masks in batch to find overall bounding box
+        # Use logical OR across all frames to get the union of all masked regions
+        combined_mask = torch.any(mask > 0.5, dim=0).float()
+        mask_np = combined_mask.cpu().numpy()
+
         rows = np.any(mask_np > 0.5, axis=1)
         cols = np.any(mask_np > 0.5, axis=0)
 
