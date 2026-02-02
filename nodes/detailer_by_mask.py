@@ -241,10 +241,16 @@ class DetailerByMask:
             f"[Detailer by Mask] Mask bbox: {bbox}, mask shape: {mask.shape}, image shape: {image_frames.shape}"
         )
 
+        # Crop the mask to the bbox region - this is critical!
+        # The cropped_mask should be the mask within the crop_region, not the full mask
+        cropped_mask = mask[:, y1 : y2 + 1, x1 : x2 + 1]
+
+        print(f"[Detailer by Mask] Cropped mask shape: {cropped_mask.shape}")
+
         # Create a single SEG from the mask
         seg = SEG(
             cropped_image=None,
-            cropped_mask=mask,
+            cropped_mask=cropped_mask,
             confidence=1.0,
             crop_region=crop_region,
             bbox=bbox,
