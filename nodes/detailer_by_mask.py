@@ -1,32 +1,24 @@
-"""SEGS-based detailer for video with dimension fixing, 5D tensor handling, and optional VACE temporal coherence."""
+"""SEGS-based detailer for video with dimension fixing and 5D tensor handling."""
 
 from __future__ import annotations
-
-from typing import Any
 
 import impact.core as core
 import numpy as np
 import torch
 
-import comfy.latent_formats
-import comfy.model_management
 import comfy.samplers
-import comfy.utils
-import node_helpers
 
 
 class DetailerByMask:
     """
-    Complete replacement for DetailerForEachPipeForAnimateDiff with full NAG compatibility.
+    Detailer for video frames with NAG compatibility.
 
-    This node combines:
-    - SEGS crop region fixing (ensures divisibility by 64)
-    - NAG-compatible upscaling (maintains divisibility during upscale)
-    - 5D tensor normalization (prevents dimension errors)
-    - Custom paste logic that handles video frames
-    - Optional VACE integration for temporal coherence
+    This node:
+    - Fixes SEGS crop regions to be divisible by 64 (required for NAG)
+    - Handles 5D tensor normalization to prevent dimension errors
+    - Processes frames individually (one segment per frame)
 
-    Use this instead of the standard DetailerForEachPipeForAnimateDiff when working
+    Use this instead of DetailerForEachPipeForAnimateDiff when working
     with NAG-patched models to avoid autocast and dimension errors.
     """
 
@@ -59,19 +51,11 @@ class DetailerByMask:
                 ),
                 "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
-                "temporal_mode": (
-                    ["frame_by_frame", "batch_all_frames", "vace"],
-                    {"default": "frame_by_frame"},
-                ),
             },
             "optional": {
                 "noise_mask_feather": (
                     "INT",
                     {"default": 20, "min": 0, "max": 100, "step": 1},
-                ),
-                "vace_strength": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01},
                 ),
             },
         }
@@ -80,7 +64,9 @@ class DetailerByMask:
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
     CATEGORY = "link/Impact"
-    DESCRIPTION = "SEGS-based detailer for video with NAG compatibility, automatic crop fixing, 5D tensor handling, and optional VACE temporal coherence"
+    DESCRIPTION = (
+        "SEGS-based detailer for video with NAG compatibility and automatic crop fixing"
+    )
 
     @staticmethod
     def _fix_crop_region(
@@ -153,39 +139,16 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
-        temporal_mode="frame_by_frame",
         noise_mask_feather=0,
-        vace_strength=1.0,
     ):
-        """Process SEGS with dimension fixing, 5D tensor handling, and optional VACE temporal coherence."""
+        """Process SEGS with dimension fixing and 5D tensor handling."""
         try:
             from impact import utils
-            from impact.animatediff_nodes import SEGSDetailerForAnimateDiff
             from impact.core import SEG
             from impact.utils import tensor_gaussian_blur_mask
         except ImportError:
             raise ImportError(
                 "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
-            )
-
-        # Route to VACE mode if selected
-        if temporal_mode == "vace":
-            return self._execute_vace_mode(
-                image_frames,
-                segs,
-                guide_size,
-                guide_size_for,
-                max_size,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                denoise,
-                feather,
-                basic_pipe,
-                noise_mask_feather,
-                vace_strength,
             )
 
         # Hardcoded NAG divisor
@@ -209,21 +172,18 @@ class DetailerByMask:
 
                 if fixed_crop != crop_region:
                     print(
-                        f"[Detailer by Mask] Seg {i}: Fixed crop_region {crop_region} → {fixed_crop} (divisor={nag_divisor})"
+                        f"[Detailer by Mask] Seg {i}: Fixed crop_region {crop_region} -> {fixed_crop} (divisor={nag_divisor})"
                     )
 
                 # Replace seg with fixed crop
                 if hasattr(seg, "_replace"):
                     fixed_seg = seg._replace(crop_region=fixed_crop)
                 else:
-                    # Fallback for non-namedtuple SEG
-                    from impact.core import SEG
-
                     fixed_seg = SEG(
                         seg.cropped_image,
                         seg.cropped_mask,
                         seg.confidence,
-                        fixed_crop,  # crop_region
+                        fixed_crop,
                         seg.bbox,
                         seg.label,
                         seg.control_net_wrapper
@@ -240,7 +200,7 @@ class DetailerByMask:
         # Create hook to ensure dimensions are divisible by 64
         dimension_hook = DivisibleDimensionHook(nag_divisor)
 
-        # Process each segment using Impact Pack's approach
+        # Process each segment
         from impact.segs_nodes import SEGSPaste
 
         enhanced_segs = []
@@ -257,7 +217,6 @@ class DetailerByMask:
 
             # Use the segment's pre-cropped image if available, otherwise crop from source
             if seg.cropped_image is not None:
-                # Segment already has cropped image (e.g., from Mask to SEGS)
                 cropped_image_frames = utils.to_tensor(seg.cropped_image)
                 if isinstance(cropped_image_frames, torch.Tensor):
                     cropped_image_frames = cropped_image_frames.cpu().numpy()
@@ -265,11 +224,9 @@ class DetailerByMask:
                     f"[Detailer by Mask] Using pre-cropped image, shape: {cropped_image_frames.shape}"
                 )
             else:
-                # Need to crop from the full image_frames
-                # Since we have 17 separate segments (one per frame), only process the corresponding frame
-                # Use segment index to determine which frame to process
+                # Crop from the full image_frames
+                # Since we have separate segments (one per frame), only process the corresponding frame
                 if seg_idx < len(image_frames):
-                    # Crop only the frame that corresponds to this segment
                     image = image_frames[seg_idx].unsqueeze(0)
                     cropped_image = utils.crop_tensor4(image, seg.crop_region)
                     cropped_image_frames = utils.to_tensor(cropped_image).cpu().numpy()
@@ -283,14 +240,13 @@ class DetailerByMask:
                     continue
 
             # Crop conditioning
-            from impact import core
-            from impact.core import SEG
+            from impact import core as impact_core
 
             cropped_positive = [
                 [
                     condition,
                     {
-                        k: core.crop_condition_mask(
+                        k: impact_core.crop_condition_mask(
                             v, cropped_image_frames, seg.crop_region
                         )
                         if k == "mask"
@@ -305,7 +261,7 @@ class DetailerByMask:
                 [
                     condition,
                     {
-                        k: core.crop_condition_mask(
+                        k: impact_core.crop_condition_mask(
                             v, cropped_image_frames, seg.crop_region
                         )
                         if k == "mask"
@@ -316,22 +272,21 @@ class DetailerByMask:
                 for condition, details in negative
             ]
 
-            # Enhance detail with NAG hook
-            # Detect if this is a single-frame segment or multi-frame batch
+            # Detect if this is a single-frame segment
             is_single_frame = (
                 isinstance(cropped_image_frames, np.ndarray)
                 and cropped_image_frames.ndim == 4
                 and cropped_image_frames.shape[0] == 1
             )
             print(
-                f"[Detailer by Mask] cropped_image_frames shape: {cropped_image_frames.shape if isinstance(cropped_image_frames, np.ndarray) else 'not numpy'}, is_single_frame: {is_single_frame}"
+                f"[Detailer by Mask] cropped_image_frames shape: {cropped_image_frames.shape}, is_single_frame: {is_single_frame}"
             )
 
             if not (isinstance(model, str) and model == "DUMMY"):
                 if is_single_frame:
-                    # Single frame - use regular enhance_detail for better denoise behavior
+                    # Single frame - use regular enhance_detail
                     cropped_image_tensor = torch.from_numpy(cropped_image_frames)
-                    enhanced_image_tensor, cnet_images = core.enhance_detail(
+                    enhanced_image_tensor, cnet_images = impact_core.enhance_detail(
                         cropped_image_tensor,
                         model,
                         clip,
@@ -365,7 +320,7 @@ class DetailerByMask:
                 else:
                     # Multi-frame batch - use animatediff version
                     enhanced_image_tensor, cnet_images = (
-                        core.enhance_detail_for_animatediff(
+                        impact_core.enhance_detail_for_animatediff(
                             cropped_image_frames,
                             model,
                             clip,
@@ -408,13 +363,12 @@ class DetailerByMask:
             else:
                 # Normalize to 4D if needed BEFORE converting to numpy
                 if enhanced_image_tensor.ndim == 5:
-                    # Flatten batch and frames dimensions: [B, F, H, W, C] -> [B*F, H, W, C]
                     b, f, h, w, c = enhanced_image_tensor.shape
                     enhanced_image_tensor = enhanced_image_tensor.reshape(
                         b * f, h, w, c
                     )
                     print(
-                        f"[NAG Detailer] Normalized enhanced tensor from 5D {(b, f, h, w, c)} to 4D {enhanced_image_tensor.shape}"
+                        f"[Detailer by Mask] Normalized enhanced tensor from 5D {(b, f, h, w, c)} to 4D {enhanced_image_tensor.shape}"
                     )
 
                 new_cropped_image = enhanced_image_tensor.cpu().numpy()
@@ -429,37 +383,29 @@ class DetailerByMask:
                 None,
             )
 
-            # Paste the enhanced segment back onto the SINGLE corresponding frame
-            # We can't use SEGSPaste because it tries to paste to all frames
+            # Paste the enhanced segment back
             if is_single_frame:
                 # Manual single-frame paste
-                from impact.utils import tensor_gaussian_blur_mask
-
-                # Get the enhanced image as tensor
                 if isinstance(new_cropped_image, np.ndarray):
                     ref_image = torch.from_numpy(new_cropped_image)
                 else:
                     ref_image = new_cropped_image
 
-                # Handle mask
                 mask = seg.cropped_mask
                 if isinstance(mask, np.ndarray):
                     mask = torch.from_numpy(mask)
                 if mask.ndim == 3:
-                    mask = mask[0]  # Take first frame's mask
+                    mask = mask[0]
 
                 mask = tensor_gaussian_blur_mask(mask, feather)
 
-                # Get the single frame to modify
                 frame_to_modify = image_frames[seg_idx].unsqueeze(0).clone()
 
-                # Paste
                 x, y, *_ = seg.crop_region
                 ref_image = ref_image.to(frame_to_modify.device)
                 mask = mask.to(frame_to_modify.device)
                 utils.tensor_paste(frame_to_modify, ref_image, (x, y), mask)
 
-                # Put the modified frame back
                 image_frames[seg_idx] = frame_to_modify[0]
             else:
                 # Multi-frame - use SEGSPaste
@@ -468,9 +414,7 @@ class DetailerByMask:
                     image_frames, enhanced_seg, feather, alpha=255
                 )[0]
 
-            # Call hook's post_paste
             image_frames = dimension_hook.post_paste(image_frames)
-
             enhanced_segs.append(new_seg)
 
         # Collect all masks from enhanced segments
@@ -480,313 +424,15 @@ class DetailerByMask:
                 if output_mask is None:
                     output_mask = seg.cropped_mask
                 else:
-                    # Combine masks if multiple segments
                     if isinstance(output_mask, torch.Tensor) and isinstance(
                         seg.cropped_mask, torch.Tensor
                     ):
                         output_mask = torch.max(output_mask, seg.cropped_mask)
 
-        # If no mask found, create empty mask
         if output_mask is None:
             output_mask = torch.zeros((img_height, img_width), dtype=torch.float32)
 
         return (image_frames, output_mask)
-
-    def _execute_vace_mode(
-        self,
-        image_frames,
-        segs,
-        guide_size,
-        guide_size_for,
-        max_size,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        denoise,
-        feather,
-        basic_pipe,
-        noise_mask_feather,
-        vace_strength,
-    ):
-        """
-        VACE mode: Process all frames together using VACE for temporal coherence.
-
-        Instead of processing frame-by-frame, this mode:
-        1. Crops the face region from all frames
-        2. Creates a combined mask from all SEGS
-        3. Uses VACE conditioning to process all frames together
-        4. Pastes the enhanced regions back
-
-        This provides temporal coherence because VACE processes all frames together.
-        """
-        try:
-            from impact import utils
-            from impact.core import SEG
-            from impact.utils import tensor_gaussian_blur_mask
-        except ImportError:
-            raise ImportError(
-                "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
-            )
-
-        nag_divisor = 64
-        img_height = image_frames.shape[1]
-        img_width = image_frames.shape[2]
-        num_frames = image_frames.shape[0]
-
-        print(
-            f"[Detailer by Mask VACE] Processing {num_frames} frames with VACE temporal coherence"
-        )
-
-        model, clip, vae, positive, negative = basic_pipe
-
-        # Process SEGS to fix crop regions
-        header, seg_list = segs
-
-        if len(seg_list) == 0:
-            print("[Detailer by Mask VACE] No segments to process")
-            output_mask = torch.zeros((img_height, img_width), dtype=torch.float32)
-            return (image_frames, output_mask)
-
-        # Find the unified bounding box across all segments
-        # This will be used to crop all frames to the same region
-        min_x1, min_y1 = float("inf"), float("inf")
-        max_x2, max_y2 = 0, 0
-
-        for seg in seg_list:
-            if seg.crop_region is not None:
-                x1, y1, x2, y2 = seg.crop_region
-                min_x1 = min(min_x1, x1)
-                min_y1 = min(min_y1, y1)
-                max_x2 = max(max_x2, x2)
-                max_y2 = max(max_y2, y2)
-
-        # Fix the unified crop region to be divisible by nag_divisor
-        unified_crop = self._fix_crop_region(
-            (int(min_x1), int(min_y1), int(max_x2), int(max_y2)),
-            img_width,
-            img_height,
-            nag_divisor,
-        )
-        x1, y1, x2, y2 = unified_crop
-        crop_width = x2 - x1
-        crop_height = y2 - y1
-
-        print(
-            f"[Detailer by Mask VACE] Unified crop region: {unified_crop} ({crop_width}x{crop_height})"
-        )
-
-        # Crop all frames to the unified region
-        cropped_frames = image_frames[:, y1:y2, x1:x2, :]
-        print(f"[Detailer by Mask VACE] Cropped frames shape: {cropped_frames.shape}")
-
-        # Build the combined mask for all frames
-        # Each segment corresponds to one frame
-        combined_mask = torch.zeros(
-            (num_frames, crop_height, crop_width), dtype=torch.float32
-        )
-
-        for seg_idx, seg in enumerate(seg_list):
-            if seg_idx >= num_frames:
-                break
-            if seg.cropped_mask is not None:
-                mask = seg.cropped_mask
-                if isinstance(mask, np.ndarray):
-                    mask = torch.from_numpy(mask)
-                if mask.ndim == 3:
-                    mask = mask[0]  # Take first slice if 3D
-
-                # The mask is for the segment's crop region, need to place it in unified crop
-                seg_x1, seg_y1, seg_x2, seg_y2 = seg.crop_region
-                # Offset within the unified crop
-                offset_x = seg_x1 - x1
-                offset_y = seg_y1 - y1
-                mask_h, mask_w = mask.shape
-
-                # Place mask in the combined mask at the right position
-                end_y = min(offset_y + mask_h, crop_height)
-                end_x = min(offset_x + mask_w, crop_width)
-                mask_end_y = end_y - offset_y
-                mask_end_x = end_x - offset_x
-
-                if offset_y >= 0 and offset_x >= 0:
-                    combined_mask[seg_idx, offset_y:end_y, offset_x:end_x] = mask[
-                        :mask_end_y, :mask_end_x
-                    ]
-            else:
-                # No mask for this segment - use full region
-                combined_mask[seg_idx] = 1.0
-
-        print(f"[Detailer by Mask VACE] Combined mask shape: {combined_mask.shape}")
-
-        # Apply VACE conditioning to process all frames together
-        # VACE encodes the control video and mask into the conditioning
-
-        # Get latent dimensions
-        latent_height = crop_height // 8
-        latent_width = crop_width // 8
-        latent_length = ((num_frames - 1) // 4) + 1
-
-        # Encode the cropped frames
-        control_video = cropped_frames.clone()
-
-        # Prepare control video for VACE (shift to 0.5-centered for inactive regions)
-        control_video_centered = control_video - 0.5
-
-        # Expand mask for broadcasting: [F, H, W] -> [F, H, W, 1]
-        mask_expanded = combined_mask.unsqueeze(-1)
-
-        # inactive = regions we want to preserve (mask = 0)
-        # reactive = regions we want to regenerate (mask = 1)
-        inactive = (control_video_centered * (1 - mask_expanded)) + 0.5
-        reactive = (control_video_centered * mask_expanded) + 0.5
-
-        # Encode both through VAE
-        inactive_latent = vae.encode(inactive[:, :, :, :3])
-        reactive_latent = vae.encode(reactive[:, :, :, :3])
-
-        # Concatenate for VACE format
-        control_video_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
-        print(
-            f"[Detailer by Mask VACE] Control video latent shape: {control_video_latent.shape}"
-        )
-
-        # Process mask for latent space
-        vae_stride = 8
-        mask_for_latent = combined_mask.unsqueeze(-1)  # [F, H, W, 1]
-        mask_for_latent = mask_for_latent.view(
-            num_frames, latent_height, vae_stride, latent_width, vae_stride
-        )
-        mask_for_latent = mask_for_latent.permute(2, 4, 0, 1, 3)
-        mask_for_latent = mask_for_latent.reshape(
-            vae_stride * vae_stride, num_frames, latent_height, latent_width
-        )
-        mask_for_latent = (
-            torch.nn.functional.interpolate(
-                mask_for_latent.unsqueeze(0),
-                size=(latent_length, latent_height, latent_width),
-                mode="nearest-exact",
-            )
-            .squeeze(0)
-            .unsqueeze(0)
-        )
-
-        # Apply VACE conditioning
-        # First, strip any existing VACE conditioning to avoid size mismatch
-        # (in case the basic_pipe already has VACE from upstream nodes like WanVaceToVideo)
-        clean_positive = []
-        for cond, details in positive:
-            clean_details = {
-                k: v
-                for k, v in details.items()
-                if k not in ("vace_frames", "vace_mask", "vace_strength")
-            }
-            clean_positive.append([cond, clean_details])
-
-        clean_negative = []
-        for cond, details in negative:
-            clean_details = {
-                k: v
-                for k, v in details.items()
-                if k not in ("vace_frames", "vace_mask", "vace_strength")
-            }
-            clean_negative.append([cond, clean_details])
-
-        print(
-            f"[Detailer by Mask VACE] Stripped existing VACE conditioning from basic_pipe"
-        )
-
-        vace_positive = node_helpers.conditioning_set_values(
-            clean_positive,
-            {
-                "vace_frames": [control_video_latent],
-                "vace_mask": [mask_for_latent],
-                "vace_strength": [vace_strength],
-            },
-            append=True,
-        )
-        vace_negative = node_helpers.conditioning_set_values(
-            clean_negative,
-            {
-                "vace_frames": [control_video_latent],
-                "vace_mask": [mask_for_latent],
-                "vace_strength": [vace_strength],
-            },
-            append=True,
-        )
-
-        # Create starting latent
-        latent = torch.zeros(
-            [1, 16, latent_length, latent_height, latent_width],
-            device=comfy.model_management.intermediate_device(),
-        )
-
-        # Sample with VACE conditioning
-        print(f"[Detailer by Mask VACE] Sampling with VACE conditioning...")
-
-        from nodes import common_ksampler
-
-        # Prepare latent dict
-        latent_dict = {"samples": latent}
-
-        # Use denoise to blend original with generated
-        samples = common_ksampler(
-            model,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            vace_positive,
-            vace_negative,
-            latent_dict,
-            denoise=denoise,
-        )[0]
-
-        # Decode the result
-        decoded = vae.decode(samples["samples"])
-        print(f"[Detailer by Mask VACE] Decoded shape: {decoded.shape}")
-
-        # The decoded tensor may have different frame count due to latent compression
-        # Interpolate back to original frame count if needed
-        if decoded.shape[0] != num_frames:
-            # Reshape for interpolation: [F, H, W, C] -> [1, C, F, H, W]
-            decoded_5d = decoded.permute(3, 0, 1, 2).unsqueeze(0)
-            decoded_5d = torch.nn.functional.interpolate(
-                decoded_5d,
-                size=(num_frames, crop_height, crop_width),
-                mode="trilinear",
-                align_corners=False,
-            )
-            decoded = decoded_5d.squeeze(0).permute(1, 2, 3, 0)
-            print(f"[Detailer by Mask VACE] Interpolated to {decoded.shape}")
-
-        # Paste the enhanced regions back
-        output_frames = image_frames.clone()
-
-        # Apply feathered mask for smooth blending
-        for frame_idx in range(num_frames):
-            frame_mask = combined_mask[frame_idx]
-            frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
-            frame_mask = frame_mask.unsqueeze(-1)  # [H, W, 1]
-
-            # Get the enhanced crop for this frame
-            enhanced_crop = decoded[frame_idx]
-            original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
-
-            # Blend based on mask
-            blended = original_crop * (1 - frame_mask) + enhanced_crop * frame_mask
-            output_frames[frame_idx, y1:y2, x1:x2, :] = blended
-
-        print(
-            f"[Detailer by Mask VACE] Done - processed {num_frames} frames with temporal coherence"
-        )
-
-        # Return combined mask
-        output_mask = combined_mask.max(dim=0)[0]  # Union of all frame masks
-
-        return (output_frames, output_mask)
 
 
 class DivisibleDimensionHook:
@@ -807,45 +453,36 @@ class DivisibleDimensionHook:
 
         if adjusted_width != width or adjusted_height != height:
             print(
-                f"[NAG Hook] Adjusted upscale from ({width}, {height}) to ({adjusted_width}, {adjusted_height})"
+                f"[DivisibleDimensionHook] Adjusted from ({width}, {height}) to ({adjusted_width}, {adjusted_height})"
             )
 
         return adjusted_width, adjusted_height
 
     def get_custom_sampler(self):
-        """Return custom sampler if needed - None for default."""
         return None
 
-    def post_encode(self, latent: dict) -> dict:
-        """Called after VAE encoding - passthrough."""
+    def post_encode(self, latent):
         return latent
 
-    def pre_decode(self, latent: dict) -> dict:
-        """Called before VAE decoding - passthrough."""
+    def pre_decode(self, latent):
         return latent
 
     def post_decode(self, image):
-        """Called after VAE decoding - passthrough."""
         return image
 
     def post_paste(self, image):
-        """Called after pasting enhanced segment - passthrough."""
         return image
 
     def post_upscale(self, image, mask):
-        """Called after upscaling - passthrough."""
         return image
 
     def get_skip_sampling(self):
-        """Return whether to skip sampling - False means do sampling."""
         return False
 
     def set_steps(self, info):
-        """Called to set step info - no-op."""
         pass
 
     def cycle_latent(self, latent):
-        """Called each cycle - passthrough."""
         return latent
 
     def pre_ksample(
@@ -861,7 +498,6 @@ class DivisibleDimensionHook:
         latent,
         denoise,
     ):
-        """Called before ksampler - return unchanged values."""
         return (
             model,
             seed,
@@ -876,15 +512,12 @@ class DivisibleDimensionHook:
         )
 
     def get_custom_noise(self, seed, noise, is_touched=False):
-        """Return custom noise - None means use default."""
         return None, False
 
     def post_detection(self, segs):
-        """Called after detection - passthrough."""
         return segs
 
     def post_crop_region(self, w, h, bbox, crop_region):
-        """Called after crop region calculation - passthrough."""
         return crop_region
 
 
