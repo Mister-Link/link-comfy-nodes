@@ -223,6 +223,9 @@ class DetailerByMask:
                 cropped_image_frames = utils.to_tensor(seg.cropped_image)
                 if isinstance(cropped_image_frames, torch.Tensor):
                     cropped_image_frames = cropped_image_frames.cpu().numpy()
+                print(
+                    f"[Detailer by Mask] Using pre-cropped image, shape: {cropped_image_frames.shape}"
+                )
             else:
                 # Need to crop from the full image_frames
                 cropped_image_frames = None
@@ -278,6 +281,9 @@ class DetailerByMask:
                 isinstance(cropped_image_frames, np.ndarray)
                 and cropped_image_frames.ndim == 4
                 and cropped_image_frames.shape[0] == 1
+            )
+            print(
+                f"[Detailer by Mask] cropped_image_frames shape: {cropped_image_frames.shape if isinstance(cropped_image_frames, np.ndarray) else 'not numpy'}, is_single_frame: {is_single_frame}"
             )
 
             if not (isinstance(model, str) and model == "DUMMY"):
