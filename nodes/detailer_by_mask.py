@@ -673,8 +673,32 @@ class DetailerByMask:
         )
 
         # Apply VACE conditioning
+        # First, strip any existing VACE conditioning to avoid size mismatch
+        # (in case the basic_pipe already has VACE from upstream nodes like WanVaceToVideo)
+        clean_positive = []
+        for cond, details in positive:
+            clean_details = {
+                k: v
+                for k, v in details.items()
+                if k not in ("vace_frames", "vace_mask", "vace_strength")
+            }
+            clean_positive.append([cond, clean_details])
+
+        clean_negative = []
+        for cond, details in negative:
+            clean_details = {
+                k: v
+                for k, v in details.items()
+                if k not in ("vace_frames", "vace_mask", "vace_strength")
+            }
+            clean_negative.append([cond, clean_details])
+
+        print(
+            f"[Detailer by Mask VACE] Stripped existing VACE conditioning from basic_pipe"
+        )
+
         vace_positive = node_helpers.conditioning_set_values(
-            positive,
+            clean_positive,
             {
                 "vace_frames": [control_video_latent],
                 "vace_mask": [mask_for_latent],
@@ -683,7 +707,7 @@ class DetailerByMask:
             append=True,
         )
         vace_negative = node_helpers.conditioning_set_values(
-            negative,
+            clean_negative,
             {
                 "vace_frames": [control_video_latent],
                 "vace_mask": [mask_for_latent],
