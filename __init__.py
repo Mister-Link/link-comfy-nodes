@@ -9,7 +9,6 @@ from .nodes import (
     BulkBackgroundRemoverBgEraserNode,
     ColorParserNode,
     CropToContentNode,
-    DetailerByMask,
     FarthestColorNode,
     FastImagePreviewNode,
     ImageRotatorNode,
@@ -26,6 +25,7 @@ from .nodes import (
     SpritesheetBuilderNode,
     SpritesheetPreviewNode,
     StabilizerTrimNode,
+    VideoDetailer,
     VideoMaskEditor,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
@@ -60,7 +60,7 @@ NODE_CLASS_MAPPINGS = {
     "Auto Cropper": AutoCropperNode,
     "Fast Image Preview": FastImagePreviewNode,
     "Stabilizer Trim": StabilizerTrimNode,
-    "Detailer by Mask": DetailerByMask,
+    "Video Detailer": VideoDetailer,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
@@ -92,7 +92,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Auto Cropper": "Auto Cropper",
     "Fast Image Preview": "Fast Image Preview",
     "Stabilizer Trim": "Stabilizer Trim",
-    "Detailer by Mask": "Detailer by Mask",
+    "Video Detailer": "Video Detailer",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }

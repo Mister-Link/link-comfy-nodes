@@ -1,4 +1,4 @@
-"""Mask-based detailer for video with dimension fixing and batch processing."""
+"""Video detailer with dimension fixing and batch processing."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ import torch
 import comfy.samplers
 
 
-class DetailerByMask:
+class VideoDetailer:
     """
-    Detailer for video frames using a mask input with NAG compatibility.
+    Detailer for video frames with NAG compatibility.
 
     This node:
-    - Accepts a MASK instead of SEGS for simpler workflows
+    - Optionally accepts a MASK to detail specific regions
+    - If no mask provided, details the entire image
     - Fixes crop regions to be divisible by 64 (required for NAG)
     - Processes all frames together as a batch
     - Handles 5D tensor normalization to prevent dimension errors
@@ -25,7 +26,6 @@ class DetailerByMask:
         return {
             "required": {
                 "image_frames": ("IMAGE",),
-                "mask": ("MASK",),
                 "guide_size": (
                     "FLOAT",
                     {"default": 720, "min": 64, "max": 8192, "step": 8},
@@ -51,6 +51,7 @@ class DetailerByMask:
                 "basic_pipe": ("BASIC_PIPE",),
             },
             "optional": {
+                "mask": ("MASK",),
                 "noise_mask_feather": (
                     "INT",
                     {"default": 10, "min": 0, "max": 100, "step": 1},
@@ -62,7 +63,9 @@ class DetailerByMask:
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
     CATEGORY = "link/Impact"
-    DESCRIPTION = "Mask-based detailer for video with NAG compatibility - processes all frames as a batch"
+    DESCRIPTION = (
+        "Video detailer with NAG compatibility - processes all frames as a batch"
+    )
 
     @staticmethod
     def _fix_crop_region(
@@ -150,7 +153,6 @@ class DetailerByMask:
     def execute(
         self,
         image_frames,
-        mask,
         guide_size,
         guide_size_for,
         max_size,
@@ -162,6 +164,7 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
+        mask=None,
         noise_mask_feather=10,
     ):
         """Process all frames as a batch using the mask."""
@@ -177,6 +180,11 @@ class DetailerByMask:
         num_frames = image_frames.shape[0]
         img_height = image_frames.shape[1]
         img_width = image_frames.shape[2]
+
+        # If no mask provided, create a full mask (detail entire image)
+        if mask is None:
+            print(f"[Detailer by Mask] No mask provided, using full image")
+            mask = torch.ones((num_frames, img_height, img_width), dtype=torch.float32)
 
         print(f"[Detailer by Mask] Processing {num_frames} frames as batch")
 
@@ -440,4 +448,4 @@ class DivisibleDimensionHook:
         return crop_region
 
 
-__all__ = ["DetailerByMask"]
+__all__ = ["VideoDetailer"]
