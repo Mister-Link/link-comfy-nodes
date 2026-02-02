@@ -51,8 +51,10 @@ class DetailerByMask:
                 ),
                 "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
+                "refiner_ratio": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
             },
             "optional": {
+                "refiner_basic_pipe_opt": ("BASIC_PIPE",),
                 "noise_mask_feather": (
                     "INT",
                     {"default": 20, "min": 0, "max": 100, "step": 1},
@@ -175,6 +177,8 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
+        refiner_ratio,
+        refiner_basic_pipe_opt=None,
         noise_mask_feather=0,
     ):
         """Process mask with full NAG compatibility and 5D tensor handling."""
@@ -279,6 +283,18 @@ class DetailerByMask:
             from impact import core
 
             model, clip, vae, positive, negative = basic_pipe
+            if refiner_basic_pipe_opt is None:
+                refiner_model, refiner_clip, refiner_positive, refiner_negative = (
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            else:
+                refiner_model, refiner_clip, _, refiner_positive, refiner_negative = (
+                    refiner_basic_pipe_opt
+                )
+
             seg = sub_seg
             cropped_image_frames = None
 
@@ -346,11 +362,11 @@ class DetailerByMask:
                         cropped_negative,
                         denoise,
                         seg.cropped_mask,
-                        refiner_ratio=None,
-                        refiner_model=None,
-                        refiner_clip=None,
-                        refiner_positive=None,
-                        refiner_negative=None,
+                        refiner_ratio=refiner_ratio,
+                        refiner_model=refiner_model,
+                        refiner_clip=refiner_clip,
+                        refiner_positive=refiner_positive,
+                        refiner_negative=refiner_negative,
                         control_net_wrapper=seg.control_net_wrapper
                         if hasattr(seg, "control_net_wrapper")
                         else None,
@@ -479,6 +495,26 @@ class NAGDetailerHookImpl:
             )
 
         return adjusted_width, adjusted_height
+
+    def get_custom_sampler(self):
+        """Return custom sampler if needed - None for default."""
+        return None
+
+    def post_encode(self, latent: dict) -> dict:
+        """Called after VAE encoding - passthrough."""
+        return latent
+
+    def pre_decode(self, latent: dict) -> dict:
+        """Called before VAE decoding - passthrough."""
+        return latent
+
+    def post_decode(self, image):
+        """Called after VAE decoding - passthrough."""
+        return image
+
+    def post_paste(self, image):
+        """Called after pasting enhanced segment - passthrough."""
+        return image
 
 
 __all__ = ["DetailerByMask"]
