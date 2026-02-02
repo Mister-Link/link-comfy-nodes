@@ -171,7 +171,7 @@ class DetailerByMask:
 
                 if fixed_crop != crop_region:
                     print(
-                        f"[NAG Detailer] Seg {i}: Fixed crop_region {crop_region} → {fixed_crop} (divisor={nag_divisor})"
+                        f"[Detailer by Mask] Seg {i}: Fixed crop_region {crop_region} → {fixed_crop} (divisor={nag_divisor})"
                     )
 
                 # Replace seg with fixed crop
@@ -199,8 +199,8 @@ class DetailerByMask:
 
         fixed_segs = (header, fixed_seg_list)
 
-        # Create NAG-compatible detailer hook
-        nag_hook = NAGDetailerHookImpl(nag_divisor)
+        # Create hook to ensure dimensions are divisible by 64
+        dimension_hook = DivisibleDimensionHook(nag_divisor)
 
         # Process each segment using Impact Pack's approach
         from impact.segs_nodes import SEGSPaste
@@ -322,7 +322,7 @@ class DetailerByMask:
                         else None,
                         noise_mask_feather=noise_mask_feather,
                         scheduler_func=None,
-                        detailer_hook=nag_hook,
+                        detailer_hook=dimension_hook,
                     )
                 else:
                     # Multi-frame batch - use animatediff version
@@ -355,7 +355,7 @@ class DetailerByMask:
                             else None,
                             noise_mask_feather=noise_mask_feather,
                             scheduler_func=None,
-                            detailer_hook=nag_hook,
+                            detailer_hook=dimension_hook,
                         )
                     )
             else:
@@ -397,8 +397,8 @@ class DetailerByMask:
                 image_frames, enhanced_seg, feather, alpha=255
             )[0]
 
-            # Call NAG hook's post_paste
-            image_frames = nag_hook.post_paste(image_frames)
+            # Call hook's post_paste
+            image_frames = dimension_hook.post_paste(image_frames)
 
             enhanced_segs.append(new_seg)
 
@@ -422,8 +422,8 @@ class DetailerByMask:
         return (image_frames, output_mask)
 
 
-class NAGDetailerHookImpl:
-    """Internal NAG hook for dimension fixing during upscale."""
+class DivisibleDimensionHook:
+    """Ensures dimensions are divisible by a given value (e.g., 64 for NAG models)."""
 
     def __init__(self, divisor: int = 64):
         self.divisor = divisor
@@ -464,6 +464,61 @@ class NAGDetailerHookImpl:
     def post_paste(self, image):
         """Called after pasting enhanced segment - passthrough."""
         return image
+
+    def post_upscale(self, image, mask):
+        """Called after upscaling - passthrough."""
+        return image
+
+    def get_skip_sampling(self):
+        """Return whether to skip sampling - False means do sampling."""
+        return False
+
+    def set_steps(self, info):
+        """Called to set step info - no-op."""
+        pass
+
+    def cycle_latent(self, latent):
+        """Called each cycle - passthrough."""
+        return latent
+
+    def pre_ksample(
+        self,
+        model,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        positive,
+        negative,
+        latent,
+        denoise,
+    ):
+        """Called before ksampler - return unchanged values."""
+        return (
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent,
+            denoise,
+        )
+
+    def get_custom_noise(self, seed, noise, is_touched=False):
+        """Return custom noise - None means use default."""
+        return None, False
+
+    def post_detection(self, segs):
+        """Called after detection - passthrough."""
+        return segs
+
+    def post_crop_region(self, w, h, bbox, crop_region):
+        """Called after crop region calculation - passthrough."""
+        return crop_region
 
 
 __all__ = ["DetailerByMask"]
