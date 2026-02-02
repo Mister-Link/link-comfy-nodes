@@ -3,7 +3,7 @@
 from .auto_cropper import AutoCropperNode
 from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
-from .detailer_by_mask import DetailerByMask
+from .detailer_by_mask import VideoDetailer
 from .fast_image_preview import FastImagePreviewNode
 from .image_nodes import (
     AddImageToBatchNode,
@@ -57,5 +57,5 @@ __all__ = [
     "NativeWanPoseStrength",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
-    "DetailerByMask",
+    "VideoDetailer",
 ]
