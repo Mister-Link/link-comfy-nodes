@@ -29,8 +29,10 @@ STATUS_URL = "https://bgeraser.com/"
 STATUS_ACTION = "1af975bb141cc30518bca9d55ab31f1f992fec60"
 STATUS_STATE = "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
 CACHE_DIR = Path(__file__).resolve().parents[1] / ".cache" / "bgeraser"
-BATCH_SIZE = 20
+BATCH_SIZE = 5  # Conservative batch size to avoid overloading service
 RATE_LIMIT_SLEEP = 12.0
+UPLOAD_DELAY = 1.0  # Delay between individual uploads to avoid rate limiting
+MAX_WAITING_CHECKS = 40  # Fail if stuck in "waiting" for this many checks (2 minutes)
 
 
 def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
@@ -134,7 +136,8 @@ def _poll_and_download(
     max_checks = 120
     total = len(results)
     failure_counts: dict[str, int] = {}
-    for _ in range(max_checks):
+    waiting_count = 0
+    for check_num in range(max_checks):
         if not pending:
             return
         codes = list(pending.keys())
@@ -158,10 +161,38 @@ def _poll_and_download(
             time.sleep(check_interval)
             continue
         status_payload = json.loads(data_line[2:])
+        if status_payload.get("code") == 999:
+            # Rate limited - wait and retry
+            print(f"BgEraser: rate limited (code 999); waiting {RATE_LIMIT_SLEEP}s...")  # noqa: T201
+            time.sleep(RATE_LIMIT_SLEEP)
+            continue
         if status_payload.get("code") != 200:
             raise RuntimeError(f"Status failed: {status_payload}")
         status_data = status_payload.get("data", {})
+        current_status = status_data.get("status", "unknown")
         urls = status_data.get("downloadUrls", {})
+
+        # Log status for debugging
+        if current_status == "waiting":
+            waiting_count += 1
+            if waiting_count % 5 == 0:  # Log every 15 seconds
+                print(
+                    f"BgEraser: still waiting for {len(pending)} images (check {check_num + 1}/{max_checks})..."
+                )  # noqa: T201
+            if waiting_count >= MAX_WAITING_CHECKS:
+                print(
+                    f"BgEraser: service appears stuck (waited {waiting_count * check_interval}s)"
+                )  # noqa: T201
+                raise RuntimeError(
+                    f"Service stuck in 'waiting' status for {len(pending)} images after "
+                    f"{waiting_count * check_interval}s. The service may be overloaded. "
+                    f"Try processing fewer images at once or waiting before retrying."
+                )
+        elif current_status == "failed":
+            print(f"BgEraser: service reported failure status: {status_data}")  # noqa: T201
+            raise RuntimeError(f"Service processing failed: {status_data}")
+        else:
+            waiting_count = 0  # Reset on success/progress
         if isinstance(urls, dict) and urls:
             for code, url in urls.items():
                 if code not in pending:
@@ -291,8 +322,13 @@ class BulkBackgroundRemoverBgEraserNode:
             pending_by_key[cache_key] = code
             if progress_bar is not None:
                 progress_bar.update(1)
+            # Add small delay between uploads to avoid rate limiting
+            time.sleep(UPLOAD_DELAY)
             if len(pending) >= BATCH_SIZE:
                 flush_pending()
+                # Add delay between batches to further reduce rate limit risk
+                if idx < frames.shape[0] - 1:  # Don't sleep after last batch
+                    time.sleep(UPLOAD_DELAY * 2)
 
         flush_pending()
 
