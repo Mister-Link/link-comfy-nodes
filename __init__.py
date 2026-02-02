@@ -20,7 +20,6 @@ from .nodes import (
     PreviewImageAlpha,
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
-    SAM3VideoSegmentationFixed,
     SaveFolderAsZip,
     SaveImageSequenceZip,
     SpritesheetBuilderNode,
@@ -64,7 +63,6 @@ NODE_CLASS_MAPPINGS = {
     "Video Detailer": VideoDetailer,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
-    "SAM3VideoSegmentationFixed": SAM3VideoSegmentationFixed,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -97,7 +95,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Video Detailer": "Video Detailer",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
-    "SAM3VideoSegmentationFixed": "SAM3 Video Segmentation (Fixed)",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
@@ -122,20 +119,6 @@ def _load_model_downloader():
 
 
 _load_model_downloader()
-
-
-# Auto-patch SAM3 for frame_idx float->int conversion
-def _apply_sam3_patches():
-    """Apply compatibility patches to ComfyUI-SAM3 on startup."""
-    try:
-        from . import patch_sam3_frame_idx
-
-        patch_sam3_frame_idx.apply_patches()
-    except Exception as exc:
-        print(f"[link-comfy-nodes] Could not apply SAM3 patches: {exc}")
-
-
-_apply_sam3_patches()
 
 
 # Auto-patch Impact Pack for 5D tensor support
