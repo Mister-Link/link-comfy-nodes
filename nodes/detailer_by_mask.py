@@ -210,7 +210,11 @@ class DetailerByMask:
 
         model, clip, vae, positive, negative = basic_pipe
 
-        for sub_seg in fixed_seg_list:
+        total_segments = len(fixed_seg_list)
+        for seg_idx, sub_seg in enumerate(fixed_seg_list):
+            print(
+                f"[Detailer by Mask] Processing segment {seg_idx + 1}/{total_segments}"
+            )
             seg = sub_seg
 
             # Use the segment's pre-cropped image if available, otherwise crop from source
@@ -269,10 +273,19 @@ class DetailerByMask:
             ]
 
             # Enhance detail with NAG hook
+            # Detect if this is a single-frame segment or multi-frame batch
+            is_single_frame = (
+                isinstance(cropped_image_frames, np.ndarray)
+                and cropped_image_frames.ndim == 4
+                and cropped_image_frames.shape[0] == 1
+            )
+
             if not (isinstance(model, str) and model == "DUMMY"):
-                enhanced_image_tensor, cnet_images = (
-                    core.enhance_detail_for_animatediff(
-                        cropped_image_frames,
+                if is_single_frame:
+                    # Single frame - use regular enhance_detail for better denoise behavior
+                    cropped_image_tensor = torch.from_numpy(cropped_image_frames)
+                    enhanced_image_tensor, cnet_images = core.enhance_detail(
+                        cropped_image_tensor,
                         model,
                         clip,
                         vae,
@@ -289,6 +302,7 @@ class DetailerByMask:
                         cropped_negative,
                         denoise,
                         seg.cropped_mask,
+                        force_inpaint=False,
                         refiner_ratio=None,
                         refiner_model=None,
                         refiner_clip=None,
@@ -299,9 +313,42 @@ class DetailerByMask:
                         else None,
                         noise_mask_feather=noise_mask_feather,
                         scheduler_func=None,
-                        detailer_hook=nag_hook,  # Pass NAG hook here
+                        detailer_hook=nag_hook,
                     )
-                )
+                else:
+                    # Multi-frame batch - use animatediff version
+                    enhanced_image_tensor, cnet_images = (
+                        core.enhance_detail_for_animatediff(
+                            cropped_image_frames,
+                            model,
+                            clip,
+                            vae,
+                            guide_size,
+                            guide_size_for,
+                            max_size,
+                            seg.bbox,
+                            seed,
+                            steps,
+                            cfg,
+                            sampler_name,
+                            scheduler,
+                            cropped_positive,
+                            cropped_negative,
+                            denoise,
+                            seg.cropped_mask,
+                            refiner_ratio=None,
+                            refiner_model=None,
+                            refiner_clip=None,
+                            refiner_positive=None,
+                            refiner_negative=None,
+                            control_net_wrapper=seg.control_net_wrapper
+                            if hasattr(seg, "control_net_wrapper")
+                            else None,
+                            noise_mask_feather=noise_mask_feather,
+                            scheduler_func=None,
+                            detailer_hook=nag_hook,
+                        )
+                    )
             else:
                 enhanced_image_tensor = cropped_image_frames
                 cnet_images = None
