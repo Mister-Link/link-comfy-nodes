@@ -1,4 +1,4 @@
-"""SEGS-based detailer for video with dimension fixing and 5D tensor handling."""
+"""Mask-based detailer for video with dimension fixing and batch processing."""
 
 from __future__ import annotations
 
@@ -11,15 +11,13 @@ import comfy.samplers
 
 class DetailerByMask:
     """
-    Detailer for video frames with NAG compatibility.
+    Detailer for video frames using a mask input with NAG compatibility.
 
     This node:
-    - Fixes SEGS crop regions to be divisible by 64 (required for NAG)
+    - Accepts a MASK instead of SEGS for simpler workflows
+    - Fixes crop regions to be divisible by 64 (required for NAG)
+    - Processes all frames together as a batch
     - Handles 5D tensor normalization to prevent dimension errors
-    - Processes frames individually (one segment per frame)
-
-    Use this instead of DetailerForEachPipeForAnimateDiff when working
-    with NAG-patched models to avoid autocast and dimension errors.
     """
 
     @classmethod
@@ -27,7 +25,7 @@ class DetailerByMask:
         return {
             "required": {
                 "image_frames": ("IMAGE",),
-                "segs": ("SEGS",),
+                "mask": ("MASK",),
                 "guide_size": (
                     "FLOAT",
                     {"default": 512, "min": 64, "max": 8192, "step": 8},
@@ -64,9 +62,7 @@ class DetailerByMask:
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
     CATEGORY = "link/Impact"
-    DESCRIPTION = (
-        "SEGS-based detailer for video with NAG compatibility and automatic crop fixing"
-    )
+    DESCRIPTION = "Mask-based detailer for video with NAG compatibility - processes all frames as a batch"
 
     @staticmethod
     def _fix_crop_region(
@@ -84,11 +80,11 @@ class DetailerByMask:
         width = x2 - x1
         height = y2 - y1
 
-        # Round UP to nearest multiple of divisor to avoid shrinking mask region
+        # Round UP to nearest multiple of divisor
         width = ((width + divisor - 1) // divisor) * divisor
         height = ((height + divisor - 1) // divisor) * divisor
 
-        # Recalculate x2, y2 from center to expand evenly
+        # Recalculate from center to expand evenly
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
 
@@ -124,10 +120,37 @@ class DetailerByMask:
 
         return (x1, y1, x2, y2)
 
+    @staticmethod
+    def _get_mask_bbox(mask: torch.Tensor) -> tuple:
+        """Get bounding box from mask. Returns (x1, y1, x2, y2)."""
+        # Handle batched masks - combine them
+        if mask.ndim == 3:
+            # [B, H, W] - take max across batch to get union of all masks
+            combined = mask.max(dim=0)[0]
+        else:
+            combined = mask
+
+        # Find non-zero pixels
+        nonzero = torch.nonzero(combined > 0.5)
+        if len(nonzero) == 0:
+            # No mask content, return full image
+            h, w = combined.shape
+            return (0, 0, w, h)
+
+        y_coords = nonzero[:, 0]
+        x_coords = nonzero[:, 1]
+
+        y1 = int(y_coords.min().item())
+        y2 = int(y_coords.max().item()) + 1
+        x1 = int(x_coords.min().item())
+        x2 = int(x_coords.max().item()) + 1
+
+        return (x1, y1, x2, y2)
+
     def execute(
         self,
         image_frames,
-        segs,
+        mask,
         guide_size,
         guide_size_for,
         max_size,
@@ -141,298 +164,143 @@ class DetailerByMask:
         basic_pipe,
         noise_mask_feather=0,
     ):
-        """Process SEGS with dimension fixing and 5D tensor handling."""
+        """Process all frames as a batch using the mask."""
         try:
             from impact import utils
-            from impact.core import SEG
             from impact.utils import tensor_gaussian_blur_mask
         except ImportError:
             raise ImportError(
                 "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
             )
 
-        # Hardcoded NAG divisor
         nag_divisor = 64
-
-        # Get image dimensions
+        num_frames = image_frames.shape[0]
         img_height = image_frames.shape[1]
         img_width = image_frames.shape[2]
 
-        # Process SEGS directly
-        header, seg_list = segs
-        fixed_seg_list = []
+        print(f"[Detailer by Mask] Processing {num_frames} frames as batch")
 
-        for i, seg in enumerate(seg_list):
-            crop_region = getattr(seg, "crop_region", None)
-
-            if crop_region is not None:
-                fixed_crop = self._fix_crop_region(
-                    crop_region, img_width, img_height, nag_divisor
-                )
-
-                if fixed_crop != crop_region:
-                    print(
-                        f"[Detailer by Mask] Seg {i}: Fixed crop_region {crop_region} -> {fixed_crop} (divisor={nag_divisor})"
-                    )
-
-                # Replace seg with fixed crop
-                if hasattr(seg, "_replace"):
-                    fixed_seg = seg._replace(crop_region=fixed_crop)
-                else:
-                    fixed_seg = SEG(
-                        seg.cropped_image,
-                        seg.cropped_mask,
-                        seg.confidence,
-                        fixed_crop,
-                        seg.bbox,
-                        seg.label,
-                        seg.control_net_wrapper
-                        if hasattr(seg, "control_net_wrapper")
-                        else None,
-                    )
-
-                fixed_seg_list.append(fixed_seg)
+        # Handle mask dimensions
+        # mask can be [H, W], [B, H, W], or [F, H, W] where F = num_frames
+        if mask.ndim == 2:
+            # Single mask for all frames
+            mask = mask.unsqueeze(0).expand(num_frames, -1, -1)
+        elif mask.ndim == 3 and mask.shape[0] != num_frames:
+            # Mask batch doesn't match frame count - use first or expand
+            if mask.shape[0] == 1:
+                mask = mask.expand(num_frames, -1, -1)
             else:
-                fixed_seg_list.append(seg)
+                # Take first mask and expand
+                mask = mask[0:1].expand(num_frames, -1, -1)
 
-        fixed_segs = (header, fixed_seg_list)
+        print(f"[Detailer by Mask] Mask shape: {mask.shape}")
 
-        # Create hook to ensure dimensions are divisible by 64
-        dimension_hook = DivisibleDimensionHook(nag_divisor)
+        # Get bounding box from combined mask
+        bbox = self._get_mask_bbox(mask)
+        print(f"[Detailer by Mask] Mask bbox: {bbox}")
 
-        # Process each segment
-        from impact.segs_nodes import SEGSPaste
+        # Fix crop region for NAG divisibility
+        crop_region = self._fix_crop_region(bbox, img_width, img_height, nag_divisor)
+        x1, y1, x2, y2 = crop_region
+        print(f"[Detailer by Mask] Fixed crop region: {crop_region}")
 
-        enhanced_segs = []
-        cnet_image_list = []
+        # Crop all frames
+        cropped_frames = image_frames[:, y1:y2, x1:x2, :]
+        print(f"[Detailer by Mask] Cropped frames shape: {cropped_frames.shape}")
+
+        # Crop mask to same region
+        cropped_mask = mask[:, y1:y2, x1:x2]
+        print(f"[Detailer by Mask] Cropped mask shape: {cropped_mask.shape}")
+
+        # Convert to numpy for enhance_detail_for_animatediff
+        cropped_frames_np = cropped_frames.cpu().numpy()
+
+        # Get single mask for the detailer (use first frame's mask or combined)
+        single_mask = cropped_mask[0].cpu().numpy()
 
         model, clip, vae, positive, negative = basic_pipe
 
-        total_segments = len(fixed_seg_list)
-        for seg_idx, sub_seg in enumerate(fixed_seg_list):
-            print(
-                f"[Detailer by Mask] Processing segment {seg_idx + 1}/{total_segments}"
-            )
-            seg = sub_seg
+        # Create dimension hook
+        dimension_hook = DivisibleDimensionHook(nag_divisor)
 
-            # Use the segment's pre-cropped image if available, otherwise crop from source
-            if seg.cropped_image is not None:
-                cropped_image_frames = utils.to_tensor(seg.cropped_image)
-                if isinstance(cropped_image_frames, torch.Tensor):
-                    cropped_image_frames = cropped_image_frames.cpu().numpy()
-                print(
-                    f"[Detailer by Mask] Using pre-cropped image, shape: {cropped_image_frames.shape}"
-                )
+        # Calculate bbox relative to crop region
+        relative_bbox = (0, 0, x2 - x1, y2 - y1)
+
+        # Process all frames together
+        print(f"[Detailer by Mask] Running enhance_detail_for_animatediff...")
+        enhanced_tensor, cnet_images = core.enhance_detail_for_animatediff(
+            cropped_frames_np,
+            model,
+            clip,
+            vae,
+            guide_size,
+            guide_size_for,
+            max_size,
+            relative_bbox,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            denoise,
+            single_mask,
+            refiner_ratio=None,
+            refiner_model=None,
+            refiner_clip=None,
+            refiner_positive=None,
+            refiner_negative=None,
+            control_net_wrapper=None,
+            noise_mask_feather=noise_mask_feather,
+            scheduler_func=None,
+            detailer_hook=dimension_hook,
+        )
+
+        if enhanced_tensor is None:
+            print("[Detailer by Mask] No enhancement performed, returning original")
+            return (image_frames, mask[0])
+
+        # Handle 5D tensor output
+        if enhanced_tensor.ndim == 5:
+            b, f, h, w, c = enhanced_tensor.shape
+            enhanced_tensor = enhanced_tensor.reshape(b * f, h, w, c)
+            print(f"[Detailer by Mask] Reshaped from 5D to {enhanced_tensor.shape}")
+
+        print(f"[Detailer by Mask] Enhanced tensor shape: {enhanced_tensor.shape}")
+
+        # Paste enhanced regions back
+        output_frames = image_frames.clone()
+
+        for frame_idx in range(num_frames):
+            # Get feathered mask for this frame
+            frame_mask = cropped_mask[frame_idx]
+            frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
+
+            # Get enhanced crop for this frame
+            if frame_idx < enhanced_tensor.shape[0]:
+                enhanced_crop = enhanced_tensor[frame_idx]
             else:
-                # Crop from the full image_frames
-                # Since we have separate segments (one per frame), only process the corresponding frame
-                if seg_idx < len(image_frames):
-                    image = image_frames[seg_idx].unsqueeze(0)
-                    cropped_image = utils.crop_tensor4(image, seg.crop_region)
-                    cropped_image_frames = utils.to_tensor(cropped_image).cpu().numpy()
-                    print(
-                        f"[Detailer by Mask] Cropped frame {seg_idx} from full video, shape: {cropped_image_frames.shape}"
-                    )
-                else:
-                    print(
-                        f"[Detailer by Mask] ERROR: Segment index {seg_idx} out of range for {len(image_frames)} frames"
-                    )
-                    continue
+                # Fallback if frame count mismatch
+                enhanced_crop = enhanced_tensor[-1]
 
-            # Crop conditioning
-            from impact import core as impact_core
+            # Blend
+            frame_mask_expanded = frame_mask.unsqueeze(-1).to(output_frames.device)
+            enhanced_crop = enhanced_crop.to(output_frames.device)
+            original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
 
-            cropped_positive = [
-                [
-                    condition,
-                    {
-                        k: impact_core.crop_condition_mask(
-                            v, cropped_image_frames, seg.crop_region
-                        )
-                        if k == "mask"
-                        else v
-                        for k, v in details.items()
-                    },
-                ]
-                for condition, details in positive
-            ]
-
-            cropped_negative = [
-                [
-                    condition,
-                    {
-                        k: impact_core.crop_condition_mask(
-                            v, cropped_image_frames, seg.crop_region
-                        )
-                        if k == "mask"
-                        else v
-                        for k, v in details.items()
-                    },
-                ]
-                for condition, details in negative
-            ]
-
-            # Detect if this is a single-frame segment
-            is_single_frame = (
-                isinstance(cropped_image_frames, np.ndarray)
-                and cropped_image_frames.ndim == 4
-                and cropped_image_frames.shape[0] == 1
+            blended = (
+                original_crop * (1 - frame_mask_expanded)
+                + enhanced_crop * frame_mask_expanded
             )
-            print(
-                f"[Detailer by Mask] cropped_image_frames shape: {cropped_image_frames.shape}, is_single_frame: {is_single_frame}"
-            )
+            output_frames[frame_idx, y1:y2, x1:x2, :] = blended
 
-            if not (isinstance(model, str) and model == "DUMMY"):
-                if is_single_frame:
-                    # Single frame - use regular enhance_detail
-                    cropped_image_tensor = torch.from_numpy(cropped_image_frames)
-                    enhanced_image_tensor, cnet_images = impact_core.enhance_detail(
-                        cropped_image_tensor,
-                        model,
-                        clip,
-                        vae,
-                        guide_size,
-                        guide_size_for,
-                        max_size,
-                        seg.bbox,
-                        seed,
-                        steps,
-                        cfg,
-                        sampler_name,
-                        scheduler,
-                        cropped_positive,
-                        cropped_negative,
-                        denoise,
-                        seg.cropped_mask,
-                        force_inpaint=False,
-                        refiner_ratio=None,
-                        refiner_model=None,
-                        refiner_clip=None,
-                        refiner_positive=None,
-                        refiner_negative=None,
-                        control_net_wrapper=seg.control_net_wrapper
-                        if hasattr(seg, "control_net_wrapper")
-                        else None,
-                        noise_mask_feather=noise_mask_feather,
-                        scheduler_func=None,
-                        detailer_hook=dimension_hook,
-                    )
-                else:
-                    # Multi-frame batch - use animatediff version
-                    enhanced_image_tensor, cnet_images = (
-                        impact_core.enhance_detail_for_animatediff(
-                            cropped_image_frames,
-                            model,
-                            clip,
-                            vae,
-                            guide_size,
-                            guide_size_for,
-                            max_size,
-                            seg.bbox,
-                            seed,
-                            steps,
-                            cfg,
-                            sampler_name,
-                            scheduler,
-                            cropped_positive,
-                            cropped_negative,
-                            denoise,
-                            seg.cropped_mask,
-                            refiner_ratio=None,
-                            refiner_model=None,
-                            refiner_clip=None,
-                            refiner_positive=None,
-                            refiner_negative=None,
-                            control_net_wrapper=seg.control_net_wrapper
-                            if hasattr(seg, "control_net_wrapper")
-                            else None,
-                            noise_mask_feather=noise_mask_feather,
-                            scheduler_func=None,
-                            detailer_hook=dimension_hook,
-                        )
-                    )
-            else:
-                enhanced_image_tensor = cropped_image_frames
-                cnet_images = None
+        print(f"[Detailer by Mask] Done - processed {num_frames} frames")
 
-            if cnet_images is not None:
-                cnet_image_list.extend(cnet_images)
+        # Return the original mask (first frame or combined)
+        output_mask = mask[0] if mask.ndim == 3 else mask
 
-            if enhanced_image_tensor is None:
-                new_cropped_image = cropped_image_frames
-            else:
-                # Normalize to 4D if needed BEFORE converting to numpy
-                if enhanced_image_tensor.ndim == 5:
-                    b, f, h, w, c = enhanced_image_tensor.shape
-                    enhanced_image_tensor = enhanced_image_tensor.reshape(
-                        b * f, h, w, c
-                    )
-                    print(
-                        f"[Detailer by Mask] Normalized enhanced tensor from 5D {(b, f, h, w, c)} to 4D {enhanced_image_tensor.shape}"
-                    )
-
-                new_cropped_image = enhanced_image_tensor.cpu().numpy()
-
-            new_seg = SEG(
-                new_cropped_image,
-                seg.cropped_mask,
-                seg.confidence,
-                seg.crop_region,
-                seg.bbox,
-                seg.label,
-                None,
-            )
-
-            # Paste the enhanced segment back
-            if is_single_frame:
-                # Manual single-frame paste
-                if isinstance(new_cropped_image, np.ndarray):
-                    ref_image = torch.from_numpy(new_cropped_image)
-                else:
-                    ref_image = new_cropped_image
-
-                mask = seg.cropped_mask
-                if isinstance(mask, np.ndarray):
-                    mask = torch.from_numpy(mask)
-                if mask.ndim == 3:
-                    mask = mask[0]
-
-                mask = tensor_gaussian_blur_mask(mask, feather)
-
-                frame_to_modify = image_frames[seg_idx].unsqueeze(0).clone()
-
-                x, y, *_ = seg.crop_region
-                ref_image = ref_image.to(frame_to_modify.device)
-                mask = mask.to(frame_to_modify.device)
-                utils.tensor_paste(frame_to_modify, ref_image, (x, y), mask)
-
-                image_frames[seg_idx] = frame_to_modify[0]
-            else:
-                # Multi-frame - use SEGSPaste
-                enhanced_seg = (header, [new_seg])
-                image_frames = SEGSPaste.doit(
-                    image_frames, enhanced_seg, feather, alpha=255
-                )[0]
-
-            image_frames = dimension_hook.post_paste(image_frames)
-            enhanced_segs.append(new_seg)
-
-        # Collect all masks from enhanced segments
-        output_mask = None
-        for seg in enhanced_segs:
-            if seg.cropped_mask is not None:
-                if output_mask is None:
-                    output_mask = seg.cropped_mask
-                else:
-                    if isinstance(output_mask, torch.Tensor) and isinstance(
-                        seg.cropped_mask, torch.Tensor
-                    ):
-                        output_mask = torch.max(output_mask, seg.cropped_mask)
-
-        if output_mask is None:
-            output_mask = torch.zeros((img_height, img_width), dtype=torch.float32)
-
-        return (image_frames, output_mask)
+        return (output_frames, output_mask)
 
 
 class DivisibleDimensionHook:
@@ -442,7 +310,6 @@ class DivisibleDimensionHook:
         self.divisor = divisor
 
     def touch_scaled_size(self, width: int, height: int) -> tuple[int, int]:
-        """Round dimensions to nearest multiple of divisor."""
         adjusted_width = (width // self.divisor) * self.divisor
         adjusted_height = (height // self.divisor) * self.divisor
 
