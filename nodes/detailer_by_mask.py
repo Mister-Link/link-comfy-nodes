@@ -1,11 +1,18 @@
-"""SEGS-based detailer for AnimateDiff with NAG compatibility and 5D tensor handling."""
+"""SEGS-based detailer for video with dimension fixing, 5D tensor handling, and optional VACE temporal coherence."""
 
 from __future__ import annotations
 
 from typing import Any
 
+import impact.core as core
 import numpy as np
 import torch
+
+import comfy.latent_formats
+import comfy.model_management
+import comfy.samplers
+import comfy.utils
+import node_helpers
 
 
 class DetailerByMask:
@@ -17,6 +24,7 @@ class DetailerByMask:
     - NAG-compatible upscaling (maintains divisibility during upscale)
     - 5D tensor normalization (prevents dimension errors)
     - Custom paste logic that handles video frames
+    - Optional VACE integration for temporal coherence
 
     Use this instead of the standard DetailerForEachPipeForAnimateDiff when working
     with NAG-patched models to avoid autocast and dimension errors.
@@ -43,19 +51,27 @@ class DetailerByMask:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
-                "sampler_name": (["euler", "euler_a", "dpmpp_2m", "dpmpp_sde"],),
-                "scheduler": (["normal", "karras", "exponential", "sgm_uniform"],),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+                "scheduler": (core.get_schedulers(),),
                 "denoise": (
                     "FLOAT",
                     {"default": 0.5, "min": 0.0001, "max": 1.0, "step": 0.01},
                 ),
                 "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
+                "temporal_mode": (
+                    ["frame_by_frame", "batch_all_frames", "vace"],
+                    {"default": "frame_by_frame"},
+                ),
             },
             "optional": {
                 "noise_mask_feather": (
                     "INT",
                     {"default": 20, "min": 0, "max": 100, "step": 1},
+                ),
+                "vace_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.01},
                 ),
             },
         }
@@ -64,7 +80,7 @@ class DetailerByMask:
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
     CATEGORY = "link/Impact"
-    DESCRIPTION = "SEGS-based detailer for AnimateDiff with NAG compatibility, automatic crop fixing, and 5D tensor handling"
+    DESCRIPTION = "SEGS-based detailer for video with NAG compatibility, automatic crop fixing, 5D tensor handling, and optional VACE temporal coherence"
 
     @staticmethod
     def _fix_crop_region(
@@ -137,9 +153,11 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
+        temporal_mode="frame_by_frame",
         noise_mask_feather=0,
+        vace_strength=1.0,
     ):
-        """Process SEGS with full NAG compatibility and 5D tensor handling."""
+        """Process SEGS with dimension fixing, 5D tensor handling, and optional VACE temporal coherence."""
         try:
             from impact import utils
             from impact.animatediff_nodes import SEGSDetailerForAnimateDiff
@@ -148,6 +166,26 @@ class DetailerByMask:
         except ImportError:
             raise ImportError(
                 "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
+            )
+
+        # Route to VACE mode if selected
+        if temporal_mode == "vace":
+            return self._execute_vace_mode(
+                image_frames,
+                segs,
+                guide_size,
+                guide_size_for,
+                max_size,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                denoise,
+                feather,
+                basic_pipe,
+                noise_mask_feather,
+                vace_strength,
             )
 
         # Hardcoded NAG divisor
@@ -453,6 +491,278 @@ class DetailerByMask:
             output_mask = torch.zeros((img_height, img_width), dtype=torch.float32)
 
         return (image_frames, output_mask)
+
+    def _execute_vace_mode(
+        self,
+        image_frames,
+        segs,
+        guide_size,
+        guide_size_for,
+        max_size,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        denoise,
+        feather,
+        basic_pipe,
+        noise_mask_feather,
+        vace_strength,
+    ):
+        """
+        VACE mode: Process all frames together using VACE for temporal coherence.
+
+        Instead of processing frame-by-frame, this mode:
+        1. Crops the face region from all frames
+        2. Creates a combined mask from all SEGS
+        3. Uses VACE conditioning to process all frames together
+        4. Pastes the enhanced regions back
+
+        This provides temporal coherence because VACE processes all frames together.
+        """
+        try:
+            from impact import utils
+            from impact.core import SEG
+            from impact.utils import tensor_gaussian_blur_mask
+        except ImportError:
+            raise ImportError(
+                "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
+            )
+
+        nag_divisor = 64
+        img_height = image_frames.shape[1]
+        img_width = image_frames.shape[2]
+        num_frames = image_frames.shape[0]
+
+        print(
+            f"[Detailer by Mask VACE] Processing {num_frames} frames with VACE temporal coherence"
+        )
+
+        model, clip, vae, positive, negative = basic_pipe
+
+        # Process SEGS to fix crop regions
+        header, seg_list = segs
+
+        if len(seg_list) == 0:
+            print("[Detailer by Mask VACE] No segments to process")
+            output_mask = torch.zeros((img_height, img_width), dtype=torch.float32)
+            return (image_frames, output_mask)
+
+        # Find the unified bounding box across all segments
+        # This will be used to crop all frames to the same region
+        min_x1, min_y1 = float("inf"), float("inf")
+        max_x2, max_y2 = 0, 0
+
+        for seg in seg_list:
+            if seg.crop_region is not None:
+                x1, y1, x2, y2 = seg.crop_region
+                min_x1 = min(min_x1, x1)
+                min_y1 = min(min_y1, y1)
+                max_x2 = max(max_x2, x2)
+                max_y2 = max(max_y2, y2)
+
+        # Fix the unified crop region to be divisible by nag_divisor
+        unified_crop = self._fix_crop_region(
+            (int(min_x1), int(min_y1), int(max_x2), int(max_y2)),
+            img_width,
+            img_height,
+            nag_divisor,
+        )
+        x1, y1, x2, y2 = unified_crop
+        crop_width = x2 - x1
+        crop_height = y2 - y1
+
+        print(
+            f"[Detailer by Mask VACE] Unified crop region: {unified_crop} ({crop_width}x{crop_height})"
+        )
+
+        # Crop all frames to the unified region
+        cropped_frames = image_frames[:, y1:y2, x1:x2, :]
+        print(f"[Detailer by Mask VACE] Cropped frames shape: {cropped_frames.shape}")
+
+        # Build the combined mask for all frames
+        # Each segment corresponds to one frame
+        combined_mask = torch.zeros(
+            (num_frames, crop_height, crop_width), dtype=torch.float32
+        )
+
+        for seg_idx, seg in enumerate(seg_list):
+            if seg_idx >= num_frames:
+                break
+            if seg.cropped_mask is not None:
+                mask = seg.cropped_mask
+                if isinstance(mask, np.ndarray):
+                    mask = torch.from_numpy(mask)
+                if mask.ndim == 3:
+                    mask = mask[0]  # Take first slice if 3D
+
+                # The mask is for the segment's crop region, need to place it in unified crop
+                seg_x1, seg_y1, seg_x2, seg_y2 = seg.crop_region
+                # Offset within the unified crop
+                offset_x = seg_x1 - x1
+                offset_y = seg_y1 - y1
+                mask_h, mask_w = mask.shape
+
+                # Place mask in the combined mask at the right position
+                end_y = min(offset_y + mask_h, crop_height)
+                end_x = min(offset_x + mask_w, crop_width)
+                mask_end_y = end_y - offset_y
+                mask_end_x = end_x - offset_x
+
+                if offset_y >= 0 and offset_x >= 0:
+                    combined_mask[seg_idx, offset_y:end_y, offset_x:end_x] = mask[
+                        :mask_end_y, :mask_end_x
+                    ]
+            else:
+                # No mask for this segment - use full region
+                combined_mask[seg_idx] = 1.0
+
+        print(f"[Detailer by Mask VACE] Combined mask shape: {combined_mask.shape}")
+
+        # Apply VACE conditioning to process all frames together
+        # VACE encodes the control video and mask into the conditioning
+
+        # Get latent dimensions
+        latent_height = crop_height // 8
+        latent_width = crop_width // 8
+        latent_length = ((num_frames - 1) // 4) + 1
+
+        # Encode the cropped frames
+        control_video = cropped_frames.clone()
+
+        # Prepare control video for VACE (shift to 0.5-centered for inactive regions)
+        control_video_centered = control_video - 0.5
+
+        # Expand mask for broadcasting: [F, H, W] -> [F, H, W, 1]
+        mask_expanded = combined_mask.unsqueeze(-1)
+
+        # inactive = regions we want to preserve (mask = 0)
+        # reactive = regions we want to regenerate (mask = 1)
+        inactive = (control_video_centered * (1 - mask_expanded)) + 0.5
+        reactive = (control_video_centered * mask_expanded) + 0.5
+
+        # Encode both through VAE
+        inactive_latent = vae.encode(inactive[:, :, :, :3])
+        reactive_latent = vae.encode(reactive[:, :, :, :3])
+
+        # Concatenate for VACE format
+        control_video_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
+        print(
+            f"[Detailer by Mask VACE] Control video latent shape: {control_video_latent.shape}"
+        )
+
+        # Process mask for latent space
+        vae_stride = 8
+        mask_for_latent = combined_mask.unsqueeze(-1)  # [F, H, W, 1]
+        mask_for_latent = mask_for_latent.view(
+            num_frames, latent_height, vae_stride, latent_width, vae_stride
+        )
+        mask_for_latent = mask_for_latent.permute(2, 4, 0, 1, 3)
+        mask_for_latent = mask_for_latent.reshape(
+            vae_stride * vae_stride, num_frames, latent_height, latent_width
+        )
+        mask_for_latent = (
+            torch.nn.functional.interpolate(
+                mask_for_latent.unsqueeze(0),
+                size=(latent_length, latent_height, latent_width),
+                mode="nearest-exact",
+            )
+            .squeeze(0)
+            .unsqueeze(0)
+        )
+
+        # Apply VACE conditioning
+        vace_positive = node_helpers.conditioning_set_values(
+            positive,
+            {
+                "vace_frames": [control_video_latent],
+                "vace_mask": [mask_for_latent],
+                "vace_strength": [vace_strength],
+            },
+            append=True,
+        )
+        vace_negative = node_helpers.conditioning_set_values(
+            negative,
+            {
+                "vace_frames": [control_video_latent],
+                "vace_mask": [mask_for_latent],
+                "vace_strength": [vace_strength],
+            },
+            append=True,
+        )
+
+        # Create starting latent
+        latent = torch.zeros(
+            [1, 16, latent_length, latent_height, latent_width],
+            device=comfy.model_management.intermediate_device(),
+        )
+
+        # Sample with VACE conditioning
+        print(f"[Detailer by Mask VACE] Sampling with VACE conditioning...")
+
+        from nodes import common_ksampler
+
+        # Prepare latent dict
+        latent_dict = {"samples": latent}
+
+        # Use denoise to blend original with generated
+        samples = common_ksampler(
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            vace_positive,
+            vace_negative,
+            latent_dict,
+            denoise=denoise,
+        )[0]
+
+        # Decode the result
+        decoded = vae.decode(samples["samples"])
+        print(f"[Detailer by Mask VACE] Decoded shape: {decoded.shape}")
+
+        # The decoded tensor may have different frame count due to latent compression
+        # Interpolate back to original frame count if needed
+        if decoded.shape[0] != num_frames:
+            # Reshape for interpolation: [F, H, W, C] -> [1, C, F, H, W]
+            decoded_5d = decoded.permute(3, 0, 1, 2).unsqueeze(0)
+            decoded_5d = torch.nn.functional.interpolate(
+                decoded_5d,
+                size=(num_frames, crop_height, crop_width),
+                mode="trilinear",
+                align_corners=False,
+            )
+            decoded = decoded_5d.squeeze(0).permute(1, 2, 3, 0)
+            print(f"[Detailer by Mask VACE] Interpolated to {decoded.shape}")
+
+        # Paste the enhanced regions back
+        output_frames = image_frames.clone()
+
+        # Apply feathered mask for smooth blending
+        for frame_idx in range(num_frames):
+            frame_mask = combined_mask[frame_idx]
+            frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
+            frame_mask = frame_mask.unsqueeze(-1)  # [H, W, 1]
+
+            # Get the enhanced crop for this frame
+            enhanced_crop = decoded[frame_idx]
+            original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
+
+            # Blend based on mask
+            blended = original_crop * (1 - frame_mask) + enhanced_crop * frame_mask
+            output_frames[frame_idx, y1:y2, x1:x2, :] = blended
+
+        print(
+            f"[Detailer by Mask VACE] Done - processed {num_frames} frames with temporal coherence"
+        )
+
+        # Return combined mask
+        output_mask = combined_mask.max(dim=0)[0]  # Union of all frame masks
+
+        return (output_frames, output_mask)
 
 
 class DivisibleDimensionHook:
