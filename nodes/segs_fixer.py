@@ -292,61 +292,85 @@ class DetailerForEachPipeForAnimateDiffFixed:
         noise_mask_feather=0,
         scheduler_func_opt=None,
     ):
-        # Import the original node
+        """
+        Fixed implementation that processes each segment individually with 5D tensor support.
+        """
         try:
-            from impact.animatediff_nodes import DetailerForEachPipeForAnimateDiff
+            from impact.animatediff_nodes import SEGSDetailerForAnimateDiff
         except ImportError:
             raise ImportError(
-                "Could not import DetailerForEachPipeForAnimateDiff from Impact Pack. "
-                "Make sure ComfyUI-Impact-Pack is installed."
+                "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
             )
 
-        # Call the original node
-        result = DetailerForEachPipeForAnimateDiff.doit(
-            image_frames=image_frames,
-            segs=segs,
-            guide_size=guide_size,
-            guide_size_for=guide_size_for,
-            max_size=max_size,
-            seed=seed,
-            steps=steps,
-            cfg=cfg,
-            sampler_name=sampler_name,
-            scheduler=scheduler,
-            denoise=denoise,
-            feather=feather,
-            basic_pipe=basic_pipe,
-            refiner_ratio=refiner_ratio,
-            detailer_hook=detailer_hook,
-            refiner_basic_pipe_opt=refiner_basic_pipe_opt,
-            noise_mask_feather=noise_mask_feather,
-            scheduler_func_opt=scheduler_func_opt,
-        )
+        enhanced_segs = []
+        cnet_image_list = []
 
-        # Normalize the output SEGS
-        image_out, segs_out, basic_pipe_out, cnet_images = result
-        header, seg_list = segs_out
-        normalized_segs = []
+        for sub_seg in segs[1]:
+            single_seg = segs[0], [sub_seg]
 
-        for i, seg in enumerate(seg_list):
-            cropped_image = getattr(seg, "cropped_image", None)
+            # Call the detailer for this single segment
+            enhanced_seg, cnet_images = SEGSDetailerForAnimateDiff().do_detail(
+                image_frames,
+                single_seg,
+                guide_size,
+                guide_size_for,
+                max_size,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                denoise,
+                basic_pipe,
+                refiner_ratio,
+                refiner_basic_pipe_opt,
+                noise_mask_feather,
+                scheduler_func_opt=scheduler_func_opt,
+            )
 
-            if cropped_image is not None and isinstance(
-                cropped_image, (np.ndarray, torch.Tensor)
-            ):
-                original_shape = cropped_image.shape
-                normalized = _normalize_tensor_to_4d(cropped_image)
+            # Normalize the enhanced segment's cropped_image to 4D before pasting
+            header, seg_list = enhanced_seg
+            normalized_seg_list = []
 
-                if normalized.shape != original_shape:
-                    print(
-                        f"[DetailerFixed] Seg {i}: Normalized cropped_image from {original_shape} to {normalized.shape}"
+            for i, seg in enumerate(seg_list):
+                cropped_image = getattr(seg, "cropped_image", None)
+
+                if cropped_image is not None and isinstance(
+                    cropped_image, (np.ndarray, torch.Tensor)
+                ):
+                    original_shape = cropped_image.shape
+                    normalized = _normalize_tensor_to_4d(cropped_image)
+
+                    if normalized.shape != original_shape:
+                        print(
+                            f"[DetailerFixed] Seg {i}: Normalized from {original_shape} to {normalized.shape}"
+                        )
+
+                    normalized_seg_list.append(
+                        _replace_seg(seg, cropped_image=normalized)
                     )
+                else:
+                    normalized_seg_list.append(seg)
 
-                normalized_segs.append(_replace_seg(seg, cropped_image=normalized))
-            else:
-                normalized_segs.append(seg)
+            normalized_enhanced_seg = (header, normalized_seg_list)
 
-        return (image_out, (header, normalized_segs), basic_pipe_out, cnet_images)
+            # Use custom 5D-compatible paste
+            from .segs_paste_5d import SEGSPaste5D
+
+            image_frames = SEGSPaste5D().doit(
+                image_frames, normalized_enhanced_seg, feather, alpha=255
+            )[0]
+
+            if cnet_images is not None:
+                cnet_image_list.extend(cnet_images)
+
+            if detailer_hook is not None:
+                image_frames = detailer_hook.post_paste(image_frames)
+
+            enhanced_segs += normalized_seg_list
+
+        new_segs = segs[0], enhanced_segs
+        return (image_frames, new_segs, basic_pipe, cnet_image_list)
 
 
 __all__ = [

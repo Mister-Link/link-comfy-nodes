@@ -9,6 +9,7 @@ from .nodes import (
     BulkBackgroundRemoverBgEraserNode,
     ColorParserNode,
     CropToContentNode,
+    DetailerForAnimateDiffNAG,
     DetailerForEachPipeForAnimateDiffFixed,
     FarthestColorNode,
     FastImagePreviewNode,
@@ -67,6 +68,7 @@ NODE_CLASS_MAPPINGS = {
     "SEGS Fix Crop Region for NAG": SEGSFixCropRegionForNAGNode,
     "DetailerForEachPipe (AnimateDiff) Fixed": DetailerForEachPipeForAnimateDiffFixed,
     "NAG Compatible Detailer Hook": NAGCompatibleDetailerHook,
+    "DetailerForEachPipe (AnimateDiff) NAG": DetailerForAnimateDiffNAG,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
@@ -102,6 +104,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SEGS Fix Crop Region for NAG": "SEGS Fix Crop Region for NAG",
     "DetailerForEachPipe (AnimateDiff) Fixed": "DetailerForEachPipe (AnimateDiff) Fixed",
     "NAG Compatible Detailer Hook": "NAG Compatible Detailer Hook",
+    "DetailerForEachPipe (AnimateDiff) NAG": "DetailerForEachPipe (AnimateDiff) NAG",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }

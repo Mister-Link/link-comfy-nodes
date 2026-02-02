@@ -3,6 +3,7 @@
 from .auto_cropper import AutoCropperNode
 from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
+from .detailer_animatediff_nag import DetailerForAnimateDiffNAG
 from .fast_image_preview import FastImagePreviewNode
 from .image_nodes import (
     AddImageToBatchNode,
@@ -66,4 +67,5 @@ __all__ = [
     "SEGSFixCropRegionForNAGNode",
     "DetailerForEachPipeForAnimateDiffFixed",
     "NAGCompatibleDetailerHook",
+    "DetailerForAnimateDiffNAG",
 ]
