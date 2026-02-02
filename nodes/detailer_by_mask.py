@@ -390,12 +390,45 @@ class DetailerByMask:
                 seg.label,
                 None,
             )
-            enhanced_seg = (header, [new_seg])
 
-            # Paste the enhanced segment back onto the image
-            image_frames = SEGSPaste.doit(
-                image_frames, enhanced_seg, feather, alpha=255
-            )[0]
+            # Paste the enhanced segment back onto the SINGLE corresponding frame
+            # We can't use SEGSPaste because it tries to paste to all frames
+            if is_single_frame:
+                # Manual single-frame paste
+                from impact.utils import tensor_gaussian_blur_mask
+
+                # Get the enhanced image as tensor
+                if isinstance(new_cropped_image, np.ndarray):
+                    ref_image = torch.from_numpy(new_cropped_image)
+                else:
+                    ref_image = new_cropped_image
+
+                # Handle mask
+                mask = seg.cropped_mask
+                if isinstance(mask, np.ndarray):
+                    mask = torch.from_numpy(mask)
+                if mask.ndim == 3:
+                    mask = mask[0]  # Take first frame's mask
+
+                mask = tensor_gaussian_blur_mask(mask, feather)
+
+                # Get the single frame to modify
+                frame_to_modify = image_frames[seg_idx].unsqueeze(0).clone()
+
+                # Paste
+                x, y, *_ = seg.crop_region
+                ref_image = ref_image.to(frame_to_modify.device)
+                mask = mask.to(frame_to_modify.device)
+                utils.tensor_paste(frame_to_modify, ref_image, (x, y), mask)
+
+                # Put the modified frame back
+                image_frames[seg_idx] = frame_to_modify[0]
+            else:
+                # Multi-frame - use SEGSPaste
+                enhanced_seg = (header, [new_seg])
+                image_frames = SEGSPaste.doit(
+                    image_frames, enhanced_seg, feather, alpha=255
+                )[0]
 
             # Call hook's post_paste
             image_frames = dimension_hook.post_paste(image_frames)
