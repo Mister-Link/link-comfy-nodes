@@ -297,8 +297,37 @@ class DetailerByMask:
 
         for frame_idx in range(num_frames):
             # Get feathered mask for this frame
-            frame_mask = cropped_mask[frame_idx]
-            frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
+            frame_mask = cropped_mask[frame_idx].clone()
+
+            # Apply gaussian blur for feathering
+            # tensor_gaussian_blur_mask returns [N, H, W, C] format from 2D input
+            if feather > 0:
+                frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
+                # Extract back to [H, W] - it returns [1, H, W, 1]
+                if frame_mask.ndim == 4:
+                    frame_mask = frame_mask[0, :, :, 0]
+                elif frame_mask.ndim == 3:
+                    frame_mask = (
+                        frame_mask[:, :, 0]
+                        if frame_mask.shape[-1] == 1
+                        else frame_mask[0]
+                    )
+
+            # Ensure mask shape matches crop region (H, W)
+            if frame_mask.shape[0] != crop_height or frame_mask.shape[1] != crop_width:
+                print(
+                    f"[Detailer by Mask] WARNING: Mask shape {frame_mask.shape} doesn't match crop {crop_height}x{crop_width}, resizing"
+                )
+                frame_mask = (
+                    torch.nn.functional.interpolate(
+                        frame_mask.unsqueeze(0).unsqueeze(0),
+                        size=(crop_height, crop_width),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                )
 
             # Get enhanced crop for this frame
             if frame_idx < enhanced_tensor.shape[0]:
@@ -307,7 +336,7 @@ class DetailerByMask:
                 # Fallback if frame count mismatch
                 enhanced_crop = enhanced_tensor[-1]
 
-            # Blend
+            # Blend: mask is [H, W], expand to [H, W, 1] for broadcasting with [H, W, C]
             frame_mask_expanded = frame_mask.unsqueeze(-1).to(output_frames.device)
             enhanced_crop = enhanced_crop.to(output_frames.device)
             original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
