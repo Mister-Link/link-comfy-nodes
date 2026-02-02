@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import impact.core as core
 import numpy as np
 import torch
 
+import comfy.sample
 import comfy.samplers
+import comfy.utils
+import nodes
 
 
 class VideoDetailer:
@@ -18,7 +20,7 @@ class VideoDetailer:
     - If no mask provided, details the entire image
     - Fixes crop regions to be divisible by 64 (required for NAG)
     - Processes all frames together as a batch
-    - Handles 5D tensor normalization to prevent dimension errors
+    - Does not depend on Impact Pack for sampling
     """
 
     @classmethod
@@ -42,16 +44,19 @@ class VideoDetailer:
                 "steps": ("INT", {"default": 4, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "lcm"}),
-                "scheduler": (core.get_schedulers(), {"default": "simple"}),
+                "scheduler": (
+                    comfy.samplers.KSampler.SCHEDULERS,
+                    {"default": "simple"},
+                ),
                 "denoise": (
                     "FLOAT",
-                    {"default": 0.3, "min": 0.0001, "max": 1.0, "step": 0.01},
+                    {"default": 0.1, "min": 0.0001, "max": 1.0, "step": 0.01},
                 ),
                 "feather": ("INT", {"default": 10, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
             },
             "optional": {
-                "mask": ("MASK",),
+                "mask_opt": ("MASK",),
                 "noise_mask_feather": (
                     "INT",
                     {"default": 10, "min": 0, "max": 100, "step": 1},
@@ -62,10 +67,15 @@ class VideoDetailer:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
-    CATEGORY = "link/Impact"
+    CATEGORY = "link/video"
     DESCRIPTION = (
         "Video detailer with NAG compatibility - processes all frames as a batch"
     )
+
+    @staticmethod
+    def _fix_to_divisor(value: int, divisor: int) -> int:
+        """Round up to nearest multiple of divisor."""
+        return ((value + divisor - 1) // divisor) * divisor
 
     @staticmethod
     def _fix_crop_region(
@@ -128,7 +138,6 @@ class VideoDetailer:
         """Get bounding box from mask. Returns (x1, y1, x2, y2)."""
         # Handle batched masks - combine them
         if mask.ndim == 3:
-            # [B, H, W] - take max across batch to get union of all masks
             combined = mask.max(dim=0)[0]
         else:
             combined = mask
@@ -136,7 +145,6 @@ class VideoDetailer:
         # Find non-zero pixels
         nonzero = torch.nonzero(combined > 0.5)
         if len(nonzero) == 0:
-            # No mask content, return full image
             h, w = combined.shape
             return (0, 0, w, h)
 
@@ -149,6 +157,51 @@ class VideoDetailer:
         x2 = int(x_coords.max().item()) + 1
 
         return (x1, y1, x2, y2)
+
+    @staticmethod
+    def _gaussian_blur_mask(mask: torch.Tensor, kernel_size: int) -> torch.Tensor:
+        """Apply gaussian blur to mask for feathering."""
+        if kernel_size <= 0:
+            return mask
+
+        # Ensure odd kernel size
+        kernel_size = kernel_size * 2 + 1
+
+        # Check if mask is too small for kernel
+        if mask.shape[-1] <= kernel_size or mask.shape[-2] <= kernel_size:
+            kernel_size = min(mask.shape[-1], mask.shape[-2]) // 2
+            if kernel_size % 2 == 0:
+                kernel_size -= 1
+            if kernel_size < 3:
+                return mask
+
+        # Create gaussian kernel
+        sigma = kernel_size / 3.0
+        x = (
+            torch.arange(kernel_size, dtype=torch.float32, device=mask.device)
+            - kernel_size // 2
+        )
+        gauss = torch.exp(-(x**2) / (2 * sigma**2))
+        kernel_1d = gauss / gauss.sum()
+        kernel_2d = kernel_1d.unsqueeze(0) * kernel_1d.unsqueeze(1)
+        kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
+
+        # Apply blur
+        padding = kernel_size // 2
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0).unsqueeze(0)
+            blurred = torch.nn.functional.conv2d(mask, kernel_2d, padding=padding)
+            return blurred.squeeze(0).squeeze(0)
+        elif mask.ndim == 3:
+            # [B, H, W] -> blur each
+            result = []
+            for m in mask:
+                m = m.unsqueeze(0).unsqueeze(0)
+                blurred = torch.nn.functional.conv2d(m, kernel_2d, padding=padding)
+                result.append(blurred.squeeze(0).squeeze(0))
+            return torch.stack(result)
+        else:
+            return mask
 
     def execute(
         self,
@@ -164,91 +217,126 @@ class VideoDetailer:
         denoise,
         feather,
         basic_pipe,
-        mask=None,
+        mask_opt=None,
         noise_mask_feather=10,
     ):
-        """Process all frames as a batch using the mask."""
-        try:
-            from impact import utils
-            from impact.utils import tensor_gaussian_blur_mask
-        except ImportError:
-            raise ImportError(
-                "Could not import from Impact Pack. Make sure ComfyUI-Impact-Pack is installed."
-            )
+        """Process all frames as a batch."""
 
-        nag_divisor = 64
+        divisor = 64  # NAG divisor
         num_frames = image_frames.shape[0]
         img_height = image_frames.shape[1]
         img_width = image_frames.shape[2]
 
-        # If no mask provided, create a full mask (detail entire image)
-        if mask is None:
-            print(f"[Detailer by Mask] No mask provided, using full image")
+        # If no mask provided, create a full mask
+        if mask_opt is None:
+            print(f"[Video Detailer] No mask provided, using full image")
             mask = torch.ones((num_frames, img_height, img_width), dtype=torch.float32)
+        else:
+            mask = mask_opt
 
-        print(f"[Detailer by Mask] Processing {num_frames} frames as batch")
+        print(f"[Video Detailer] Processing {num_frames} frames as batch")
 
         # Handle mask dimensions
-        # mask can be [H, W], [B, H, W], or [F, H, W] where F = num_frames
         if mask.ndim == 2:
-            # Single mask for all frames
             mask = mask.unsqueeze(0).expand(num_frames, -1, -1)
         elif mask.ndim == 3 and mask.shape[0] != num_frames:
-            # Mask batch doesn't match frame count - use first or expand
             if mask.shape[0] == 1:
                 mask = mask.expand(num_frames, -1, -1)
             else:
-                # Take first mask and expand
                 mask = mask[0:1].expand(num_frames, -1, -1)
 
-        print(f"[Detailer by Mask] Mask shape: {mask.shape}")
+        print(f"[Video Detailer] Mask shape: {mask.shape}")
 
         # Get bounding box from combined mask
         bbox = self._get_mask_bbox(mask)
-        print(f"[Detailer by Mask] Mask bbox: {bbox}")
+        print(f"[Video Detailer] Mask bbox: {bbox}")
 
-        # Fix crop region for NAG divisibility
-        crop_region = self._fix_crop_region(bbox, img_width, img_height, nag_divisor)
+        # Fix crop region for divisibility
+        crop_region = self._fix_crop_region(bbox, img_width, img_height, divisor)
         x1, y1, x2, y2 = crop_region
         crop_width = x2 - x1
         crop_height = y2 - y1
         print(
-            f"[Detailer by Mask] Fixed crop region: {crop_region} ({crop_width}x{crop_height})"
+            f"[Video Detailer] Fixed crop region: {crop_region} ({crop_width}x{crop_height})"
         )
 
-        # Crop all frames
+        # Crop all frames and masks
         cropped_frames = image_frames[:, y1:y2, x1:x2, :]
-        print(f"[Detailer by Mask] Cropped frames shape: {cropped_frames.shape}")
-
-        # Crop mask to same region
         cropped_mask = mask[:, y1:y2, x1:x2]
-        print(f"[Detailer by Mask] Cropped mask shape: {cropped_mask.shape}")
+        print(f"[Video Detailer] Cropped frames shape: {cropped_frames.shape}")
 
-        # Convert to numpy for enhance_detail_for_animatediff
-        cropped_frames_np = cropped_frames.cpu().numpy()
+        # Calculate upscale factor
+        bbox_w = bbox[2] - bbox[0]
+        bbox_h = bbox[3] - bbox[1]
 
-        # Get single mask for the detailer (use first frame's mask or combined)
-        single_mask = cropped_mask[0].cpu().numpy()
+        if guide_size_for:  # bbox
+            upscale = guide_size / min(bbox_w, bbox_h)
+        else:  # crop_region
+            upscale = guide_size / min(crop_width, crop_height)
 
+        new_w = int(crop_width * upscale)
+        new_h = int(crop_height * upscale)
+
+        # Clamp to max_size
+        if new_w > max_size or new_h > max_size:
+            upscale *= max_size / max(new_w, new_h)
+            new_w = int(crop_width * upscale)
+            new_h = int(crop_height * upscale)
+
+        # Ensure minimum size and divisibility
+        if upscale <= 1.0 or new_w == 0 or new_h == 0:
+            upscale = 1.0
+            new_w = crop_width
+            new_h = crop_height
+
+        # Fix dimensions to be divisible
+        new_w = self._fix_to_divisor(new_w, divisor)
+        new_h = self._fix_to_divisor(new_h, divisor)
+
+        print(
+            f"[Video Detailer] Upscaling {crop_width}x{crop_height} -> {new_w}x{new_h}"
+        )
+
+        # Upscale frames: [F, H, W, C] -> [F, C, H, W] for interpolate
+        frames_nchw = cropped_frames.permute(0, 3, 1, 2)
+        upscaled_frames = torch.nn.functional.interpolate(
+            frames_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False
+        )
+        upscaled_frames = upscaled_frames.permute(0, 2, 3, 1)  # Back to [F, H, W, C]
+
+        # Upscale mask
+        upscaled_mask = torch.nn.functional.interpolate(
+            cropped_mask.unsqueeze(1),
+            size=(new_h, new_w),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1)
+
+        # Apply noise mask feathering
+        if noise_mask_feather > 0:
+            upscaled_mask = self._gaussian_blur_mask(upscaled_mask, noise_mask_feather)
+
+        # Get model components from basic_pipe
         model, clip, vae, positive, negative = basic_pipe
 
-        # Create dimension hook
-        dimension_hook = DivisibleDimensionHook(nag_divisor)
+        # VAE encode all frames as batch
+        print(f"[Video Detailer] VAE encoding {num_frames} frames...")
+        latent_frames = vae.encode(upscaled_frames[:, :, :, :3])
+        print(f"[Video Detailer] Latent shape: {latent_frames.shape}")
 
-        # Calculate bbox relative to crop region
-        relative_bbox = (0, 0, crop_width, crop_height)
+        # Prepare latent dict with noise mask
+        latent_dict = {
+            "samples": latent_frames,
+            "noise_mask": upscaled_mask.unsqueeze(1),  # [F, 1, H, W] for latent space
+        }
 
-        # Process all frames together
-        print(f"[Detailer by Mask] Running enhance_detail_for_animatediff...")
-        enhanced_tensor, cnet_images = core.enhance_detail_for_animatediff(
-            cropped_frames_np,
+        # Sample using ComfyUI's native ksampler
+        print(
+            f"[Video Detailer] Sampling with {sampler_name}/{scheduler}, {steps} steps, denoise={denoise}..."
+        )
+
+        samples = nodes.common_ksampler(
             model,
-            clip,
-            vae,
-            guide_size,
-            guide_size_for,
-            max_size,
-            relative_bbox,
             seed,
             steps,
             cfg,
@@ -256,95 +344,48 @@ class VideoDetailer:
             scheduler,
             positive,
             negative,
-            denoise,
-            single_mask,
-            refiner_ratio=None,
-            refiner_model=None,
-            refiner_clip=None,
-            refiner_positive=None,
-            refiner_negative=None,
-            control_net_wrapper=None,
-            noise_mask_feather=noise_mask_feather,
-            scheduler_func=None,
-            detailer_hook=dimension_hook,
+            latent_dict,
+            denoise=denoise,
+        )[0]
+
+        # VAE decode
+        print(f"[Video Detailer] VAE decoding...")
+        decoded_frames = vae.decode(samples["samples"])
+        print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
+
+        # Handle potential shape mismatches from VAE
+        if decoded_frames.ndim == 5:
+            # [B, F, H, W, C] -> [B*F, H, W, C]
+            b, f, h, w, c = decoded_frames.shape
+            decoded_frames = decoded_frames.reshape(b * f, h, w, c)
+
+        # Downscale back to original crop size
+        decoded_nchw = decoded_frames.permute(0, 3, 1, 2)
+        downscaled_frames = torch.nn.functional.interpolate(
+            decoded_nchw,
+            size=(crop_height, crop_width),
+            mode="bilinear",
+            align_corners=False,
         )
+        enhanced_frames = downscaled_frames.permute(0, 2, 3, 1)
+        print(f"[Video Detailer] Downscaled to: {enhanced_frames.shape}")
 
-        if enhanced_tensor is None:
-            print("[Detailer by Mask] No enhancement performed, returning original")
-            return (image_frames, mask[0])
-
-        # Handle 5D tensor output
-        if enhanced_tensor.ndim == 5:
-            b, f, h, w, c = enhanced_tensor.shape
-            enhanced_tensor = enhanced_tensor.reshape(b * f, h, w, c)
-            print(f"[Detailer by Mask] Reshaped from 5D to {enhanced_tensor.shape}")
-
-        print(f"[Detailer by Mask] Enhanced tensor shape: {enhanced_tensor.shape}")
-
-        # Check if enhanced tensor needs to be resized back to crop dimensions
-        enhanced_h = enhanced_tensor.shape[1]
-        enhanced_w = enhanced_tensor.shape[2]
-
-        if enhanced_h != crop_height or enhanced_w != crop_width:
-            print(
-                f"[Detailer by Mask] Resizing enhanced tensor from {enhanced_h}x{enhanced_w} to {crop_height}x{crop_width}"
-            )
-            # Resize: [F, H, W, C] -> [F, C, H, W] for interpolate, then back
-            enhanced_tensor = enhanced_tensor.permute(0, 3, 1, 2)
-            enhanced_tensor = torch.nn.functional.interpolate(
-                enhanced_tensor,
-                size=(crop_height, crop_width),
-                mode="bilinear",
-                align_corners=False,
-            )
-            enhanced_tensor = enhanced_tensor.permute(0, 2, 3, 1)
-            print(f"[Detailer by Mask] Resized to {enhanced_tensor.shape}")
-
-        # Paste enhanced regions back
+        # Paste enhanced regions back with feathered blending
         output_frames = image_frames.clone()
 
         for frame_idx in range(num_frames):
-            # Get feathered mask for this frame
+            # Get feathered mask for blending
             frame_mask = cropped_mask[frame_idx].clone()
-
-            # Apply gaussian blur for feathering
-            # tensor_gaussian_blur_mask returns [N, H, W, C] format from 2D input
             if feather > 0:
-                frame_mask = tensor_gaussian_blur_mask(frame_mask, feather)
-                # Extract back to [H, W] - it returns [1, H, W, 1]
-                if frame_mask.ndim == 4:
-                    frame_mask = frame_mask[0, :, :, 0]
-                elif frame_mask.ndim == 3:
-                    frame_mask = (
-                        frame_mask[:, :, 0]
-                        if frame_mask.shape[-1] == 1
-                        else frame_mask[0]
-                    )
-
-            # Ensure mask shape matches crop region (H, W)
-            if frame_mask.shape[0] != crop_height or frame_mask.shape[1] != crop_width:
-                print(
-                    f"[Detailer by Mask] WARNING: Mask shape {frame_mask.shape} doesn't match crop {crop_height}x{crop_width}, resizing"
-                )
-                frame_mask = (
-                    torch.nn.functional.interpolate(
-                        frame_mask.unsqueeze(0).unsqueeze(0),
-                        size=(crop_height, crop_width),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    .squeeze(0)
-                    .squeeze(0)
-                )
+                frame_mask = self._gaussian_blur_mask(frame_mask, feather)
 
             # Get enhanced crop for this frame
-            if frame_idx < enhanced_tensor.shape[0]:
-                enhanced_crop = enhanced_tensor[frame_idx]
+            if frame_idx < enhanced_frames.shape[0]:
+                enhanced_crop = enhanced_frames[frame_idx]
             else:
-                # Fallback if frame count mismatch
-                enhanced_crop = enhanced_tensor[-1]
+                enhanced_crop = enhanced_frames[-1]
 
-            # Blend: mask is [H, W], expand to [H, W, 1] for broadcasting with [H, W, C]
+            # Blend
             frame_mask_expanded = frame_mask.unsqueeze(-1).to(output_frames.device)
             enhanced_crop = enhanced_crop.to(output_frames.device)
             original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
@@ -355,97 +396,11 @@ class VideoDetailer:
             )
             output_frames[frame_idx, y1:y2, x1:x2, :] = blended
 
-        print(f"[Detailer by Mask] Done - processed {num_frames} frames")
+        print(f"[Video Detailer] Done - processed {num_frames} frames")
 
-        # Return the original mask (first frame or combined)
+        # Return output
         output_mask = mask[0] if mask.ndim == 3 else mask
-
         return (output_frames, output_mask)
-
-
-class DivisibleDimensionHook:
-    """Ensures dimensions are divisible by a given value (e.g., 64 for NAG models)."""
-
-    def __init__(self, divisor: int = 64):
-        self.divisor = divisor
-
-    def touch_scaled_size(self, width: int, height: int) -> tuple[int, int]:
-        adjusted_width = (width // self.divisor) * self.divisor
-        adjusted_height = (height // self.divisor) * self.divisor
-
-        if adjusted_width < self.divisor:
-            adjusted_width = self.divisor
-        if adjusted_height < self.divisor:
-            adjusted_height = self.divisor
-
-        if adjusted_width != width or adjusted_height != height:
-            print(
-                f"[DivisibleDimensionHook] Adjusted from ({width}, {height}) to ({adjusted_width}, {adjusted_height})"
-            )
-
-        return adjusted_width, adjusted_height
-
-    def get_custom_sampler(self):
-        return None
-
-    def post_encode(self, latent):
-        return latent
-
-    def pre_decode(self, latent):
-        return latent
-
-    def post_decode(self, image):
-        return image
-
-    def post_paste(self, image):
-        return image
-
-    def post_upscale(self, image, mask):
-        return image
-
-    def get_skip_sampling(self):
-        return False
-
-    def set_steps(self, info):
-        pass
-
-    def cycle_latent(self, latent):
-        return latent
-
-    def pre_ksample(
-        self,
-        model,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        positive,
-        negative,
-        latent,
-        denoise,
-    ):
-        return (
-            model,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            positive,
-            negative,
-            latent,
-            denoise,
-        )
-
-    def get_custom_noise(self, seed, noise, is_touched=False):
-        return None, False
-
-    def post_detection(self, segs):
-        return segs
-
-    def post_crop_region(self, w, h, bbox, crop_region):
-        return crop_region
 
 
 __all__ = ["VideoDetailer"]
