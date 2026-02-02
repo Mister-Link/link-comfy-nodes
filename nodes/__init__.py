@@ -3,7 +3,7 @@
 from .auto_cropper import AutoCropperNode
 from .bgeraser_nodes import BulkBackgroundRemoverBgEraserNode
 from .color_nodes import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
-from .detailer_animatediff_nag import DetailerForAnimateDiffNAG
+from .detailer_by_mask import DetailerByMask
 from .fast_image_preview import FastImagePreviewNode
 from .image_nodes import (
     AddImageToBatchNode,
@@ -14,14 +14,8 @@ from .image_nodes import (
     ResizeImageAndMaskBySideNode,
     SpritesheetBuilderNode,
 )
-from .nag_detailer_hook import NAGCompatibleDetailerHook
 from .native_wan import NativeWanPoseStrength
 from .pixel_art.node import ConvertToPixelArt
-from .segs_fixer import (
-    DetailerForEachPipeForAnimateDiffFixed,
-    SEGSFixCropRegionForNAGNode,
-    SEGSFixDimensionsNode,
-)
 from .spritesheet_preview import SpritesheetPreviewNode
 from .stabilizer_trim import StabilizerTrimNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
@@ -63,9 +57,5 @@ __all__ = [
     "NativeWanPoseStrength",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
-    "SEGSFixDimensionsNode",
-    "SEGSFixCropRegionForNAGNode",
-    "DetailerForEachPipeForAnimateDiffFixed",
-    "NAGCompatibleDetailerHook",
-    "DetailerForAnimateDiffNAG",
+    "DetailerByMask",
 ]
