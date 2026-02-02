@@ -14,6 +14,7 @@ from .nodes import (
     FastImagePreviewNode,
     ImageRotatorNode,
     MatchColorPaletteNode,
+    NAGCompatibleDetailerHook,
     NativeWanPoseStrength,
     PixelationDimensionsNode,
     PoseImageSetupNode,
@@ -65,6 +66,7 @@ NODE_CLASS_MAPPINGS = {
     "SEGS Fix Dimensions": SEGSFixDimensionsNode,
     "SEGS Fix Crop Region for NAG": SEGSFixCropRegionForNAGNode,
     "DetailerForEachPipe (AnimateDiff) Fixed": DetailerForEachPipeForAnimateDiffFixed,
+    "NAG Compatible Detailer Hook": NAGCompatibleDetailerHook,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
@@ -99,6 +101,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SEGS Fix Dimensions": "SEGS Fix Dimensions",
     "SEGS Fix Crop Region for NAG": "SEGS Fix Crop Region for NAG",
     "DetailerForEachPipe (AnimateDiff) Fixed": "DetailerForEachPipe (AnimateDiff) Fixed",
+    "NAG Compatible Detailer Hook": "NAG Compatible Detailer Hook",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }

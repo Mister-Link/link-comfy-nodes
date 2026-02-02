@@ -13,6 +13,7 @@ from .image_nodes import (
     ResizeImageAndMaskBySideNode,
     SpritesheetBuilderNode,
 )
+from .nag_detailer_hook import NAGCompatibleDetailerHook
 from .native_wan import NativeWanPoseStrength
 from .pixel_art.node import ConvertToPixelArt
 from .segs_fixer import (
@@ -64,4 +65,5 @@ __all__ = [
     "SEGSFixDimensionsNode",
     "SEGSFixCropRegionForNAGNode",
     "DetailerForEachPipeForAnimateDiffFixed",
+    "NAGCompatibleDetailerHook",
 ]
