@@ -16,6 +16,7 @@ from .image_nodes import (
 )
 from .native_wan import NativeWanPoseStrength
 from .pixel_art.node import ConvertToPixelArt
+from .sam3_wrapper import SAM3VideoSegmentationFixed
 from .spritesheet_preview import SpritesheetPreviewNode
 from .stabilizer_trim import StabilizerTrimNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
@@ -58,4 +59,5 @@ __all__ = [
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
     "VideoDetailer",
+    "SAM3VideoSegmentationFixed",
 ]
