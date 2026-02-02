@@ -51,7 +51,6 @@ class DetailerByMask:
                 ),
                 "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
                 "basic_pipe": ("BASIC_PIPE",),
-                "refiner_ratio": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
             },
             "optional": {
                 "noise_mask_feather": (
@@ -138,7 +137,6 @@ class DetailerByMask:
         denoise,
         feather,
         basic_pipe,
-        refiner_ratio,
         noise_mask_feather=0,
     ):
         """Process SEGS with full NAG compatibility and 5D tensor handling."""
@@ -214,25 +212,27 @@ class DetailerByMask:
 
         for sub_seg in fixed_seg_list:
             seg = sub_seg
-            cropped_image_frames = None
 
-            # Crop frames for this segment
-            for image in image_frames:
-                image = image.unsqueeze(0)
-                cropped_image = (
-                    seg.cropped_image
-                    if seg.cropped_image is not None
-                    else utils.crop_tensor4(image, seg.crop_region)
-                )
-                cropped_image = utils.to_tensor(cropped_image)
-                if cropped_image_frames is None:
-                    cropped_image_frames = cropped_image
-                else:
-                    cropped_image_frames = torch.concat(
-                        (cropped_image_frames, cropped_image), dim=0
-                    )
-
-            cropped_image_frames = cropped_image_frames.cpu().numpy()
+            # Use the segment's pre-cropped image if available, otherwise crop from source
+            if seg.cropped_image is not None:
+                # Segment already has cropped image (e.g., from Mask to SEGS)
+                cropped_image_frames = utils.to_tensor(seg.cropped_image)
+                if isinstance(cropped_image_frames, torch.Tensor):
+                    cropped_image_frames = cropped_image_frames.cpu().numpy()
+            else:
+                # Need to crop from the full image_frames
+                cropped_image_frames = None
+                for image in image_frames:
+                    image = image.unsqueeze(0)
+                    cropped_image = utils.crop_tensor4(image, seg.crop_region)
+                    cropped_image = utils.to_tensor(cropped_image)
+                    if cropped_image_frames is None:
+                        cropped_image_frames = cropped_image
+                    else:
+                        cropped_image_frames = torch.concat(
+                            (cropped_image_frames, cropped_image), dim=0
+                        )
+                cropped_image_frames = cropped_image_frames.cpu().numpy()
 
             # Crop conditioning
             from impact import core
@@ -289,7 +289,7 @@ class DetailerByMask:
                         cropped_negative,
                         denoise,
                         seg.cropped_mask,
-                        refiner_ratio=refiner_ratio,
+                        refiner_ratio=None,
                         refiner_model=None,
                         refiner_clip=None,
                         refiner_positive=None,
