@@ -312,6 +312,17 @@ class DetailerByMask:
             if enhanced_image_tensor is None:
                 new_cropped_image = cropped_image_frames
             else:
+                # Normalize to 4D if needed BEFORE converting to numpy
+                if enhanced_image_tensor.ndim == 5:
+                    # Flatten batch and frames dimensions: [B, F, H, W, C] -> [B*F, H, W, C]
+                    b, f, h, w, c = enhanced_image_tensor.shape
+                    enhanced_image_tensor = enhanced_image_tensor.reshape(
+                        b * f, h, w, c
+                    )
+                    print(
+                        f"[NAG Detailer] Normalized enhanced tensor from 5D {(b, f, h, w, c)} to 4D {enhanced_image_tensor.shape}"
+                    )
+
                 new_cropped_image = enhanced_image_tensor.cpu().numpy()
 
             new_seg = SEG(
