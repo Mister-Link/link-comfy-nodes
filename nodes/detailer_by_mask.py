@@ -54,7 +54,6 @@ class DetailerByMask:
                 "refiner_ratio": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
             },
             "optional": {
-                "refiner_basic_pipe_opt": ("BASIC_PIPE",),
                 "noise_mask_feather": (
                     "INT",
                     {"default": 20, "min": 0, "max": 100, "step": 1},
@@ -84,38 +83,43 @@ class DetailerByMask:
         width = x2 - x1
         height = y2 - y1
 
-        # Round down to nearest multiple of divisor
-        width = (width // divisor) * divisor
-        height = (height // divisor) * divisor
+        # Round UP to nearest multiple of divisor to avoid shrinking mask region
+        width = ((width + divisor - 1) // divisor) * divisor
+        height = ((height + divisor - 1) // divisor) * divisor
 
-        # Ensure minimum size
-        if width < divisor:
-            width = divisor
-        if height < divisor:
-            height = divisor
+        # Recalculate x2, y2 from center to expand evenly
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
 
-        # Recalculate x2, y2
+        x1 = center_x - width // 2
         x2 = x1 + width
+        y1 = center_y - height // 2
         y2 = y1 + height
 
-        # Handle overflow
+        # Handle overflow by shifting
         if x2 > img_width:
-            overflow = x2 - img_width
-            x1 = max(0, x1 - overflow)
-            x2 = x1 + width
-            if x2 > img_width:
-                width = img_width - x1
-                width = (width // divisor) * divisor
-                x2 = x1 + width
+            shift = x2 - img_width
+            x1 -= shift
+            x2 -= shift
+        if x1 < 0:
+            shift = -x1
+            x1 += shift
+            x2 += shift
 
         if y2 > img_height:
-            overflow = y2 - img_height
-            y1 = max(0, y1 - overflow)
-            y2 = y1 + height
-            if y2 > img_height:
-                height = img_height - y1
-                height = (height // divisor) * divisor
-                y2 = y1 + height
+            shift = y2 - img_height
+            y1 -= shift
+            y2 -= shift
+        if y1 < 0:
+            shift = -y1
+            y1 += shift
+            y2 += shift
+
+        # Final clamp
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(img_width, x2)
+        y2 = min(img_height, y2)
 
         return (x1, y1, x2, y2)
 
@@ -178,7 +182,6 @@ class DetailerByMask:
         feather,
         basic_pipe,
         refiner_ratio,
-        refiner_basic_pipe_opt=None,
         noise_mask_feather=0,
     ):
         """Process mask with full NAG compatibility and 5D tensor handling."""
@@ -200,8 +203,20 @@ class DetailerByMask:
         img_width = image_frames.shape[2]
 
         # Convert mask to SEGS
+        # Ensure mask is correct shape - should be [H, W] or [1, H, W]
         if mask.dim() == 2:
-            mask = mask.unsqueeze(0)
+            mask = mask.unsqueeze(0)  # [H, W] -> [1, H, W]
+
+        # Ensure mask matches image dimensions
+        if mask.shape[-2:] != (img_height, img_width):
+            import torch.nn.functional as F
+
+            mask = F.interpolate(
+                mask.unsqueeze(0),
+                size=(img_height, img_width),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
 
         # Get mask bounding box
         mask_np = mask[0].cpu().numpy()
@@ -210,13 +225,18 @@ class DetailerByMask:
 
         if not rows.any() or not cols.any():
             # Empty mask, return original image with mask
+            print("[Detailer by Mask] Empty mask - no regions to detail")
             return (image_frames, mask)
 
         y1, y2 = np.where(rows)[0][[0, -1]]
         x1, x2 = np.where(cols)[0][[0, -1]]
 
-        bbox = (x1, y1, x2 + 1, y2 + 1)
+        bbox = (int(x1), int(y1), int(x2) + 1, int(y2) + 1)
         crop_region = bbox
+
+        print(
+            f"[Detailer by Mask] Mask bbox: {bbox}, mask shape: {mask.shape}, image shape: {image_frames.shape}"
+        )
 
         # Create a single SEG from the mask
         seg = SEG(
@@ -283,18 +303,6 @@ class DetailerByMask:
             from impact import core
 
             model, clip, vae, positive, negative = basic_pipe
-            if refiner_basic_pipe_opt is None:
-                refiner_model, refiner_clip, refiner_positive, refiner_negative = (
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            else:
-                refiner_model, refiner_clip, _, refiner_positive, refiner_negative = (
-                    refiner_basic_pipe_opt
-                )
-
             seg = sub_seg
             cropped_image_frames = None
 
@@ -363,10 +371,10 @@ class DetailerByMask:
                         denoise,
                         seg.cropped_mask,
                         refiner_ratio=refiner_ratio,
-                        refiner_model=refiner_model,
-                        refiner_clip=refiner_clip,
-                        refiner_positive=refiner_positive,
-                        refiner_negative=refiner_negative,
+                        refiner_model=None,
+                        refiner_clip=None,
+                        refiner_positive=None,
+                        refiner_negative=None,
                         control_net_wrapper=seg.control_net_wrapper
                         if hasattr(seg, "control_net_wrapper")
                         else None,
