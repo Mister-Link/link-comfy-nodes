@@ -214,4 +214,143 @@ class SEGSFixCropRegionForNAGNode:
         return ((header, new_segs),)
 
 
-__all__ = ["SEGSFixDimensionsNode", "SEGSFixCropRegionForNAGNode"]
+class DetailerForEachPipeForAnimateDiffFixed:
+    """
+    Wrapper around DetailerForEachPipeForAnimateDiff that ensures output SEGS are normalized to 4D.
+
+    This fixes the "Expected NHWC tensor, but found 5 dimensions" error that can occur
+    when using DetailerForEachPipeForAnimateDiff with certain models and configurations.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_frames": ("IMAGE",),
+                "segs": ("SEGS",),
+                "guide_size": (
+                    "FLOAT",
+                    {"default": 512, "min": 64, "max": 8192, "step": 8},
+                ),
+                "guide_size_for": (
+                    "BOOLEAN",
+                    {"default": True, "label_on": "bbox", "label_off": "crop_region"},
+                ),
+                "max_size": (
+                    "FLOAT",
+                    {"default": 1024, "min": 64, "max": 8192, "step": 8},
+                ),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
+                "sampler_name": (["euler", "euler_a", "dpmpp_2m", "dpmpp_sde"],),
+                "scheduler": (["normal", "karras", "exponential", "sgm_uniform"],),
+                "denoise": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.0001, "max": 1.0, "step": 0.01},
+                ),
+                "feather": ("INT", {"default": 5, "min": 0, "max": 100, "step": 1}),
+                "basic_pipe": ("BASIC_PIPE",),
+                "refiner_ratio": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
+            },
+            "optional": {
+                "detailer_hook": ("DETAILER_HOOK",),
+                "refiner_basic_pipe_opt": ("BASIC_PIPE",),
+                "noise_mask_feather": (
+                    "INT",
+                    {"default": 20, "min": 0, "max": 100, "step": 1},
+                ),
+                "scheduler_func_opt": ("SCHEDULER_FUNC",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "SEGS", "BASIC_PIPE", "IMAGE")
+    RETURN_NAMES = ("image", "segs", "basic_pipe", "cnet_images")
+    OUTPUT_IS_LIST = (False, False, False, True)
+    FUNCTION = "execute"
+    CATEGORY = "link/Impact"
+    DESCRIPTION = "Fixed version of DetailerForEachPipeForAnimateDiff that normalizes SEGS to prevent 5D tensor errors"
+
+    def execute(
+        self,
+        image_frames,
+        segs,
+        guide_size,
+        guide_size_for,
+        max_size,
+        seed,
+        steps,
+        cfg,
+        sampler_name,
+        scheduler,
+        denoise,
+        feather,
+        basic_pipe,
+        refiner_ratio=None,
+        detailer_hook=None,
+        refiner_basic_pipe_opt=None,
+        noise_mask_feather=0,
+        scheduler_func_opt=None,
+    ):
+        # Import the original node
+        try:
+            from impact.animatediff_nodes import DetailerForEachPipeForAnimateDiff
+        except ImportError:
+            raise ImportError(
+                "Could not import DetailerForEachPipeForAnimateDiff from Impact Pack. "
+                "Make sure ComfyUI-Impact-Pack is installed."
+            )
+
+        # Call the original node
+        result = DetailerForEachPipeForAnimateDiff.doit(
+            image_frames=image_frames,
+            segs=segs,
+            guide_size=guide_size,
+            guide_size_for=guide_size_for,
+            max_size=max_size,
+            seed=seed,
+            steps=steps,
+            cfg=cfg,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            denoise=denoise,
+            feather=feather,
+            basic_pipe=basic_pipe,
+            refiner_ratio=refiner_ratio,
+            detailer_hook=detailer_hook,
+            refiner_basic_pipe_opt=refiner_basic_pipe_opt,
+            noise_mask_feather=noise_mask_feather,
+            scheduler_func_opt=scheduler_func_opt,
+        )
+
+        # Normalize the output SEGS
+        image_out, segs_out, basic_pipe_out, cnet_images = result
+        header, seg_list = segs_out
+        normalized_segs = []
+
+        for i, seg in enumerate(seg_list):
+            cropped_image = getattr(seg, "cropped_image", None)
+
+            if cropped_image is not None and isinstance(
+                cropped_image, (np.ndarray, torch.Tensor)
+            ):
+                original_shape = cropped_image.shape
+                normalized = _normalize_tensor_to_4d(cropped_image)
+
+                if normalized.shape != original_shape:
+                    print(
+                        f"[DetailerFixed] Seg {i}: Normalized cropped_image from {original_shape} to {normalized.shape}"
+                    )
+
+                normalized_segs.append(_replace_seg(seg, cropped_image=normalized))
+            else:
+                normalized_segs.append(seg)
+
+        return (image_out, (header, normalized_segs), basic_pipe_out, cnet_images)
+
+
+__all__ = [
+    "SEGSFixDimensionsNode",
+    "SEGSFixCropRegionForNAGNode",
+    "DetailerForEachPipeForAnimateDiffFixed",
+]

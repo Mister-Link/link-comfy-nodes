@@ -9,6 +9,7 @@ from .nodes import (
     BulkBackgroundRemoverBgEraserNode,
     ColorParserNode,
     CropToContentNode,
+    DetailerForEachPipeForAnimateDiffFixed,
     FarthestColorNode,
     FastImagePreviewNode,
     ImageRotatorNode,
@@ -63,6 +64,7 @@ NODE_CLASS_MAPPINGS = {
     "Stabilizer Trim": StabilizerTrimNode,
     "SEGS Fix Dimensions": SEGSFixDimensionsNode,
     "SEGS Fix Crop Region for NAG": SEGSFixCropRegionForNAGNode,
+    "DetailerForEachPipe (AnimateDiff) Fixed": DetailerForEachPipeForAnimateDiffFixed,
     "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
@@ -96,6 +98,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Stabilizer Trim": "Stabilizer Trim",
     "SEGS Fix Dimensions": "SEGS Fix Dimensions",
     "SEGS Fix Crop Region for NAG": "SEGS Fix Crop Region for NAG",
+    "DetailerForEachPipe (AnimateDiff) Fixed": "DetailerForEachPipe (AnimateDiff) Fixed",
     "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }
