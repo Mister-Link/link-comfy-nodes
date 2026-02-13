@@ -18,6 +18,7 @@ from .nodes import (
     PoseImageSetupNode,
     PreviewAsMarkdown,
     PreviewImageAlpha,
+    PreviewWebmNode,
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
     SaveFolderAsZip,
@@ -31,7 +32,6 @@ from .nodes import (
     WANFramesToAddAndCut,
 )
 from .nodes.pixel_art.node import ConvertToPixelArt
-from .nodes.simple_video_preview import PreviewAnimation
 
 NODE_CLASS_MAPPINGS = {
     "Add Image to Batch": AddImageToBatchNode,
@@ -61,8 +61,8 @@ NODE_CLASS_MAPPINGS = {
     "Fast Image Preview": FastImagePreviewNode,
     "Stabilizer Trim": StabilizerTrimNode,
     "Video Detailer": VideoDetailer,
-    "PreviewAnimation": PreviewAnimation,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
+    "Preview (webm)": PreviewWebmNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -93,8 +93,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Fast Image Preview": "Fast Image Preview",
     "Stabilizer Trim": "Stabilizer Trim",
     "Video Detailer": "Video Detailer",
-    "PreviewAnimation": "Preview Animation",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
+    "Preview (webm)": "Preview (webm)",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

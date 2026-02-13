@@ -28,6 +28,7 @@ from .video_nodes import (
     WANFrameCalculatorNode,
 )
 from .wan_frame_adjuster import WANFramesToAddAndCut
+from .webm_preview import PreviewWebmNode
 
 __all__ = [
     "AddImageToBatchNode",
@@ -58,4 +59,5 @@ __all__ = [
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
     "VideoDetailer",
+    "PreviewWebmNode",
 ]
