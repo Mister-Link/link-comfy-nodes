@@ -63,7 +63,7 @@ class PreviewAnimation:
             return {"ui": {"gifs": []}}
 
         # Create workflow assets output directory
-        assets_subfolder = "workflow_assets"
+        assets_subfolder = "preview_animation"
         output_dir = os.path.join(folder_paths.get_output_directory(), assets_subfolder)
         os.makedirs(output_dir, exist_ok=True)
 
