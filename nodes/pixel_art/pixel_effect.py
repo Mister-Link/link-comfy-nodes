@@ -187,8 +187,33 @@ class PixelEffectModule(nn.Module):
             bias=None,
         )[0, 0, :, :]
 
-        # Select the dominant intensity bin
-        alpha_max, alpha_argmax = torch.max(alpha_conv, dim=0)
+        # Select the dominant intensity bin.
+        # Instead of raw argmax (which lets a small bright cluster "steal" the
+        # result from a larger but spread-out region), normalise each bin's
+        # accumulated alpha by the number of bins so that a minority of
+        # high-intensity pixels cannot outweigh a majority that happens to be
+        # distributed across several adjacent bins.
+        #
+        # We do this by computing a smoothed version of alpha_conv where each
+        # bin's score is averaged with its immediate neighbors (triangular
+        # window of width 3).  This merges adjacent orange-hair bins so their
+        # combined weight beats the isolated white bin.
+        alpha_conv_permuted_for_smooth = torch.permute(alpha_conv, dims=[1, 2, 0])
+        # alpha_conv_permuted_for_smooth: [H, W, num_bins]
+        # Pad the bin dimension with edge replication
+        alpha_smooth = alpha_conv_permuted_for_smooth.clone()
+        alpha_smooth[:, :, 1:-1] = (
+            alpha_conv_permuted_for_smooth[:, :, 0:-2] * 0.25
+            + alpha_conv_permuted_for_smooth[:, :, 1:-1] * 0.50
+            + alpha_conv_permuted_for_smooth[:, :, 2:] * 0.25
+        )
+        alpha_smooth = torch.permute(alpha_smooth, dims=[2, 0, 1])
+        _, alpha_argmax = torch.max(alpha_smooth, dim=0)
+        # Use raw alpha_conv values (not smoothed) for the dominant bin's weight,
+        # so that the dominance ratio stays comparable with alpha_total_conv.
+        alpha_max = self.select_by_idx(
+            torch.permute(alpha_conv, dims=[1, 2, 0]), alpha_argmax
+        )
         alpha_coverage_conv_permuted = torch.permute(
             alpha_coverage_conv, dims=[1, 2, 0]
         )
