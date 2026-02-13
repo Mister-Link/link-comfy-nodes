@@ -121,12 +121,10 @@ class ConvertToPixelArt:
             dominance_threshold = 0.62 + (0.20 * guard)
             outlier_filter = True
             outlier_color_delta_threshold = 90.0 - (34.0 * guard)
-            outlier_neighbor_std_threshold = 26.0 + (16.0 * guard)
         else:
             dominance_threshold = 0.0
             outlier_filter = False
             outlier_color_delta_threshold = 72.0
-            outlier_neighbor_std_threshold = 32.0
 
         with torch.no_grad():
             for idx in range(images.shape[0]):
@@ -143,7 +141,6 @@ class ConvertToPixelArt:
                     dominance_threshold=dominance_threshold,
                     outlier_filter=outlier_filter,
                     outlier_color_delta_threshold=outlier_color_delta_threshold,
-                    outlier_neighbor_std_threshold=outlier_neighbor_std_threshold,
                 )
 
                 result_rgb = (

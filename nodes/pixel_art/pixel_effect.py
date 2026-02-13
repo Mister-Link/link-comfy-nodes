@@ -37,7 +37,6 @@ class PixelEffectModule(nn.Module):
         dominance_threshold=0.72,
         outlier_filter=True,
         outlier_color_delta_threshold=72.0,
-        outlier_neighbor_std_threshold=32.0,
     ):
         """
         Process RGB with alpha channel awareness.
@@ -281,19 +280,6 @@ class PixelEffectModule(nn.Module):
             )
             neighbor_mean = neighbor_color_sum / (neighbor_alpha + epsilon)
 
-            neighbor_color_sq_sum = F.conv2d(
-                (color_lowres * color_lowres) * alpha_block,
-                neighbor_kernel_rgb,
-                padding=1,
-                groups=3,
-            )
-            neighbor_var = torch.clamp(
-                neighbor_color_sq_sum / (neighbor_alpha + epsilon)
-                - neighbor_mean * neighbor_mean,
-                min=0.0,
-            )
-            neighbor_std = torch.sqrt(neighbor_var.sum(dim=1, keepdim=True))
-
             color_delta = torch.sqrt(
                 ((color_lowres - neighbor_mean) * (color_lowres - neighbor_mean)).sum(
                     dim=1, keepdim=True
@@ -301,11 +287,19 @@ class PixelEffectModule(nn.Module):
             )
 
             # Count similar opaque neighbors so only isolated outliers get replaced.
+            # Also track the most popular neighbor color (the one with the most
+            # look-alike neighbors), so we replace with an actual palette color
+            # rather than a blended mean.
             _, _, h_low, w_low = color_lowres.shape
             color_padded = F.pad(color_lowres, (1, 1, 1, 1), mode="replicate")
             alpha_padded = F.pad(alpha_block, (1, 1, 1, 1), mode="replicate")
             similar_neighbor_count = torch.zeros_like(alpha_block)
             similarity_threshold = 42.0
+
+            # best_replacement: the neighbor color whose own neighborhood is most
+            # internally consistent (highest similar-neighbor count among neighbors).
+            best_replacement = neighbor_mean.clone()
+            best_replacement_score = torch.full_like(alpha_block, -1.0)
 
             for off_y in range(3):
                 for off_x in range(3):
@@ -323,19 +317,48 @@ class PixelEffectModule(nn.Module):
                             * (color_lowres - neighbor_color)
                         ).sum(dim=1, keepdim=True)
                     )
-                    similar_neighbor_count = similar_neighbor_count + (
+                    is_similar = (
                         (neighbor_color_delta < similarity_threshold)
                         & (neighbor_alpha_local > 0.90)
                     ).to(alpha_block.dtype)
+                    similar_neighbor_count = similar_neighbor_count + is_similar
+
+                    # How many of *this neighbor's* own neighbors look like it?
+                    # Approximate: count how many other neighbors are close to this one.
+                    neighbor_self_score = torch.zeros_like(alpha_block)
+                    for oy2 in range(3):
+                        for ox2 in range(3):
+                            if ox2 == 1 and oy2 == 1:
+                                continue
+                            other = color_padded[
+                                :, :, oy2 : oy2 + h_low, ox2 : ox2 + w_low
+                            ]
+                            d = torch.sqrt(
+                                (
+                                    (neighbor_color - other) * (neighbor_color - other)
+                                ).sum(dim=1, keepdim=True)
+                            )
+                            neighbor_self_score = neighbor_self_score + (
+                                d < similarity_threshold
+                            ).to(alpha_block.dtype)
+
+                    update = neighbor_self_score > best_replacement_score
+                    best_replacement = torch.where(
+                        update.expand_as(best_replacement),
+                        neighbor_color,
+                        best_replacement,
+                    )
+                    best_replacement_score = torch.where(
+                        update, neighbor_self_score, best_replacement_score
+                    )
 
             replace_isolated = (
                 (alpha_block > 0.90)
                 & (neighbor_alpha > 6.0)
-                & (neighbor_std < outlier_neighbor_std_threshold)
                 & (color_delta > outlier_color_delta_threshold)
                 & (similar_neighbor_count < 1.5)
             )
-            color_lowres = torch.where(replace_isolated, neighbor_mean, color_lowres)
+            color_lowres = torch.where(replace_isolated, best_replacement, color_lowres)
 
             r_final = color_lowres[0, 0, :, :]
             g_final = color_lowres[0, 1, :, :]
