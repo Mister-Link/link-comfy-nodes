@@ -114,11 +114,27 @@ app.registerExtension({
 
       currentUrl = url;
       video.pause();
-      video.src = url;
-      video.load();
-      video.style.display = "block";
-      placeholder.style.display = "none";
-      video.play().catch(() => {});
+
+      // Fetch as blob to avoid reverse-proxy stripping Accept-Ranges headers,
+      // which prevents <video> from playing even when the URL loads fine in a tab.
+      fetch(url)
+        .then((r) => r.blob())
+        .then((blob) => {
+          const prev = video.src;
+          video.src = URL.createObjectURL(blob);
+          video.load();
+          video.style.display = "block";
+          placeholder.style.display = "none";
+          video.play().catch(() => {});
+          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        })
+        .catch(() => {
+          video.src = url;
+          video.load();
+          video.style.display = "block";
+          placeholder.style.display = "none";
+          video.play().catch(() => {});
+        });
     };
 
     // Set initial node size
