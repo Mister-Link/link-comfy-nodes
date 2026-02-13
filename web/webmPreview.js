@@ -141,31 +141,10 @@ app.registerExtension({
 
       currentUrl = url;
       video.pause();
-
-      fetch(url)
-        .then((r) => r.arrayBuffer())
-        .then((buf) => {
-          // Use data URL to avoid Firefox blob: URL origin issues in https contexts
-          const bytes = new Uint8Array(buf);
-          let binary = "";
-          for (let i = 0; i < bytes.byteLength; i++)
-            binary += String.fromCharCode(bytes[i]);
-          const dataUrl = `data:video/webm;base64,${btoa(binary)}`;
-          video.style.display = "block";
-          placeholder.style.display = "none";
-          video.src = dataUrl;
-          video
-            .play()
-            .catch((e) => console.warn("[webmPreview] play() failed:", e));
-        })
-        .catch((e) => {
-          console.error("[webmPreview] fetch failed:", e);
-          video.src = url;
-          video.load();
-          video.style.display = "block";
-          placeholder.style.display = "none";
-          video.play().catch(() => {});
-        });
+      video.src = url;
+      video.style.display = "block";
+      placeholder.style.display = "none";
+      video.play().catch(() => {});
     };
 
     // Set initial node size
