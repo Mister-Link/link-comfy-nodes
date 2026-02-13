@@ -62,8 +62,9 @@ class PreviewAnimation:
         if not pil_images:
             return {"ui": {"gifs": []}}
 
-        # Create output directory
-        output_dir = folder_paths.get_temp_directory()
+        # Create workflow assets output directory
+        assets_subfolder = "workflow_assets"
+        output_dir = os.path.join(folder_paths.get_output_directory(), assets_subfolder)
         os.makedirs(output_dir, exist_ok=True)
 
         # Generate unique filename
@@ -154,8 +155,8 @@ class PreviewAnimation:
         # This enables the context menu options
         preview = {
             "filename": filename,
-            "subfolder": "",
-            "type": "temp",
+            "subfolder": assets_subfolder,
+            "type": "output",
             "format": format_type,
         }
 
