@@ -70,6 +70,33 @@ app.registerExtension({
     };
 
     // Resize node once video dimensions are known
+    video.addEventListener("stalled", () =>
+      console.warn(
+        "[webmPreview] stalled, readyState:",
+        video.readyState,
+        "networkState:",
+        video.networkState,
+      ),
+    );
+    video.addEventListener("waiting", () =>
+      console.warn(
+        "[webmPreview] waiting, readyState:",
+        video.readyState,
+        "networkState:",
+        video.networkState,
+      ),
+    );
+    video.addEventListener("canplay", () =>
+      console.log("[webmPreview] canplay, readyState:", video.readyState),
+    );
+    video.addEventListener("error", (e) => {
+      console.error(
+        "[webmPreview] video error:",
+        video.error?.code,
+        video.error?.message,
+        e,
+      );
+    });
     video.addEventListener("loadedmetadata", () => {
       if (video.videoWidth && video.videoHeight) {
         const ratio = video.videoHeight / video.videoWidth;
@@ -137,7 +164,14 @@ app.registerExtension({
           );
           const prev = video.src;
           const blobUrl = URL.createObjectURL(blob);
-          console.log("[webmPreview] blob url:", blobUrl);
+          console.log(
+            "[webmPreview] blob url:",
+            blobUrl,
+            "video connected:",
+            video.isConnected,
+            "wrapper connected:",
+            wrapper.isConnected,
+          );
           video.src = blobUrl;
           video.style.display = "block";
           placeholder.style.display = "none";
