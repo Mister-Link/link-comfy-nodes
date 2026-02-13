@@ -13,6 +13,65 @@ try:
 except ImportError:
     folder_paths = None  # type: ignore
 
+try:
+    from aiohttp import web
+
+    from server import PromptServer  # type: ignore
+
+    @PromptServer.instance.routes.get("/webm_preview/stream")
+    async def stream_webm(request):
+        filename = request.rel_url.query.get("filename", "")
+        if not filename or "/" in filename or "\\" in filename or ".." in filename:
+            return web.Response(status=400)
+
+        if folder_paths:
+            temp_dir = folder_paths.get_temp_directory()
+        else:
+            temp_dir = tempfile.gettempdir()
+
+        filepath = os.path.join(temp_dir, filename)
+        if not os.path.isfile(filepath):
+            return web.Response(status=404)
+
+        file_size = os.path.getsize(filepath)
+        range_header = request.headers.get("Range")
+
+        with open(filepath, "rb") as f:
+            if range_header:
+                # Parse "bytes=start-end"
+                range_val = range_header.strip().replace("bytes=", "")
+                parts = range_val.split("-")
+                start = int(parts[0]) if parts[0] else 0
+                end = int(parts[1]) if parts[1] else file_size - 1
+                end = min(end, file_size - 1)
+                length = end - start + 1
+                f.seek(start)
+                data = f.read(length)
+                return web.Response(
+                    status=206,
+                    body=data,
+                    headers={
+                        "Content-Type": "video/webm",
+                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+                        "Content-Length": str(length),
+                        "Accept-Ranges": "bytes",
+                    },
+                )
+            else:
+                data = f.read()
+                return web.Response(
+                    status=200,
+                    body=data,
+                    headers={
+                        "Content-Type": "video/webm",
+                        "Content-Length": str(file_size),
+                        "Accept-Ranges": "bytes",
+                    },
+                )
+
+except Exception:
+    pass
+
 
 class PreviewWebmNode:
     RETURN_TYPES = ()

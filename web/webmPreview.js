@@ -133,13 +133,11 @@ app.registerExtension({
       }
 
       const item = previews[0];
-      const params = new URLSearchParams({
+      const streamParams = new URLSearchParams({
         filename: item.filename,
-        type: item.type || "temp",
-        subfolder: item.subfolder || "",
         t: Date.now(),
       });
-      const url = api.apiURL(`/view?${params.toString()}`);
+      const url = api.apiURL(`/webm_preview/stream?${streamParams.toString()}`);
 
       currentUrl = url;
       video.pause();
@@ -148,8 +146,11 @@ app.registerExtension({
         .then((r) => r.arrayBuffer())
         .then((buf) => {
           // Use data URL to avoid Firefox blob: URL origin issues in https contexts
-          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
-          const dataUrl = `data:video/webm;base64,${b64}`;
+          const bytes = new Uint8Array(buf);
+          let binary = "";
+          for (let i = 0; i < bytes.byteLength; i++)
+            binary += String.fromCharCode(bytes[i]);
+          const dataUrl = `data:video/webm;base64,${btoa(binary)}`;
           video.style.display = "block";
           placeholder.style.display = "none";
           video.src = dataUrl;
