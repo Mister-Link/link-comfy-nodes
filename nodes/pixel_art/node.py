@@ -15,6 +15,18 @@ class ConvertToPixelArt:
 
     _model = None
 
+    @staticmethod
+    def _pick_processing_device(frames: torch.Tensor) -> torch.device:
+        # Prefer the incoming tensor device. If inputs are on CPU, opportunistically
+        # use a hardware accelerator for the heavy convolution work.
+        device = frames.device
+        if device.type == "cpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = torch.device("mps")
+        return device
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -32,21 +44,9 @@ class ConvertToPixelArt:
                     "INT",
                     {"default": 10, "min": 1, "max": 256, "step": 1},
                 ),
-                "bin_method": (
-                    ["intensity", "hue"],
-                    {"default": "intensity"},
-                ),
                 "alpha_threshold": (
                     "FLOAT",
                     {"default": 0.58, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "clean_stray_pixels": (
-                    "BOOLEAN",
-                    {"default": True},
-                ),
-                "stray_pixel_guard": (
-                    "FLOAT",
-                    {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
             },
             "optional": {
@@ -67,13 +67,11 @@ class ConvertToPixelArt:
         kernel_size: int,
         pixel_size: int,
         num_bins: int,
-        bin_method: str,
         alpha_threshold: float,
-        clean_stray_pixels: bool,
-        stray_pixel_guard: float,
         alpha: torch.Tensor | None = None,
     ):
-        images = frames.detach().cpu().float()
+        process_device = self._pick_processing_device(frames)
+        images = frames.detach().to(device=process_device, dtype=torch.float32)
         if images.ndim != 4:
             raise ValueError("Expected frames with shape (N, H, W, C)")
         if images.numel():
@@ -86,7 +84,7 @@ class ConvertToPixelArt:
         rgb = images[..., :3] * 255.0
 
         if alpha is not None:
-            mask = alpha.detach().cpu().float()
+            mask = alpha.detach().to(device=process_device, dtype=torch.float32)
             if mask.ndim == 4 and mask.shape[-1] == 1:
                 mask = mask[..., 0]
             if mask.ndim != 3:
@@ -118,19 +116,6 @@ class ConvertToPixelArt:
         outputs = []
         alpha_outputs = []
 
-        # Plain-language controls:
-        # - clean_stray_pixels: turn tiny wrong-color speck cleanup on/off.
-        # - stray_pixel_guard: higher = more aggressive cleanup.
-        guard = float(max(0.0, min(1.0, stray_pixel_guard)))
-        if clean_stray_pixels:
-            dominance_threshold = 0.62 + (0.20 * guard)
-            outlier_filter = True
-            outlier_color_delta_threshold = 90.0 - (34.0 * guard)
-        else:
-            dominance_threshold = 0.0
-            outlier_filter = False
-            outlier_color_delta_threshold = 72.0
-
         with torch.no_grad():
             for idx in range(images.shape[0]):
                 rgb_pt = rgb[idx].permute(2, 0, 1).unsqueeze(0)
@@ -143,10 +128,6 @@ class ConvertToPixelArt:
                     param_kernel_size=kernel_size,
                     param_pixel_size=pixel_size,
                     alpha_threshold=alpha_threshold,
-                    dominance_threshold=dominance_threshold,
-                    outlier_filter=outlier_filter,
-                    outlier_color_delta_threshold=outlier_color_delta_threshold,
-                    bin_method=bin_method,
                 )
 
                 result_rgb = (
@@ -164,6 +145,7 @@ class ConvertToPixelArt:
                 outputs.append(output)
                 alpha_outputs.append(result_alpha)
 
-        alpha_mask = torch.stack(alpha_outputs).clamp(0, 1)
+        pixelated = torch.stack(outputs).clamp(0, 1).cpu()
+        alpha_mask = torch.stack(alpha_outputs).clamp(0, 1).cpu()
 
-        return (torch.stack(outputs), alpha_mask)
+        return (pixelated, alpha_mask)
