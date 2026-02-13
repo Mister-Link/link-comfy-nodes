@@ -52,8 +52,9 @@ class PreviewWebmNode:
             filepath,
             frame_list,
             fps=fps,
-            codec="libvpx",
-            pixelformat="yuv420p",
+            codec="libvpx-vp9",
+            pixelformat="yuv444p",
+            output_params=["-lossless", "1"],
         )
 
         return {

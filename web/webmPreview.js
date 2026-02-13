@@ -60,18 +60,15 @@ app.registerExtension({
     );
 
     previewWidget.computeSize = function (width) {
-      const available = Math.max(
-        0,
-        (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
-      );
-      const height = Math.max(MIN_HEIGHT, available);
-      this.computedHeight = height;
-      return [width, height];
+      this.computedHeight = MIN_HEIGHT;
+      return [width, MIN_HEIGHT];
     };
 
-    // Resize node once video dimensions are known
+    // Resize node to fit video aspect ratio only on first load
+    let hasAutoSized = false;
     video.addEventListener("loadedmetadata", () => {
-      if (video.videoWidth && video.videoHeight) {
+      if (!hasAutoSized && video.videoWidth && video.videoHeight) {
+        hasAutoSized = true;
         const ratio = video.videoHeight / video.videoWidth;
         const nodeWidth = node.size[0];
         const targetHeight = Math.round(nodeWidth * ratio);
