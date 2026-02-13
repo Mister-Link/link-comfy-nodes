@@ -145,43 +145,17 @@ app.registerExtension({
       video.pause();
 
       fetch(url)
-        .then((r) => {
-          console.log(
-            "[webmPreview] fetch status:",
-            r.status,
-            "type:",
-            r.headers.get("content-type"),
-            "url:",
-            url,
-          );
-          return r.blob();
-        })
-        .then((blob) => {
-          console.log(
-            "[webmPreview] blob size:",
-            blob.size,
-            "type:",
-            blob.type,
-          );
-          const prev = video.src;
-          const blobUrl = URL.createObjectURL(blob);
-          console.log(
-            "[webmPreview] blob url:",
-            blobUrl,
-            "video connected:",
-            video.isConnected,
-            "wrapper connected:",
-            wrapper.isConnected,
-          );
-          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        .then((r) => r.arrayBuffer())
+        .then((buf) => {
+          // Use data URL to avoid Firefox blob: URL origin issues in https contexts
+          const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+          const dataUrl = `data:video/webm;base64,${b64}`;
           video.style.display = "block";
           placeholder.style.display = "none";
-          setTimeout(() => {
-            video.src = blobUrl;
-            video
-              .play()
-              .catch((e) => console.warn("[webmPreview] play() failed:", e));
-          }, 0);
+          video.src = dataUrl;
+          video
+            .play()
+            .catch((e) => console.warn("[webmPreview] play() failed:", e));
         })
         .catch((e) => {
           console.error("[webmPreview] fetch failed:", e);
