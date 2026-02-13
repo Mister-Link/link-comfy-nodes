@@ -33,6 +33,9 @@ class PreviewWebmNode:
         }
 
     def preview_webm(self, frames: torch.Tensor, fps: float):
+        print(
+            f"[webm_preview] called, frames type={type(frames)}, shape={getattr(frames, 'shape', None)}, fps={fps}"
+        )
         if not isinstance(frames, torch.Tensor) or frames.shape[0] == 0:
             return {"ui": {"webm_preview": []}}
 
@@ -47,26 +50,38 @@ class PreviewWebmNode:
 
         # frames shape: (N, H, W, C) float32 0-1 RGB
         frame_list = [(f.cpu().numpy() * 255).astype(np.uint8) for f in frames]
+        print(f"[webm_preview] encoding {len(frame_list)} frames to {filepath}")
 
-        iio.imwrite(
-            filepath,
-            frame_list,
-            fps=fps,
-            codec="libvpx-vp9",
-            pixelformat="yuv420p",
-            output_params=[
-                "-crf",
-                "10",
-                "-b:v",
-                "0",
-                "-color_range",
-                "2",
-                "-deadline",
-                "good",
-                "-cpu-used",
-                "4",
-            ],
-        )
+        try:
+            iio.imwrite(
+                filepath,
+                frame_list,
+                fps=fps,
+                codec="libvpx-vp9",
+                pixelformat="yuv420p",
+                output_params=[
+                    "-crf",
+                    "10",
+                    "-b:v",
+                    "0",
+                    "-color_range",
+                    "2",
+                    "-deadline",
+                    "good",
+                    "-cpu-used",
+                    "4",
+                    "-cluster_size_limit",
+                    "2M",
+                    "-cluster_time_limit",
+                    "5100",
+                    "-dash",
+                    "1",
+                ],
+            )
+            print(f"[webm_preview] encoded OK, size={os.path.getsize(filepath)}")
+        except Exception as e:
+            print(f"[webm_preview] encode FAILED: {e}")
+            raise
 
         return {
             "ui": {

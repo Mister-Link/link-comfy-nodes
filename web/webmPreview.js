@@ -28,6 +28,7 @@ app.registerExtension({
     video.loop = true;
     video.muted = true;
     video.setAttribute("muted", "");
+    video.autoplay = true;
     video.playsInline = true;
     video.controls = true;
     video.style.cssText = `
@@ -92,6 +93,7 @@ app.registerExtension({
 
     const originalOnExecuted = node.onExecuted;
     node.onExecuted = function (message) {
+      console.log("[webm_preview] onExecuted message:", message);
       if (originalOnExecuted) originalOnExecuted.apply(this, arguments);
 
       const previews = message?.webm_preview;
@@ -108,14 +110,12 @@ app.registerExtension({
         subfolder: item.subfolder || "",
         t: Date.now(),
       });
-      const url = api.apiURL(`/view?${params.toString()}`);
+      const url = `/view?${params.toString()}`;
 
       currentUrl = url;
-      video.pause();
       video.src = url;
       video.style.display = "block";
       placeholder.style.display = "none";
-      video.play().catch(() => {});
     };
 
     // Set initial node size
