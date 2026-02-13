@@ -115,20 +115,39 @@ app.registerExtension({
       currentUrl = url;
       video.pause();
 
-      // Fetch as blob to avoid reverse-proxy stripping Accept-Ranges headers,
-      // which prevents <video> from playing even when the URL loads fine in a tab.
       fetch(url)
-        .then((r) => r.blob())
+        .then((r) => {
+          console.log(
+            "[webmPreview] fetch status:",
+            r.status,
+            "type:",
+            r.headers.get("content-type"),
+            "url:",
+            url,
+          );
+          return r.blob();
+        })
         .then((blob) => {
+          console.log(
+            "[webmPreview] blob size:",
+            blob.size,
+            "type:",
+            blob.type,
+          );
           const prev = video.src;
-          video.src = URL.createObjectURL(blob);
+          const blobUrl = URL.createObjectURL(blob);
+          console.log("[webmPreview] blob url:", blobUrl);
+          video.src = blobUrl;
           video.load();
           video.style.display = "block";
           placeholder.style.display = "none";
-          video.play().catch(() => {});
+          video
+            .play()
+            .catch((e) => console.warn("[webmPreview] play() failed:", e));
           if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
         })
-        .catch(() => {
+        .catch((e) => {
+          console.error("[webmPreview] fetch failed:", e);
           video.src = url;
           video.load();
           video.style.display = "block";
