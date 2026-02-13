@@ -11,16 +11,18 @@ class PixelEffectModule(nn.Module):
 
     def create_mask_by_idx(self, idx_z, max_z):
         h, w = idx_z.shape
-        idx_x = torch.arange(h).view([h, 1]).repeat([1, w])
-        idx_y = torch.arange(w).view([1, w]).repeat([h, 1])
-        mask = torch.zeros([h, w, max_z])
+        device = idx_z.device
+        idx_x = torch.arange(h, device=device).view([h, 1]).repeat([1, w])
+        idx_y = torch.arange(w, device=device).view([1, w]).repeat([h, 1])
+        mask = torch.zeros([h, w, max_z], device=device, dtype=torch.float32)
         mask[idx_x, idx_y, idx_z] = 1
         return mask
 
     def select_by_idx(self, data, idx_z):
         h, w = idx_z.shape
-        idx_x = torch.arange(h).view([h, 1]).repeat([1, w])
-        idx_y = torch.arange(w).view([1, w]).repeat([h, 1])
+        device = idx_z.device
+        idx_x = torch.arange(h, device=device).view([h, 1]).repeat([1, w])
+        idx_y = torch.arange(w, device=device).view([1, w]).repeat([h, 1])
         return data[idx_x, idx_y, idx_z]
 
     def forward(
@@ -32,11 +34,15 @@ class PixelEffectModule(nn.Module):
         param_pixel_size,
         allow_bleeding=True,
         alpha_threshold=0.95,
+        dominance_threshold=0.72,
+        outlier_filter=True,
+        outlier_color_delta_threshold=72.0,
+        outlier_neighbor_std_threshold=32.0,
     ):
         """
         Process RGB with alpha channel awareness.
         - RGB is padded with replicate (extends edge colors)
-        - Alpha is padded with zeros (true transparency at edges)
+        - Alpha is padded with replicate (prevents edge darkening)
         - RGB is only output where alpha supports it
         """
         r, g, b = rgb[:, 0:1, :, :], rgb[:, 1:2, :, :], rgb[:, 2:3, :, :]
@@ -81,7 +87,14 @@ class PixelEffectModule(nn.Module):
         )
 
         kernel_conv = torch.ones(
-            [param_num_bins, 1, param_kernel_size, param_kernel_size]
+            [param_num_bins, 1, param_kernel_size, param_kernel_size],
+            device=rgb.device,
+            dtype=rgb.dtype,
+        )
+        kernel_conv_single = torch.ones(
+            [1, 1, param_kernel_size, param_kernel_size],
+            device=rgb.device,
+            dtype=rgb.dtype,
         )
 
         # Convolve all channels
@@ -127,6 +140,53 @@ class PixelEffectModule(nn.Module):
             bias=None,
         )[0, :, :, :]
 
+        # Alpha-weighted color average per block across all intensities.
+        r_total_padded = F.pad(
+            r * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+        )
+        g_total_padded = F.pad(
+            g * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+        )
+        b_total_padded = F.pad(
+            b * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+        )
+        alpha_norm_single_padded = F.pad(
+            alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+        )
+
+        r_total_conv = F.conv2d(
+            input=r_total_padded,
+            weight=kernel_conv_single,
+            padding=0,
+            stride=param_pixel_size,
+            groups=1,
+            bias=None,
+        )[0, 0, :, :]
+        g_total_conv = F.conv2d(
+            input=g_total_padded,
+            weight=kernel_conv_single,
+            padding=0,
+            stride=param_pixel_size,
+            groups=1,
+            bias=None,
+        )[0, 0, :, :]
+        b_total_conv = F.conv2d(
+            input=b_total_padded,
+            weight=kernel_conv_single,
+            padding=0,
+            stride=param_pixel_size,
+            groups=1,
+            bias=None,
+        )[0, 0, :, :]
+        alpha_total_conv = F.conv2d(
+            input=alpha_norm_single_padded,
+            weight=kernel_conv_single,
+            padding=0,
+            stride=param_pixel_size,
+            groups=1,
+            bias=None,
+        )[0, 0, :, :]
+
         # Select the dominant intensity bin
         alpha_max, alpha_argmax = torch.max(alpha_conv, dim=0)
         alpha_coverage_conv_permuted = torch.permute(
@@ -145,10 +205,116 @@ class PixelEffectModule(nn.Module):
 
         epsilon = 1e-8
 
-        # Unmultiply RGB by alpha (divide by alpha_max to get true colors)
-        r_final = r_selected / (alpha_max + epsilon)
-        g_final = g_selected / (alpha_max + epsilon)
-        b_final = b_selected / (alpha_max + epsilon)
+        # Unmultiply dominant-bin RGB by alpha to get dominant color.
+        r_dominant = r_selected / (alpha_max + epsilon)
+        g_dominant = g_selected / (alpha_max + epsilon)
+        b_dominant = b_selected / (alpha_max + epsilon)
+
+        # Also compute alpha-weighted block mean color across all intensities.
+        r_mean = r_total_conv / (alpha_total_conv + epsilon)
+        g_mean = g_total_conv / (alpha_total_conv + epsilon)
+        b_mean = b_total_conv / (alpha_total_conv + epsilon)
+
+        # If one bin is not strongly dominant, blend toward mean color to suppress
+        # stray outlier colors (for example tiny leftover background patches).
+        if dominance_threshold > 0:
+            dominance_ratio = alpha_max / (alpha_total_conv + epsilon)
+            fallback_mix = torch.clamp(
+                (dominance_threshold - dominance_ratio)
+                / (dominance_threshold + epsilon),
+                0.0,
+                1.0,
+            )
+        else:
+            fallback_mix = torch.zeros_like(alpha_max)
+
+        r_final = r_dominant * (1.0 - fallback_mix) + r_mean * fallback_mix
+        g_final = g_dominant * (1.0 - fallback_mix) + g_mean * fallback_mix
+        b_final = b_dominant * (1.0 - fallback_mix) + b_mean * fallback_mix
+
+        if outlier_filter:
+            # Suppress isolated color outlier blocks inside opaque, coherent regions.
+            kernel_area = float(param_kernel_size * param_kernel_size)
+            alpha_block = (
+                (alpha_total_conv / kernel_area)
+                .clamp(0.0, 1.0)
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )
+            color_lowres = torch.stack([r_final, g_final, b_final], dim=0).unsqueeze(0)
+
+            neighbor_kernel = torch.tensor(
+                [[1.0, 1.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0]],
+                device=rgb.device,
+                dtype=rgb.dtype,
+            ).view(1, 1, 3, 3)
+            neighbor_kernel_rgb = neighbor_kernel.expand(3, 1, 3, 3)
+
+            neighbor_alpha = F.conv2d(alpha_block, neighbor_kernel, padding=1)
+            neighbor_color_sum = F.conv2d(
+                color_lowres * alpha_block, neighbor_kernel_rgb, padding=1, groups=3
+            )
+            neighbor_mean = neighbor_color_sum / (neighbor_alpha + epsilon)
+
+            neighbor_color_sq_sum = F.conv2d(
+                (color_lowres * color_lowres) * alpha_block,
+                neighbor_kernel_rgb,
+                padding=1,
+                groups=3,
+            )
+            neighbor_var = torch.clamp(
+                neighbor_color_sq_sum / (neighbor_alpha + epsilon)
+                - neighbor_mean * neighbor_mean,
+                min=0.0,
+            )
+            neighbor_std = torch.sqrt(neighbor_var.sum(dim=1, keepdim=True))
+
+            color_delta = torch.sqrt(
+                ((color_lowres - neighbor_mean) * (color_lowres - neighbor_mean)).sum(
+                    dim=1, keepdim=True
+                )
+            )
+
+            # Count similar opaque neighbors so only isolated outliers get replaced.
+            _, _, h_low, w_low = color_lowres.shape
+            color_padded = F.pad(color_lowres, (1, 1, 1, 1), mode="replicate")
+            alpha_padded = F.pad(alpha_block, (1, 1, 1, 1), mode="replicate")
+            similar_neighbor_count = torch.zeros_like(alpha_block)
+            similarity_threshold = 42.0
+
+            for off_y in range(3):
+                for off_x in range(3):
+                    if off_x == 1 and off_y == 1:
+                        continue
+                    neighbor_color = color_padded[
+                        :, :, off_y : off_y + h_low, off_x : off_x + w_low
+                    ]
+                    neighbor_alpha_local = alpha_padded[
+                        :, :, off_y : off_y + h_low, off_x : off_x + w_low
+                    ]
+                    neighbor_color_delta = torch.sqrt(
+                        (
+                            (color_lowres - neighbor_color)
+                            * (color_lowres - neighbor_color)
+                        ).sum(dim=1, keepdim=True)
+                    )
+                    similar_neighbor_count = similar_neighbor_count + (
+                        (neighbor_color_delta < similarity_threshold)
+                        & (neighbor_alpha_local > 0.90)
+                    ).to(alpha_block.dtype)
+
+            replace_isolated = (
+                (alpha_block > 0.90)
+                & (neighbor_alpha > 6.0)
+                & (neighbor_std < outlier_neighbor_std_threshold)
+                & (color_delta > outlier_color_delta_threshold)
+                & (similar_neighbor_count < 1.5)
+            )
+            color_lowres = torch.where(replace_isolated, neighbor_mean, color_lowres)
+
+            r_final = color_lowres[0, 0, :, :]
+            g_final = color_lowres[0, 1, :, :]
+            b_final = color_lowres[0, 2, :, :]
 
         # Build result RGB
         result_rgb = torch.stack([r_final, g_final, b_final], dim=-1)
