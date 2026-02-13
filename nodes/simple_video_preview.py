@@ -1,6 +1,7 @@
 """Simple Video Preview Node - A streamlined video preview node with minimal inputs."""
 
 import os
+import shutil
 import tempfile
 from typing import Any
 
@@ -62,20 +63,24 @@ class PreviewAnimation:
         if not pil_images:
             return {"ui": {"gifs": []}}
 
-        # Create workflow assets output directory
-        assets_subfolder = "preview_animation"
-        output_dir = os.path.join(folder_paths.get_output_directory(), assets_subfolder)
-        os.makedirs(output_dir, exist_ok=True)
+        # Create preview temp directory and workflow assets directory
+        temp_dir = folder_paths.get_temp_directory()
+        assets_subfolder = "workflow_assets"
+        assets_dir = os.path.join(folder_paths.get_output_directory(), assets_subfolder)
+        os.makedirs(temp_dir, exist_ok=True)
+        os.makedirs(assets_dir, exist_ok=True)
 
         # Generate unique filename
         # Use a counter-based approach for cleaner filenames
         counter = 0
         while True:
             filename = f"preview_{counter:05d}.webm"
-            full_path = os.path.join(output_dir, filename)
-            if not os.path.exists(full_path):
+            temp_path = os.path.join(temp_dir, filename)
+            assets_path = os.path.join(assets_dir, filename)
+            if not os.path.exists(temp_path) and not os.path.exists(assets_path):
                 break
             counter += 1
+        full_path = temp_path
 
         # Save as WebM using ffmpeg
         try:
@@ -151,12 +156,17 @@ class PreviewAnimation:
         # Determine format based on actual saved file
         format_type = "image/webm" if full_path.endswith(".webm") else "image/gif"
 
+        # Persist a copy into workflow assets
+        assets_path = os.path.join(assets_dir, filename)
+        if full_path != assets_path:
+            shutil.copy2(full_path, assets_path)
+
         # Return preview data in the format expected by ComfyUI
         # This enables the context menu options
         preview = {
             "filename": filename,
-            "subfolder": assets_subfolder,
-            "type": "output",
+            "subfolder": "",
+            "type": "temp",
             "format": format_type,
         }
 
