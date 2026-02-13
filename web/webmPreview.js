@@ -113,11 +113,12 @@ app.registerExtension({
       const url = api.apiURL(`/view?${params.toString()}`);
 
       currentUrl = url;
+      video.pause();
       video.src = url;
       video.load();
-      video.play().catch(() => {});
       video.style.display = "block";
       placeholder.style.display = "none";
+      video.play().catch(() => {});
     };
 
     // Set initial node size
