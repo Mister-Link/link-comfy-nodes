@@ -29,7 +29,6 @@ app.registerExtension({
     video.muted = true;
     video.setAttribute("muted", "");
     video.playsInline = true;
-    video.autoplay = true;
     video.controls = true;
     video.style.cssText = `
       max-width: 100%;
@@ -106,11 +105,13 @@ app.registerExtension({
       }
 
       const item = previews[0];
-      const streamParams = new URLSearchParams({
+      const params = new URLSearchParams({
         filename: item.filename,
+        type: item.type || "temp",
+        subfolder: item.subfolder || "",
         t: Date.now(),
       });
-      const url = api.apiURL(`/webm_preview/stream?${streamParams.toString()}`);
+      const url = api.apiURL(`/view?${params.toString()}`);
 
       currentUrl = url;
       video.pause();
