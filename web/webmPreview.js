@@ -60,31 +60,65 @@ app.registerExtension({
       { serialize: false, hideOnZoom: false },
     );
 
-    previewWidget.computeSize = function (width) {
-      const available = Math.max(
-        0,
-        (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
+    let storedHeight = MIN_HEIGHT;
+    let currentAspect = null;
+    let isSizing = false;
+
+    node.minimumSize = [
+      node.minimumSize?.[0] ?? 0,
+      MIN_HEIGHT + NODE_HEIGHT_PADDING,
+    ];
+
+    function applySizeFromWidth(width) {
+      const minNodeHeight = MIN_HEIGHT + NODE_HEIGHT_PADDING;
+      const contentWidth = Math.max(1, width - 20);
+      const ratio = currentAspect ?? MIN_HEIGHT / Math.max(1, contentWidth);
+      const targetHeight = Math.round(contentWidth * ratio);
+      const clampedContent = Math.max(
+        MIN_HEIGHT,
+        Math.min(targetHeight, MAX_AUTO_HEIGHT),
       );
-      const height = Math.max(MIN_HEIGHT, available || MIN_HEIGHT);
-      this.computedHeight = height;
-      return [width, height];
+      const nodeHeight = Math.max(
+        minNodeHeight,
+        clampedContent + NODE_HEIGHT_PADDING,
+      );
+      storedHeight = clampedContent;
+      previewWidget.computedHeight = storedHeight;
+      return [width, nodeHeight];
+    }
+
+    previewWidget.computeSize = function (width) {
+      this.computedHeight = storedHeight;
+      return [width, storedHeight];
     };
 
-    let hasAutoSized = false;
-    video.addEventListener("loadedmetadata", () => {
-      if (!hasAutoSized && video.videoWidth && video.videoHeight) {
-        hasAutoSized = true;
-        const ratio = video.videoHeight / video.videoWidth;
-        const nodeWidth = node.size[0];
-        const contentWidth = Math.max(1, nodeWidth - 20);
-        const targetHeight = Math.round(contentWidth * ratio);
-        const clampedHeight = Math.max(
-          MIN_HEIGHT,
-          Math.min(targetHeight, MAX_AUTO_HEIGHT),
-        );
-        node.setSize([nodeWidth, clampedHeight + NODE_HEIGHT_PADDING]);
-        app.graph?.setDirtyCanvas?.(true, false);
+    node.onResize = function (size) {
+      if (isSizing) return;
+      isSizing = true;
+      const [w, h] = applySizeFromWidth(size[0]);
+      if (size[1] !== h || size[0] !== w) {
+        node.setSize([w, h]);
       }
+      isSizing = false;
+    };
+
+    const origComputeSize = node.computeSize.bind(node);
+    node.computeSize = function (out) {
+      const size = origComputeSize(out);
+      const minNodeHeight = MIN_HEIGHT + NODE_HEIGHT_PADDING;
+      size[1] = Math.max(size[1], minNodeHeight);
+      return size;
+    };
+
+    video.addEventListener("loadedmetadata", () => {
+      if (!video.videoWidth || !video.videoHeight) return;
+      currentAspect = video.videoHeight / video.videoWidth;
+      const nodeWidth = node.size?.[0] ?? 240;
+      const [w, h] = applySizeFromWidth(nodeWidth);
+      isSizing = true;
+      node.setSize([w, h]);
+      isSizing = false;
+      app.graph?.setDirtyCanvas?.(true, false);
     });
 
     video.addEventListener("error", () => {
@@ -126,6 +160,7 @@ app.registerExtension({
       const nextUrl = buildViewUrl(item);
       if (!nextUrl) return;
 
+      currentAspect = null;
       currentUrl = nextUrl;
       video.src = currentUrl;
       void video.play().catch(() => {});
