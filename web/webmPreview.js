@@ -149,16 +149,16 @@ app.registerExtension({
 
       const previews = getPreviewsFromMessage(message);
       if (previews.length === 0) {
-        currentUrl = null;
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
+        // Keep the last preview when no new preview payload is provided.
         return;
       }
 
       const item = previews[0];
       const nextUrl = buildViewUrl(item);
       if (!nextUrl) return;
+      if (nextUrl === currentUrl) {
+        return;
+      }
 
       currentAspect = null;
       currentUrl = nextUrl;
