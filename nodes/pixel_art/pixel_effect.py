@@ -25,6 +25,66 @@ class PixelEffectModule(nn.Module):
         idx_y = torch.arange(w, device=device).view([1, w]).repeat([h, 1])
         return data[idx_x, idx_y, idx_z]
 
+    def rgb_to_bin_idx(self, rgb, param_num_bins, method="intensity"):
+        """
+        Compute a per-pixel bin index in [0, param_num_bins) used to find the
+        dominant color cluster within each output block.
+
+        method="intensity": bins by mean brightness (original behaviour, gives
+            an oil-painting feel but confuses colors that share brightness).
+        method="hue": bins by HSV hue for saturated pixels, falls back to
+            binning by luminance for near-grey/white/black pixels.  This keeps
+            orange and white in completely different bins regardless of how
+            many bins are used.
+        """
+        # rgb shape: [1, C, H, W] with values in [0, 255]
+        r = rgb[0, 0] / 255.0  # [H, W]
+        g = rgb[0, 1] / 255.0
+        b = rgb[0, 2] / 255.0
+
+        if method == "intensity":
+            val = (r + g + b) / 3.0  # mean brightness in [0, 1]
+            idx = (val * param_num_bins).long().clamp(0, param_num_bins - 1)
+            return idx  # [H, W]
+
+        # --- hue method ---
+        cmax = torch.max(torch.stack([r, g, b], dim=0), dim=0).values
+        cmin = torch.min(torch.stack([r, g, b], dim=0), dim=0).values
+        delta = cmax - cmin  # chroma
+
+        # Hue in [0, 1)
+        eps = 1e-6
+        hue = torch.zeros_like(r)
+        # Red is max
+        mask_r = (cmax == r) & (delta > eps)
+        hue[mask_r] = ((g[mask_r] - b[mask_r]) / (delta[mask_r] + eps)) % 6.0
+        # Green is max
+        mask_g = (cmax == g) & (delta > eps)
+        hue[mask_g] = (b[mask_g] - r[mask_g]) / (delta[mask_g] + eps) + 2.0
+        # Blue is max
+        mask_b = (cmax == b) & (delta > eps)
+        hue[mask_b] = (r[mask_b] - g[mask_b]) / (delta[mask_b] + eps) + 4.0
+        hue = (hue / 6.0).clamp(0.0, 1.0 - eps)  # normalise to [0, 1)
+
+        saturation = torch.where(
+            cmax > eps, delta / (cmax + eps), torch.zeros_like(delta)
+        )
+
+        # For low-saturation pixels (grey/white/black) hue is meaningless —
+        # use the top quarter of bins for luminance-based discrimination.
+        # Saturated pixels use the lower three quarters for hue bins.
+        sat_threshold = 0.15
+        num_hue_bins = max(1, int(param_num_bins * 0.75))
+        num_lum_bins = param_num_bins - num_hue_bins  # at least 1 if num_bins >= 2
+
+        hue_idx = (hue * num_hue_bins).long().clamp(0, num_hue_bins - 1)
+        lum_idx = (cmax * num_lum_bins).long().clamp(
+            0, max(0, num_lum_bins - 1)
+        ) + num_hue_bins
+
+        idx = torch.where(saturation >= sat_threshold, hue_idx, lum_idx)
+        return idx  # [H, W]
+
     def forward(
         self,
         rgb,
@@ -37,6 +97,7 @@ class PixelEffectModule(nn.Module):
         dominance_threshold=0.72,
         outlier_filter=True,
         outlier_color_delta_threshold=72.0,
+        bin_method="intensity",
     ):
         """
         Process RGB with alpha channel awareness.
@@ -48,10 +109,9 @@ class PixelEffectModule(nn.Module):
 
         alpha_norm = alpha / 255.0
 
-        # Calculate intensity from RGB
-        intensity_idx = torch.mean(rgb, dim=[0, 1]) / 256.0 * param_num_bins
-        intensity_idx = intensity_idx.long()
-        intensity = self.create_mask_by_idx(intensity_idx, max_z=param_num_bins)
+        # Compute per-pixel bin index using the chosen method
+        bin_idx = self.rgb_to_bin_idx(rgb, param_num_bins, method=bin_method)
+        intensity = self.create_mask_by_idx(bin_idx, max_z=param_num_bins)
         intensity = torch.permute(intensity, dims=[2, 0, 1]).unsqueeze(dim=0)
 
         # Weight intensity by alpha for proper blending

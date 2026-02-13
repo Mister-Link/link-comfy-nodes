@@ -32,6 +32,10 @@ class ConvertToPixelArt:
                     "INT",
                     {"default": 10, "min": 1, "max": 256, "step": 1},
                 ),
+                "bin_method": (
+                    ["intensity", "hue"],
+                    {"default": "intensity"},
+                ),
                 "alpha_threshold": (
                     "FLOAT",
                     {"default": 0.58, "min": 0.0, "max": 1.0, "step": 0.01},
@@ -63,6 +67,7 @@ class ConvertToPixelArt:
         kernel_size: int,
         pixel_size: int,
         num_bins: int,
+        bin_method: str,
         alpha_threshold: float,
         clean_stray_pixels: bool,
         stray_pixel_guard: float,
@@ -141,6 +146,7 @@ class ConvertToPixelArt:
                     dominance_threshold=dominance_threshold,
                     outlier_filter=outlier_filter,
                     outlier_color_delta_threshold=outlier_color_delta_threshold,
+                    bin_method=bin_method,
                 )
 
                 result_rgb = (
