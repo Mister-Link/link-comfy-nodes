@@ -53,8 +53,19 @@ class PreviewWebmNode:
             frame_list,
             fps=fps,
             codec="libvpx-vp9",
-            pixelformat="yuv444p",
-            output_params=["-lossless", "1"],
+            pixelformat="yuv420p",
+            output_params=[
+                "-crf",
+                "10",
+                "-b:v",
+                "0",
+                "-color_range",
+                "2",
+                "-deadline",
+                "good",
+                "-cpu-used",
+                "4",
+            ],
         )
 
         return {
