@@ -28,6 +28,7 @@ app.registerExtension({
     video.loop = true;
     video.muted = true;
     video.playsInline = true;
+    video.autoplay = true;
     video.controls = true;
     video.style.cssText = `
       max-width: 100%;
@@ -138,7 +139,6 @@ app.registerExtension({
           const blobUrl = URL.createObjectURL(blob);
           console.log("[webmPreview] blob url:", blobUrl);
           video.src = blobUrl;
-          video.load();
           video.style.display = "block";
           placeholder.style.display = "none";
           video
