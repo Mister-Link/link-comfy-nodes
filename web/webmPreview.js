@@ -27,6 +27,7 @@ app.registerExtension({
     const video = document.createElement("video");
     video.loop = true;
     video.muted = true;
+    video.setAttribute("muted", "");
     video.playsInline = true;
     video.autoplay = true;
     video.controls = true;
@@ -172,13 +173,15 @@ app.registerExtension({
             "wrapper connected:",
             wrapper.isConnected,
           );
-          video.src = blobUrl;
+          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
           video.style.display = "block";
           placeholder.style.display = "none";
-          video
-            .play()
-            .catch((e) => console.warn("[webmPreview] play() failed:", e));
-          if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+          setTimeout(() => {
+            video.src = blobUrl;
+            video
+              .play()
+              .catch((e) => console.warn("[webmPreview] play() failed:", e));
+          }, 0);
         })
         .catch((e) => {
           console.error("[webmPreview] fetch failed:", e);
