@@ -1,7 +1,7 @@
 """Simple Video Preview Node - A streamlined video preview node with minimal inputs."""
 
 import os
-import shutil
+import subprocess
 import tempfile
 from typing import Any
 
@@ -14,15 +14,11 @@ import folder_paths  # type: ignore[import-untyped]
 
 def tensor_to_pil(tensor: torch.Tensor) -> list[Image.Image]:
     """Convert a tensor batch to PIL images."""
-    # Handle different tensor shapes
     if tensor.ndim == 3:
-        # Single image [H, W, C]
         tensor = tensor.unsqueeze(0)
 
-    # Convert from [B, H, W, C] format
     images = []
     for img_tensor in tensor:
-        # Ensure values are in 0-255 range
         img_array = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
         images.append(Image.fromarray(img_array))
 
@@ -57,118 +53,82 @@ class PreviewAnimation:
     ) -> dict[str, Any]:
         """Generate a preview animation from the input frames."""
 
-        # Convert tensor to PIL images
         pil_images = tensor_to_pil(frames)
 
         if not pil_images:
             return {"ui": {"gifs": []}}
 
-        # Create preview temp directory and workflow assets directory
-        temp_dir = folder_paths.get_temp_directory()
-        assets_subfolder = "workflow_assets"
-        assets_dir = os.path.join(folder_paths.get_output_directory(), assets_subfolder)
-        os.makedirs(temp_dir, exist_ok=True)
-        os.makedirs(assets_dir, exist_ok=True)
+        output_dir = folder_paths.get_output_directory()
+        os.makedirs(output_dir, exist_ok=True)
 
-        # Generate unique filename
-        # Use a counter-based approach for cleaner filenames
+        # Generate unique filename in output dir
         counter = 0
         while True:
             filename = f"preview_{counter:05d}.webm"
-            temp_path = os.path.join(temp_dir, filename)
-            assets_path = os.path.join(assets_dir, filename)
-            if not os.path.exists(temp_path) and not os.path.exists(assets_path):
+            full_path = os.path.join(output_dir, filename)
+            if not os.path.exists(full_path):
                 break
             counter += 1
-        full_path = temp_path
 
-        # Save as WebM using ffmpeg
-        try:
-            import subprocess
+        # Write frames to a temp dir, then encode to webm with ffmpeg
+        with tempfile.TemporaryDirectory() as frame_dir:
+            for idx, img in enumerate(pil_images):
+                img.save(os.path.join(frame_dir, f"frame_{idx:05d}.png"))
 
-            # Create temporary directory for frames
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Save frames as temporary images
-                for idx, img in enumerate(pil_images):
-                    frame_path = os.path.join(temp_dir, f"frame_{idx:05d}.png")
-                    img.save(frame_path)
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-framerate",
+                str(fps),
+                "-i",
+                os.path.join(frame_dir, "frame_%05d.png"),
+                # VP9 in a webm container — browser-compatible, supports alpha
+                "-c:v",
+                "libvpx-vp9",
+                "-pix_fmt",
+                "yuva420p",
+                # Quality-based encoding (crf 30, no bitrate limit)
+                "-crf",
+                "30",
+                "-b:v",
+                "0",
+                # Loop flag (webm/VP9 containers don't carry a loop count the
+                # same way GIF does; looping is controlled by the player)
+                full_path,
+            ]
 
-                # Use ffmpeg to create WebM
-                # -y: overwrite output file
-                # -framerate: input framerate
-                # -i: input pattern
-                # -c:v: video codec (libvpx-vp9 for WebM)
-                # -pix_fmt: pixel format
-                # -lossless 1: lossless encoding for quality
-                # -loop 0: loop infinitely
-                ffmpeg_cmd = [
-                    "ffmpeg",
-                    "-y",
-                    "-framerate",
-                    str(fps),
-                    "-i",
-                    os.path.join(temp_dir, "frame_%05d.png"),
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-pix_fmt",
-                    "yuva420p",
-                    "-lossless",
-                    "1",
-                    "-loop",
-                    "0",
-                    full_path,
-                ]
+            result = subprocess.run(
+                ffmpeg_cmd, capture_output=True, text=True, timeout=120
+            )
 
-                result = subprocess.run(
-                    ffmpeg_cmd, capture_output=True, text=True, timeout=60
-                )
-
-                if result.returncode != 0:
-                    # Fallback to GIF if WebM fails
-                    filename = filename.replace(".webm", ".gif")
-                    full_path = full_path.replace(".webm", ".gif")
-
-                    # Save as GIF
-                    pil_images[0].save(
-                        full_path,
-                        save_all=True,
-                        append_images=pil_images[1:],
-                        duration=int(1000 / fps),  # duration in milliseconds
-                        loop=0,
-                        optimize=False,
-                    )
-
-        except (ImportError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-            # Fallback to GIF if ffmpeg is not available or fails
-            filename = filename.replace(".webm", ".gif")
-            full_path = full_path.replace(".webm", ".gif")
-
-            # Save as GIF with looping
+        if result.returncode != 0:
+            # Fallback: animated GIF
+            filename = f"preview_{counter:05d}.gif"
+            full_path = os.path.join(output_dir, filename)
             pil_images[0].save(
                 full_path,
                 save_all=True,
                 append_images=pil_images[1:],
-                duration=int(1000 / fps),  # duration in milliseconds
+                duration=int(1000 / fps),
                 loop=0,
                 optimize=False,
             )
+            preview = {
+                "filename": filename,
+                "subfolder": "",
+                "type": "output",
+                "format": "image/gif",
+                "frame_rate": fps,
+            }
+            return {"ui": {"gifs": [preview]}}
 
-        # Determine format based on actual saved file
-        format_type = "image/webm" if full_path.endswith(".webm") else "image/gif"
-
-        # Persist a copy into workflow assets
-        assets_path = os.path.join(assets_dir, filename)
-        if full_path != assets_path:
-            shutil.copy2(full_path, assets_path)
-
-        # Return preview data in the format expected by ComfyUI
-        # This enables the context menu options
         preview = {
             "filename": filename,
             "subfolder": "",
-            "type": "temp",
-            "format": format_type,
+            "type": "output",
+            # "video/webm" tells the VHS frontend to use a <video> element
+            "format": "video/webm",
+            "frame_rate": fps,
         }
 
-        # The "ui" key with "gifs" enables preview display and context menu
         return {"ui": {"gifs": [preview]}}
