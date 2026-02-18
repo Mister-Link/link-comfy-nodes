@@ -431,16 +431,22 @@ class VideoDetailer:
             f"latent_length={total_latent_length}"
         )
 
-        # --- Step 8: Build the denoising latent ---
-        latent_h = img_height // 8
-        latent_w = width_double // 8
-        denoise_latent = torch.zeros(
-            [1, 16, total_latent_length, latent_h, latent_w],
-            device=comfy.model_management.intermediate_device(),
-        )
+        # --- Step 8: Encode composite video as starting latent (img2img) ---
+        # The composite video IS the starting point — at low denoise the
+        # sampler stays close to this content.
+        encoded_composite = vae.encode(composite_video[:, :, :, :3])
+        # Shape: [1, 16, latent_frames, H//8, W_double//8]
+        print(f"[Video Detailer] encoded composite {encoded_composite.shape}")
+
+        # Prepend the reference frame latent (just the 16-ch image part, not the 32-ch VACE version)
+        ref_latent_img = vae.encode(ref_wide[:, :, :, :3])
+        # [1, 16, 1, H//8, W_double//8]
+        denoise_latent = torch.cat([ref_latent_img, encoded_composite], dim=2)
+        # [1, 16, 1+latent_frames, H//8, W_double//8] = [1, 16, total_latent_length, ...]
+        denoise_latent = denoise_latent.to(comfy.model_management.intermediate_device())
+        print(f"[Video Detailer] denoise latent {denoise_latent.shape}")
 
         # Build noise mask for the latent: only right half is denoised
-        # Using the feathered mask
         feathered_mask = self._gaussian_blur_mask(
             vace_mask_pixel.squeeze(-1), noise_mask_feather
         )
