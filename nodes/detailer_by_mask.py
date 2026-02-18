@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 
-import comfy.sample
 import comfy.samplers
-import comfy.utils
 import nodes
 
 
@@ -72,87 +69,6 @@ class VideoDetailer:
     def _fix_to_divisor(value: int, divisor: int) -> int:
         """Round up to nearest multiple of divisor."""
         return ((value + divisor - 1) // divisor) * divisor
-
-    @staticmethod
-    def _fix_crop_region(
-        crop_region: tuple, img_width: int, img_height: int, divisor: int
-    ) -> tuple:
-        """Fix crop region to be divisible by divisor and within image bounds."""
-        x1, y1, x2, y2 = crop_region
-
-        # Clamp to image bounds
-        x1 = max(0, min(x1, img_width))
-        y1 = max(0, min(y1, img_height))
-        x2 = max(0, min(x2, img_width))
-        y2 = max(0, min(y2, img_height))
-
-        width = x2 - x1
-        height = y2 - y1
-
-        # Round UP to nearest multiple of divisor
-        width = ((width + divisor - 1) // divisor) * divisor
-        height = ((height + divisor - 1) // divisor) * divisor
-
-        # Recalculate from center to expand evenly
-        center_x = (x1 + x2) // 2
-        center_y = (y1 + y2) // 2
-
-        x1 = center_x - width // 2
-        x2 = x1 + width
-        y1 = center_y - height // 2
-        y2 = y1 + height
-
-        # Handle overflow by shifting
-        if x2 > img_width:
-            shift = x2 - img_width
-            x1 -= shift
-            x2 -= shift
-        if x1 < 0:
-            shift = -x1
-            x1 += shift
-            x2 += shift
-
-        if y2 > img_height:
-            shift = y2 - img_height
-            y1 -= shift
-            y2 -= shift
-        if y1 < 0:
-            shift = -y1
-            y1 += shift
-            y2 += shift
-
-        # Final clamp
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(img_width, x2)
-        y2 = min(img_height, y2)
-
-        return (x1, y1, x2, y2)
-
-    @staticmethod
-    def _get_mask_bbox(mask: torch.Tensor) -> tuple:
-        """Get bounding box from mask. Returns (x1, y1, x2, y2)."""
-        # Handle batched masks - combine them
-        if mask.ndim == 3:
-            combined = mask.max(dim=0)[0]
-        else:
-            combined = mask
-
-        # Find non-zero pixels
-        nonzero = torch.nonzero(combined > 0.5)
-        if len(nonzero) == 0:
-            h, w = combined.shape
-            return (0, 0, w, h)
-
-        y_coords = nonzero[:, 0]
-        x_coords = nonzero[:, 1]
-
-        y1 = int(y_coords.min().item())
-        y2 = int(y_coords.max().item()) + 1
-        x1 = int(x_coords.min().item())
-        x2 = int(x_coords.max().item()) + 1
-
-        return (x1, y1, x2, y2)
 
     @staticmethod
     def _fix_decoded_shape(decoded: torch.Tensor, expected_height: int) -> torch.Tensor:
@@ -282,19 +198,6 @@ class VideoDetailer:
 
         print(f"[Video Detailer] Mask shape: {mask.shape}")
 
-        # Get bounding box from combined mask
-        bbox = self._get_mask_bbox(mask)
-        print(f"[Video Detailer] Mask bbox: {bbox}")
-
-        # Fix crop region for divisibility
-        crop_region = self._fix_crop_region(bbox, img_width, img_height, divisor)
-        x1, y1, x2, y2 = crop_region
-        crop_width = x2 - x1
-        crop_height = y2 - y1
-        print(
-            f"[Video Detailer] Fixed crop region: {crop_region} ({crop_width}x{crop_height})"
-        )
-
         # Get model components from basic_pipe
         model, clip, vae, positive, negative = basic_pipe
 
@@ -412,26 +315,12 @@ class VideoDetailer:
                 f"[Video Detailer] Latent shape: {latent_samples.shape}, img_height={img_height}, img_width={img_width}"
             )
 
-            # Build a full pixel-space noise mask (ComfyUI resizes it to latent space
-            # internally). Shape: [F, 1, img_height, img_width].
-            noise_mask = torch.zeros(
-                (num_frames, 1, img_height, img_width),
-                dtype=torch.float32,
-                device=latent_samples.device,
-            )
-
-            # Upscale the cropped mask back to the crop region's pixel size and insert
-            region_mask = torch.nn.functional.interpolate(
-                cropped_mask.unsqueeze(1),
-                size=(crop_height, crop_width),
-                mode="bilinear",
-                align_corners=False,
-            )
+            # Build a full pixel-space noise mask [F, 1, H, W].
+            # ComfyUI's reshape_mask resizes it to latent space internally.
+            feathered_mask = mask
             if noise_mask_feather > 0:
-                region_mask = self._gaussian_blur_mask(
-                    region_mask.squeeze(1), noise_mask_feather
-                ).unsqueeze(1)
-            noise_mask[:, :, y1:y2, x1:x2] = region_mask
+                feathered_mask = self._gaussian_blur_mask(mask, noise_mask_feather)
+            noise_mask = feathered_mask.unsqueeze(1).to(latent_samples.device)
 
             print(
                 f"[Video Detailer] noise_mask shape: {noise_mask.shape}, min: {noise_mask.min():.3f}, max: {noise_mask.max():.3f}, mean: {noise_mask.mean():.3f}"
