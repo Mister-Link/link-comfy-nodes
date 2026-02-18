@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import comfy.samplers
 import nodes
+from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 
 class VideoDetailer:
@@ -98,7 +99,7 @@ class VideoDetailer:
         return decoded
 
     def execute(
-        self,
+        dsaself,
         latent,
         basic_pipe,
         seed,
@@ -141,6 +142,14 @@ class VideoDetailer:
             f"[Video Detailer] noise_mask {noise_mask.shape} "
             f"mean={noise_mask.mean():.3f}"
         )
+
+        # DifferentialDiffusion makes the model only denoise pixels whose mask
+        # value >= the current noise threshold at each step. Without it, the
+        # noise_mask only composites at the very end and the model drifts
+        # everything during sampling regardless of the mask.
+        if "denoise_mask_function" not in model.model_options:
+            model = DifferentialDiffusion.execute(model)[0]
+            print("[Video Detailer] DifferentialDiffusion applied")
 
         latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
 
