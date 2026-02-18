@@ -12,11 +12,12 @@ from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 class VideoDetailer:
     """
-    Details a video latent by running ksampler with a noise mask.
+    Details a video latent with pixel-space compositing (MaskDetailer-style).
 
-    The latent is passed unchanged; the noise mask restricts denoising to the
-    masked region. VACE conditioning (with reference image) is carried through
-    basic_pipe and guides the output.
+    Decodes the original latent as reference, runs KSampler with a noise mask,
+    then composites the enhanced result onto the original in pixel space:
+      output = (1-mask)*original + mask*enhanced
+    This guarantees pixels outside the mask are never modified.
     """
 
     @classmethod
@@ -49,8 +50,9 @@ class VideoDetailer:
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Refines a video latent using ksampler + noise mask. "
-        "VACE reference image influence comes through basic_pipe conditioning."
+        "Refines a video latent with pixel-space compositing. "
+        "Denoised result is blended onto original frames using the mask, "
+        "so unmasked areas are never modified."
     )
 
     @staticmethod
@@ -124,7 +126,12 @@ class VideoDetailer:
             f"{img_width}×{img_height} px, {num_frames} frames"
         )
 
-        # Build pixel-space mask [F, H, W]
+        # --- Step 1: Decode the ORIGINAL latent as reference frames ---
+        original_decoded = vae.decode(latent_samples)
+        original_frames = self._fix_decoded_shape(original_decoded, img_height)
+        print(f"[Video Detailer] original frames {original_frames.shape}")
+
+        # --- Step 2: Build pixel-space mask [F, H, W] ---
         if mask_opt is None:
             mask = torch.ones((num_frames, img_height, img_width), dtype=torch.float32)
         else:
@@ -134,9 +141,9 @@ class VideoDetailer:
             elif mask.shape[0] != num_frames:
                 mask = mask[0:1].expand(num_frames, -1, -1)
 
-        # Feather and add channel dim → [F, 1, H, W] for ComfyUI reshape_mask
-        feathered = self._gaussian_blur_mask(mask, noise_mask_feather)
-        noise_mask = feathered.unsqueeze(1).to(latent_samples.device)
+        # --- Step 3: Build latent noise_mask (feathered) for KSampler ---
+        feathered_latent = self._gaussian_blur_mask(mask, noise_mask_feather)
+        noise_mask = feathered_latent.unsqueeze(1).to(latent_samples.device)
 
         print(
             f"[Video Detailer] noise_mask {noise_mask.shape} "
@@ -144,13 +151,12 @@ class VideoDetailer:
         )
 
         # DifferentialDiffusion makes the model only denoise pixels whose mask
-        # value >= the current noise threshold at each step. Without it, the
-        # noise_mask only composites at the very end and the model drifts
-        # everything during sampling regardless of the mask.
+        # value >= the current noise threshold at each step.
         if "denoise_mask_function" not in model.model_options:
             model = DifferentialDiffusion.execute(model)[0]
             print("[Video Detailer] DifferentialDiffusion applied")
 
+        # --- Step 4: KSampler denoising ---
         latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
 
         samples = nodes.common_ksampler(
@@ -166,13 +172,22 @@ class VideoDetailer:
             denoise=denoise,
         )[0]
 
-        decoded = vae.decode(samples["samples"])
-        print(f"[Video Detailer] decoded {decoded.shape}")
-        decoded = self._fix_decoded_shape(decoded, img_height)
-        print(f"[Video Detailer] fixed   {decoded.shape}")
+        # --- Step 5: Decode the DENOISED latent ---
+        enhanced_decoded = vae.decode(samples["samples"])
+        enhanced_frames = self._fix_decoded_shape(enhanced_decoded, img_height)
+        print(f"[Video Detailer] enhanced frames {enhanced_frames.shape}")
+
+        # --- Step 6: Pixel-space compositing ---
+        # Feather the mask for smooth blending at edges
+        composite_mask = self._gaussian_blur_mask(mask, noise_mask_feather)
+        # [F, H, W] → [F, H, W, 1] for broadcasting with [F, H, W, C]
+        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
+
+        output = (1 - mask_4d) * original_frames + mask_4d * enhanced_frames
+        print(f"[Video Detailer] composited {output.shape}")
 
         output_mask = mask[0] if mask.ndim == 3 else mask
-        return (decoded, output_mask)
+        return (output, output_mask)
 
 
 __all__ = ["VideoDetailer"]
