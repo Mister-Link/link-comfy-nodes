@@ -1,8 +1,6 @@
-"""Video detailer — refines a video latent with pixel-space compositing."""
+"""Video detailer — reference-guided refinement via side-by-side stitching."""
 
 from __future__ import annotations
-
-import copy
 
 import torch
 import torch.nn.functional as F
@@ -15,13 +13,16 @@ from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 class VideoDetailer:
     """
-    Refines a video latent using KSampler + noise mask, then composites
-    the result back onto the original decoded frames in pixel space.
+    Reference-guided video detailer.
 
-    The noise_mask + DifferentialDiffusion controls where denoising happens.
-    Pixel-space compositing guarantees unmasked areas are pixel-identical
-    to the original. An optional reference_image replaces the decoded
-    original as the compositing base for unmasked regions.
+    Stitches a reference image to the left of each video frame, creating a
+    double-width video. The reference half is protected by a noise mask
+    (no denoising applied), while the frame half gets denoised via
+    DifferentialDiffusion. The model sees the reference spatially adjacent
+    during denoising and naturally maintains consistency with it.
+
+    After denoising, the right halves (refined frames) are extracted and
+    composited back onto the originals with feathered alpha blending.
     """
 
     @classmethod
@@ -46,8 +47,7 @@ class VideoDetailer:
                         "min": 0,
                         "max": 200,
                         "step": 1,
-                        "tooltip": "Gaussian blur radius for the pixel-space "
-                        "paste-back mask edge.",
+                        "tooltip": "Gaussian blur radius for pixel-space paste-back.",
                     },
                 ),
                 "noise_mask_feather": (
@@ -57,8 +57,8 @@ class VideoDetailer:
                         "min": 0,
                         "max": 200,
                         "step": 1,
-                        "tooltip": "Gaussian blur radius for the latent noise mask "
-                        "(DifferentialDiffusion boundary softness).",
+                        "tooltip": "Gaussian blur for the ref↔frame boundary in "
+                        "latent noise mask.",
                     },
                 ),
             },
@@ -67,8 +67,9 @@ class VideoDetailer:
                 "reference_image": (
                     "IMAGE",
                     {
-                        "tooltip": "If provided, unmasked areas in the output come "
-                        "from this image instead of the decoded latent."
+                        "tooltip": "Reference image stitched to the left of each "
+                        "frame. Protected from denoising — the model sees "
+                        "it as context and keeps output consistent."
                     },
                 ),
             },
@@ -79,10 +80,11 @@ class VideoDetailer:
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Refines a video latent with pixel-space compositing. "
-        "Denoised result is blended onto original frames using the mask. "
-        "Unmasked areas are never modified."
+        "Reference-guided video detailer. Stitches reference beside each "
+        "frame, denoises only the frame half, then crops and composites back."
     )
+
+    # ------------------------------------------------------------------ utils
 
     @staticmethod
     def _gaussian_blur_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
@@ -129,6 +131,8 @@ class VideoDetailer:
             decoded = torch.rot90(decoded, k=3, dims=(1, 2)).contiguous()
         return decoded
 
+    # ------------------------------------------------------------------ main
+
     def execute(
         self,
         latent,
@@ -148,6 +152,7 @@ class VideoDetailer:
 
         # WAN latent: [B, C, F, H, W]
         latent_samples = latent["samples"]
+        latent_frames = latent_samples.shape[2]
         img_height = latent_samples.shape[3] * 8
         img_width = latent_samples.shape[4] * 8
 
@@ -155,39 +160,127 @@ class VideoDetailer:
             f"[Video Detailer] latent {latent_samples.shape} → {img_width}×{img_height} px"
         )
 
-        # --- Step 1: Decode the ORIGINAL latent → pixel frames ---
-        # WAN VAE temporally upscales: pixel_frames = max(0, latent_frames*4 - 3)
+        # --- Step 1: Decode original latent → pixel frames ---
         original_decoded = vae.decode(latent_samples)
         original_frames = self._fix_decoded_shape(original_decoded, img_height)
-        num_frames = original_frames.shape[0]
-        print(f"[Video Detailer] decoded {num_frames} frames {original_frames.shape}")
+        num_pixel_frames = original_frames.shape[0]
+        print(
+            f"[Video Detailer] decoded {num_pixel_frames} frames {original_frames.shape}"
+        )
 
         # --- Step 2: Build pixel-space mask [F, H, W] ---
         if mask_opt is None:
-            mask = torch.ones((num_frames, img_height, img_width), dtype=torch.float32)
+            mask = torch.ones(
+                (num_pixel_frames, img_height, img_width), dtype=torch.float32
+            )
         else:
             mask = mask_opt.clone()
             if mask.ndim == 2:
-                mask = mask.unsqueeze(0).expand(num_frames, -1, -1).contiguous()
-            elif mask.shape[0] != num_frames:
-                mask = mask[0:1].expand(num_frames, -1, -1).contiguous()
+                mask = mask.unsqueeze(0).expand(num_pixel_frames, -1, -1).contiguous()
+            elif mask.shape[0] != num_pixel_frames:
+                mask = mask[0:1].expand(num_pixel_frames, -1, -1).contiguous()
 
-        # --- Step 3: Build latent noise_mask for KSampler ---
-        feathered_latent = self._gaussian_blur_mask(mask, noise_mask_feather)
-        noise_mask = feathered_latent.unsqueeze(1).to(latent_samples.device)
-        # [F_pixel, 1, H, W] — ComfyUI's reshape_mask will resample to latent dims
+        # --- Step 3: Prepare reference image [H, W, C] ---
+        if reference_image is not None:
+            ref = reference_image[0] if reference_image.ndim == 4 else reference_image
+            if ref.shape[0] != img_height or ref.shape[1] != img_width:
+                ref = (
+                    F.interpolate(
+                        ref.unsqueeze(0).permute(0, 3, 1, 2),
+                        size=(img_height, img_width),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .permute(0, 2, 3, 1)
+                    .squeeze(0)
+                )
+            print(f"[Video Detailer] reference {ref.shape}")
+        else:
+            ref = original_frames[0]
+            print("[Video Detailer] using first frame as reference")
+
+        # --- Step 4: Build double-width composite [ref | frame] per frame ---
+        # Width must be divisible by 16 for VAE (8 spatial stride * 2 for safety)
+        half_w = ((img_width + 15) // 16) * 16
+        width_double = half_w * 2
+
+        # Resize ref once to half_w
+        ref_resized = (
+            F.interpolate(
+                ref.unsqueeze(0).permute(0, 3, 1, 2),
+                size=(img_height, half_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            .permute(0, 2, 3, 1)
+            .squeeze(0)
+        )  # [H, half_w, C]
+
+        composite_list = []
+        for i in range(num_pixel_frames):
+            frame = original_frames[i]
+            frame_resized = (
+                F.interpolate(
+                    frame.unsqueeze(0).permute(0, 3, 1, 2),
+                    size=(img_height, half_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .squeeze(0)
+            )  # [H, half_w, C]
+            composite_list.append(
+                torch.cat([ref_resized, frame_resized], dim=1)  # [H, width_double, C]
+            )
+
+        composite_video = torch.stack(composite_list)  # [F, H, width_double, C]
+        print(f"[Video Detailer] composite {composite_video.shape}")
+
+        # --- Step 5: VAE encode composite → starting latent (img2img) ---
+        composite_latent = vae.encode(composite_video[:, :, :, :3])
+        # [1, 16, latent_frames, H//8, width_double//8]
+        print(f"[Video Detailer] encoded composite {composite_latent.shape}")
+
+        # --- Step 6: Build noise mask for double-width latent ---
+        # Left half = 0 (reference, no denoising)
+        # Right half = user's mask (denoise the frame area)
+        noise_mask_wide = torch.zeros(
+            (num_pixel_frames, img_height, width_double), dtype=torch.float32
+        )
+        for i in range(num_pixel_frames):
+            fm = mask[i]
+            if fm.shape[1] != half_w:
+                fm = (
+                    F.interpolate(
+                        fm.unsqueeze(0).unsqueeze(0),
+                        size=(img_height, half_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                )
+            noise_mask_wide[i, :, half_w:] = fm
+
+        # Feather the boundary between ref and frame
+        noise_mask_wide = self._gaussian_blur_mask(noise_mask_wide, noise_mask_feather)
+        # [F, 1, H, W_double] — reshape_mask will resample to latent dims
+        noise_mask_4d = noise_mask_wide.unsqueeze(1).to(composite_latent.device)
 
         print(
-            f"[Video Detailer] noise_mask {noise_mask.shape} mean={noise_mask.mean():.3f}"
+            f"[Video Detailer] noise_mask {noise_mask_4d.shape} "
+            f"mean={noise_mask_4d.mean():.3f}"
         )
 
-        # DifferentialDiffusion: denoise strength varies spatially per mask value
+        # --- Step 7: DifferentialDiffusion + KSampler ---
         if "denoise_mask_function" not in model.model_options:
             model = DifferentialDiffusion.execute(model)[0]
             print("[Video Detailer] DifferentialDiffusion applied")
 
-        # --- Step 4: KSampler denoising ---
-        latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
+        latent_dict = {
+            "samples": composite_latent,
+            "noise_mask": noise_mask_4d,
+        }
 
         samples = nodes.common_ksampler(
             model,
@@ -202,44 +295,35 @@ class VideoDetailer:
             denoise=denoise,
         )[0]
 
-        # --- Step 5: Decode the DENOISED latent ---
-        enhanced_decoded = vae.decode(samples["samples"])
-        enhanced_frames = self._fix_decoded_shape(enhanced_decoded, img_height)
-        print(f"[Video Detailer] enhanced {enhanced_frames.shape}")
+        # --- Step 8: Decode and extract right halves ---
+        decoded_wide = vae.decode(samples["samples"])
+        decoded_wide = self._fix_decoded_shape(decoded_wide, img_height)
+        print(f"[Video Detailer] decoded wide {decoded_wide.shape}")
 
-        # --- Step 6: Choose the base for unmasked areas ---
-        if reference_image is not None:
-            base_frames = reference_image
-            if base_frames.shape[0] == 1:
-                base_frames = base_frames.expand(num_frames, -1, -1, -1)
-            elif base_frames.shape[0] != num_frames:
-                base_frames = base_frames[0:1].expand(num_frames, -1, -1, -1)
-            # Resize if needed
-            if base_frames.shape[1] != img_height or base_frames.shape[2] != img_width:
-                bf = base_frames.permute(0, 3, 1, 2)
-                bf = F.interpolate(
-                    bf,
-                    size=(img_height, img_width),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                base_frames = bf.permute(0, 2, 3, 1)
-            base_frames = base_frames.contiguous()
-            print(f"[Video Detailer] using reference_image as base {base_frames.shape}")
-        else:
-            base_frames = original_frames
-            print("[Video Detailer] using decoded original as base")
+        # Extract right half (the refined frames)
+        refined_half = decoded_wide[:, :, half_w:, :]
 
-        # --- Step 7: Pixel-space compositing ---
-        # Feather the mask for smooth blending at paste edges
+        # Resize back to original width
+        if refined_half.shape[2] != img_width:
+            rf = refined_half.permute(0, 3, 1, 2)
+            rf = F.interpolate(
+                rf,
+                size=(img_height, img_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            refined_half = rf.permute(0, 2, 3, 1)
+
+        print(f"[Video Detailer] refined frames {refined_half.shape}")
+
+        # --- Step 9: Pixel-space compositing ---
         composite_mask = self._gaussian_blur_mask(mask, feather)
-        mask_4d = composite_mask.unsqueeze(-1).to(base_frames.device)
+        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
 
-        # Match frame counts
-        out_frames = min(base_frames.shape[0], enhanced_frames.shape[0])
-        output = (1 - mask_4d[:out_frames]) * base_frames[:out_frames] + mask_4d[
-            :out_frames
-        ] * enhanced_frames[:out_frames].to(base_frames.device)
+        out_n = min(original_frames.shape[0], refined_half.shape[0])
+        output = (1 - mask_4d[:out_n]) * original_frames[:out_n] + mask_4d[
+            :out_n
+        ] * refined_half[:out_n].to(original_frames.device)
         print(f"[Video Detailer] output {output.shape}")
 
         output_mask = mask[0] if mask.ndim == 3 else mask
