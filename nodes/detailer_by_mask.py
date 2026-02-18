@@ -28,17 +28,11 @@ class VideoDetailer:
         return {
             "required": {
                 "guide_size": (
-                    "FLOAT",
+                    "INT",
                     {"default": 720, "min": 64, "max": 8192, "step": 8},
                 ),
-                "guide_size_for": (
-                    "BOOLEAN",
-                    {"default": True, "label_on": "bbox", "label_off": "crop_region"},
-                ),
-                "max_size": (
-                    "FLOAT",
-                    {"default": 720, "min": 64, "max": 8192, "step": 8},
-                ),
+                "columns": ("INT", {"default": 2, "min": 1, "max": 32}),
+                "rows": ("INT", {"default": 2, "min": 1, "max": 32}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "steps": ("INT", {"default": 4, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 100.0}),
@@ -225,8 +219,8 @@ class VideoDetailer:
     def execute(
         self,
         guide_size,
-        guide_size_for,
-        max_size,
+        columns,
+        rows,
         seed,
         steps,
         cfg,
@@ -301,72 +295,112 @@ class VideoDetailer:
             f"[Video Detailer] Fixed crop region: {crop_region} ({crop_width}x{crop_height})"
         )
 
-        # Crop frames and masks (image path only — latent path never crops the latent)
-        cropped_mask = mask[:, y1:y2, x1:x2]
-        if image_frames is not None:
-            cropped_frames = image_frames[:, y1:y2, x1:x2, :]
-            print(f"[Video Detailer] Cropped frames shape: {cropped_frames.shape}")
-
         # Get model components from basic_pipe
         model, clip, vae, positive, negative = basic_pipe
 
         if image_frames is not None:
-            # --- IMAGE PATH: crop → upscale → VAE encode → sample → decode → paste ---
+            # --- IMAGE PATH: tile grid → upscale each tile → encode → sample → decode → paste ---
+            output_frames = image_frames.clone()
 
-            # Calculate upscale factor
-            bbox_w = bbox[2] - bbox[0]
-            bbox_h = bbox[3] - bbox[1]
-
-            if guide_size_for:  # bbox
-                upscale = guide_size / min(bbox_w, bbox_h)
-            else:  # crop_region
-                upscale = guide_size / min(crop_width, crop_height)
-
-            new_w = int(crop_width * upscale)
-            new_h = int(crop_height * upscale)
-
-            if new_w > max_size or new_h > max_size:
-                upscale *= max_size / max(new_w, new_h)
-                new_w = int(crop_width * upscale)
-                new_h = int(crop_height * upscale)
-
-            if upscale <= 1.0 or new_w == 0 or new_h == 0:
-                upscale = 1.0
-                new_w = crop_width
-                new_h = crop_height
-
-            new_w = self._fix_to_divisor(new_w, divisor)
-            new_h = self._fix_to_divisor(new_h, divisor)
-            expected_decode_height = new_h
+            tile_h = img_height // rows
+            tile_w = img_width // columns
             print(
-                f"[Video Detailer] Upscaling {crop_width}x{crop_height} -> {new_w}x{new_h}"
+                f"[Video Detailer] Tiling {columns}x{rows} grid, tile size {tile_w}x{tile_h}"
             )
 
-            frames_nchw = cropped_frames.permute(0, 3, 1, 2)
-            upscaled_frames = torch.nn.functional.interpolate(
-                frames_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False
-            ).permute(0, 2, 3, 1)
+            for row in range(rows):
+                for col in range(columns):
+                    ty1 = row * tile_h
+                    ty2 = ty1 + tile_h if row < rows - 1 else img_height
+                    tx1 = col * tile_w
+                    tx2 = tx1 + tile_w if col < columns - 1 else img_width
 
-            upscaled_mask = torch.nn.functional.interpolate(
-                cropped_mask.unsqueeze(1),
-                size=(new_h, new_w),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(1)
+                    t_h = ty2 - ty1
+                    t_w = tx2 - tx1
 
-            if noise_mask_feather > 0:
-                upscaled_mask = self._gaussian_blur_mask(
-                    upscaled_mask, noise_mask_feather
-                )
+                    # Skip tile if mask has no coverage
+                    tile_mask = mask[:, ty1:ty2, tx1:tx2]
+                    if tile_mask.max() < 0.01:
+                        print(
+                            f"[Video Detailer] Tile ({col},{row}) skipped — no mask coverage"
+                        )
+                        continue
 
-            print(f"[Video Detailer] VAE encoding {num_frames} frames...")
-            latent_samples = vae.encode(upscaled_frames[:, :, :, :3])
-            print(f"[Video Detailer] Latent shape: {latent_samples.shape}")
+                    tile_frames = image_frames[:, ty1:ty2, tx1:tx2, :]
 
-            latent_dict = {
-                "samples": latent_samples,
-                "noise_mask": upscaled_mask.unsqueeze(1),
-            }
+                    # Upscale tile to guide_size on shortest side
+                    scale = guide_size / min(t_h, t_w)
+                    new_h = self._fix_to_divisor(int(t_h * scale), divisor)
+                    new_w = self._fix_to_divisor(int(t_w * scale), divisor)
+                    print(
+                        f"[Video Detailer] Tile ({col},{row}): {t_w}x{t_h} -> {new_w}x{new_h}"
+                    )
+
+                    tile_nchw = tile_frames.permute(0, 3, 1, 2)
+                    upscaled = torch.nn.functional.interpolate(
+                        tile_nchw,
+                        size=(new_h, new_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).permute(0, 2, 3, 1)
+
+                    upscaled_mask = torch.nn.functional.interpolate(
+                        tile_mask.unsqueeze(1),
+                        size=(new_h, new_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).squeeze(1)
+                    if noise_mask_feather > 0:
+                        upscaled_mask = self._gaussian_blur_mask(
+                            upscaled_mask, noise_mask_feather
+                        )
+
+                    latent_samples = vae.encode(upscaled[:, :, :, :3])
+                    latent_dict = {
+                        "samples": latent_samples,
+                        "noise_mask": upscaled_mask.unsqueeze(1),
+                    }
+
+                    samples = nodes.common_ksampler(
+                        model,
+                        seed,
+                        steps,
+                        cfg,
+                        sampler_name,
+                        scheduler,
+                        positive,
+                        negative,
+                        latent_dict,
+                        denoise=denoise,
+                    )[0]
+
+                    decoded = vae.decode(samples["samples"])
+                    decoded = self._fix_decoded_shape(decoded, new_h)
+
+                    # Downscale back to tile size
+                    decoded_nchw = decoded.permute(0, 3, 1, 2)
+                    enhanced = torch.nn.functional.interpolate(
+                        decoded_nchw,
+                        size=(t_h, t_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).permute(0, 2, 3, 1)
+
+                    # Blend using feathered tile mask
+                    for frame_idx in range(num_frames):
+                        fm = tile_mask[frame_idx].clone()
+                        if feather > 0:
+                            fm = self._gaussian_blur_mask(fm, feather)
+                        fm = fm.unsqueeze(-1).to(output_frames.device)
+                        enh = enhanced[frame_idx].to(output_frames.device)
+                        orig = output_frames[frame_idx, ty1:ty2, tx1:tx2, :]
+                        output_frames[frame_idx, ty1:ty2, tx1:tx2, :] = (
+                            orig * (1 - fm) + enh * fm
+                        )
+
+            print(f"[Video Detailer] Done - output shape: {output_frames.shape}")
+            output_mask = mask[0] if mask.ndim == 3 else mask
+            return (output_frames, output_mask)
         else:
             # --- LATENT PATH: pass full latent unchanged; mask restricts denoising ---
             # VACE/WAN models require the latent shape to exactly match the conditioning
@@ -433,50 +467,13 @@ class VideoDetailer:
         decoded_frames = self._fix_decoded_shape(decoded_frames, expected_decode_height)
         print(f"[Video Detailer] After shape fix: {decoded_frames.shape}")
 
-        if image_frames is not None:
-            # IMAGE PATH: decoded crop was upscaled — downscale back to original crop size,
-            # then blend into the original frames.
-            decoded_nchw = decoded_frames.permute(0, 3, 1, 2)
-            downscaled_frames = torch.nn.functional.interpolate(
-                decoded_nchw,
-                size=(crop_height, crop_width),
-                mode="bilinear",
-                align_corners=False,
-            )
-            enhanced_crop_frames = downscaled_frames.permute(0, 2, 3, 1)
-            print(f"[Video Detailer] Downscaled to: {enhanced_crop_frames.shape}")
-
-            output_frames = image_frames.clone()
-            for frame_idx in range(num_frames):
-                frame_mask = cropped_mask[frame_idx].clone()
-                if feather > 0:
-                    frame_mask = self._gaussian_blur_mask(frame_mask, feather)
-
-                enhanced_crop = (
-                    enhanced_crop_frames[frame_idx]
-                    if frame_idx < enhanced_crop_frames.shape[0]
-                    else enhanced_crop_frames[-1]
-                )
-
-                frame_mask_expanded = frame_mask.unsqueeze(-1).to(output_frames.device)
-                enhanced_crop = enhanced_crop.to(output_frames.device)
-                original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
-
-                blended = (
-                    original_crop * (1 - frame_mask_expanded)
-                    + enhanced_crop * frame_mask_expanded
-                )
-                output_frames[frame_idx, y1:y2, x1:x2, :] = blended
-        else:
-            # LATENT PATH: the noise mask already restricted denoising to the target
-            # region during sampling, so decoded_frames is the final result directly.
-            # No need to decode the original latent and blend — that's redundant and
-            # causes frame count/quality issues with WAN's temporal VAE expansion.
-            decoded_num_frames = decoded_frames.shape[0]
-            print(
-                f"[Video Detailer] Latent path: {num_frames} latent frames -> {decoded_num_frames} decoded frames"
-            )
-            output_frames = decoded_frames
+        # LATENT PATH: the noise mask already restricted denoising to the target
+        # region during sampling, so decoded_frames is the final result directly.
+        decoded_num_frames = decoded_frames.shape[0]
+        print(
+            f"[Video Detailer] Latent path: {num_frames} latent frames -> {decoded_num_frames} decoded frames"
+        )
+        output_frames = decoded_frames
 
         print(f"[Video Detailer] Done - output shape: {output_frames.shape}")
 

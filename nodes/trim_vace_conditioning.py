@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 
-class TrimVaceConditioning:
+class TrimConditioning:
     """
     Trims the temporal dimension of VACE conditioning to match a TrimVideoLatent output.
 
@@ -71,4 +71,4 @@ class TrimVaceConditioning:
         return (pos, neg)
 
 
-__all__ = ["TrimVaceConditioning"]
+__all__ = ["TrimConditioning"]
