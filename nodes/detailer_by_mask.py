@@ -170,7 +170,7 @@ class VideoDetailer:
             b, f, w, h, c = decoded.shape
             decoded = decoded.reshape(b * f, w, h, c)
         # [F, W, H, C] → [F, H, W, C]
-        decoded = decoded.transpose(1, 2)
+        decoded = decoded.transpose(1, 2).contiguous()
         return decoded
 
     @staticmethod
