@@ -19,6 +19,7 @@ from .pixel_art.node import ConvertToPixelArt
 from .spritesheet_preview import SpritesheetPreviewNode
 from .stabilizer_trim import StabilizerTrimNode
 from .string_nodes import AdvancedStringConcat, PreviewAsMarkdown, SaveFolderAsZip
+from .trim_vace_conditioning import TrimVaceConditioning
 from .video_nodes import (
     BatchImageSave,
     PreviewImageAlpha,
@@ -54,6 +55,7 @@ __all__ = [
     "ReplaceAlpha",
     "SaveImageSequenceZip",
     "StabilizerTrimNode",
+    "TrimVaceConditioning",
     "VideoMaskEditor",
     "NativeWanPoseStrength",
     "WANFrameCalculatorNode",

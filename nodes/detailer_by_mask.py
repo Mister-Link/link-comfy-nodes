@@ -62,7 +62,7 @@ class VideoDetailer:
                     "INT",
                     {"default": 10, "min": 0, "max": 100, "step": 1},
                 ),
-                "ref_image": ("IMAGE",),
+                "trim_latent": ("INT", {"default": 0, "min": 0, "max": 1024}),
             },
         }
 
@@ -239,7 +239,7 @@ class VideoDetailer:
         latent=None,
         mask_opt=None,
         noise_mask_feather=10,
-        ref_image=None,
+        trim_latent=0,
     ):
         """Process all frames as a batch."""
 
@@ -258,6 +258,12 @@ class VideoDetailer:
         else:
             # WAN latent is [B, C, F, H, W] — shape[0]=B, shape[2]=F, shape[3]=H, shape[4]=W
             latent_samples = latent["samples"]
+            # Trim reference frames prepended by WanVaceToVideo when reference_image is used
+            if trim_latent > 0:
+                latent_samples = latent_samples[:, :, trim_latent:, :, :]
+                print(
+                    f"[Video Detailer] Trimmed {trim_latent} reference frames, latent now: {latent_samples.shape}"
+                )
             num_frames = latent_samples.shape[2]
             img_height = latent_samples.shape[3] * 8
             img_width = latent_samples.shape[4] * 8
@@ -361,23 +367,13 @@ class VideoDetailer:
                 "samples": latent_samples,
                 "noise_mask": upscaled_mask.unsqueeze(1),
             }
-            if ref_image is not None:
-                ref_nchw = ref_image[:, :, :, :3].permute(0, 3, 1, 2)
-                ref_resized = torch.nn.functional.interpolate(
-                    ref_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False
-                ).permute(0, 2, 3, 1)
-                ref_frames = ref_resized.expand(num_frames, -1, -1, -1)
-                print(
-                    f"[Video Detailer] VAE encoding ref_image {ref_frames.shape} for image path..."
-                )
-                latent_dict["latent_image"] = vae.encode(ref_frames[:, :, :, :3])
         else:
             # --- LATENT PATH: pass full latent unchanged; mask restricts denoising ---
             # VACE/WAN models require the latent shape to exactly match the conditioning
             # context, so we must never crop/resize the latent tensor itself.
             expected_decode_height = img_height
             print(f"[Video Detailer] Latent input — passing full latent to sampler")
-            latent_samples = latent["samples"]
+            # latent_samples was already set (and trimmed if needed) above
             print(
                 f"[Video Detailer] Latent shape: {latent_samples.shape}, img_height={img_height}, img_width={img_width}"
             )
@@ -411,19 +407,6 @@ class VideoDetailer:
                 "samples": latent_samples,
                 "noise_mask": noise_mask,
             }
-            if ref_image is not None:
-                ref_nchw = ref_image[:, :, :, :3].permute(0, 3, 1, 2)
-                ref_resized = torch.nn.functional.interpolate(
-                    ref_nchw,
-                    size=(img_height, img_width),
-                    mode="bilinear",
-                    align_corners=False,
-                ).permute(0, 2, 3, 1)
-                ref_frames = ref_resized.expand(num_frames, -1, -1, -1)
-                print(
-                    f"[Video Detailer] VAE encoding ref_image {ref_frames.shape} for latent path..."
-                )
-                latent_dict["latent_image"] = vae.encode(ref_frames[:, :, :, :3])
 
         # Sample using ComfyUI's native ksampler
         print(
