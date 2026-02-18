@@ -35,13 +35,11 @@ class VideoDetailer:
                 "basic_pipe": ("BASIC_PIPE",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
+                "end_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "denoise": (
-                    "FLOAT",
-                    {"default": 0.3, "min": 0.0001, "max": 1.0, "step": 0.01},
-                ),
                 "feather": (
                     "INT",
                     {
@@ -229,10 +227,11 @@ class VideoDetailer:
         basic_pipe,
         seed,
         steps,
+        start_step,
+        end_step,
         cfg,
         sampler_name,
         scheduler,
-        denoise,
         feather,
         noise_mask_feather,
         mask_opt=None,
@@ -417,9 +416,10 @@ class VideoDetailer:
             "noise_mask": noise_mask_4d,
         }
 
-        samples = nodes.common_ksampler(
+        samples = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
             model,
-            seed,
+            "enable",  # add_noise
+            seed,  # noise_seed
             steps,
             cfg,
             sampler_name,
@@ -427,7 +427,9 @@ class VideoDetailer:
             positive,
             negative,
             latent_dict,
-            denoise=denoise,
+            start_step,  # start_at_step
+            end_step,  # end_at_step
+            "disable",  # return_with_leftover_noise
         )[0]
 
         # --- Step 9: Decode and extract right halves ---
