@@ -349,27 +349,26 @@ class VideoDetailer:
             latent_samples = latent["samples"]
             print(f"[Video Detailer] Latent shape: {latent_samples.shape}")
 
-            # Build a full-resolution noise mask (zeros everywhere, ones in the region)
+            # Build a full pixel-space noise mask (ComfyUI resizes it to latent space
+            # internally). Shape: [F, 1, img_height, img_width].
             noise_mask = torch.zeros(
-                (num_frames, 1, img_height // 8, img_width // 8),
-                dtype=latent_samples.dtype,
+                (num_frames, 1, img_height, img_width),
+                dtype=torch.float32,
                 device=latent_samples.device,
             )
-            lx1, ly1 = x1 // 8, y1 // 8
-            lx2, ly2 = x2 // 8, y2 // 8
 
-            # Downscale the cropped mask to latent space and place it in the full mask
-            latent_region_mask = torch.nn.functional.interpolate(
+            # Upscale the cropped mask back to the crop region's pixel size and insert
+            region_mask = torch.nn.functional.interpolate(
                 cropped_mask.unsqueeze(1),
-                size=(ly2 - ly1, lx2 - lx1),
+                size=(crop_height, crop_width),
                 mode="bilinear",
                 align_corners=False,
             )
             if noise_mask_feather > 0:
-                latent_region_mask = self._gaussian_blur_mask(
-                    latent_region_mask.squeeze(1), noise_mask_feather
+                region_mask = self._gaussian_blur_mask(
+                    region_mask.squeeze(1), noise_mask_feather
                 ).unsqueeze(1)
-            noise_mask[:, :, ly1:ly2, lx1:lx2] = latent_region_mask
+            noise_mask[:, :, y1:y2, x1:x2] = region_mask
 
             latent_dict = {
                 "samples": latent_samples,
