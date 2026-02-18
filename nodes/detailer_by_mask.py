@@ -62,6 +62,7 @@ class VideoDetailer:
                     "INT",
                     {"default": 10, "min": 0, "max": 100, "step": 1},
                 ),
+                "ref_image": ("IMAGE",),
             },
         }
 
@@ -160,17 +161,20 @@ class VideoDetailer:
         return (x1, y1, x2, y2)
 
     @staticmethod
-    def _fix_decoded_shape(decoded: torch.Tensor) -> torch.Tensor:
+    def _fix_decoded_shape(decoded: torch.Tensor, expected_height: int) -> torch.Tensor:
         """Normalise WAN VAE output to [F, H, W, C].
 
-        WAN VAE always returns [B, F, W, H, C] — unconditionally reshape and
-        transpose spatial dims to get [F, H, W, C].
+        WAN VAE outputs content rotated 90° CCW in [B, F, d1, d2, C] form.
+        After reshape to [F, d1, d2, C], if d1 != expected_height the spatial
+        dims and pixel content both need correcting via rot90(k=3) (90° CW).
         """
         if decoded.ndim == 5:
-            b, f, w, h, c = decoded.shape
-            decoded = decoded.reshape(b * f, w, h, c)
-        # [F, W, H, C] → [F, H, W, C]
-        decoded = decoded.transpose(1, 2).contiguous()
+            b, f, d1, d2, c = decoded.shape
+            decoded = decoded.reshape(b * f, d1, d2, c)
+        if decoded.shape[1] != expected_height:
+            # rot90(k=3) on spatial dims: corrects 90° CCW rotation in content
+            # and swaps [F, W, H, C] → [F, H, W, C]
+            decoded = torch.rot90(decoded, k=3, dims=(1, 2)).contiguous()
         return decoded
 
     @staticmethod
@@ -235,6 +239,7 @@ class VideoDetailer:
         latent=None,
         mask_opt=None,
         noise_mask_feather=10,
+        ref_image=None,
     ):
         """Process all frames as a batch."""
 
@@ -326,6 +331,7 @@ class VideoDetailer:
 
             new_w = self._fix_to_divisor(new_w, divisor)
             new_h = self._fix_to_divisor(new_h, divisor)
+            expected_decode_height = new_h
             print(
                 f"[Video Detailer] Upscaling {crop_width}x{crop_height} -> {new_w}x{new_h}"
             )
@@ -355,10 +361,21 @@ class VideoDetailer:
                 "samples": latent_samples,
                 "noise_mask": upscaled_mask.unsqueeze(1),
             }
+            if ref_image is not None:
+                ref_nchw = ref_image[:, :, :, :3].permute(0, 3, 1, 2)
+                ref_resized = torch.nn.functional.interpolate(
+                    ref_nchw, size=(new_h, new_w), mode="bilinear", align_corners=False
+                ).permute(0, 2, 3, 1)
+                ref_frames = ref_resized.expand(num_frames, -1, -1, -1)
+                print(
+                    f"[Video Detailer] VAE encoding ref_image {ref_frames.shape} for image path..."
+                )
+                latent_dict["latent_image"] = vae.encode(ref_frames[:, :, :, :3])
         else:
             # --- LATENT PATH: pass full latent unchanged; mask restricts denoising ---
             # VACE/WAN models require the latent shape to exactly match the conditioning
             # context, so we must never crop/resize the latent tensor itself.
+            expected_decode_height = img_height
             print(f"[Video Detailer] Latent input — passing full latent to sampler")
             latent_samples = latent["samples"]
             print(
@@ -394,6 +411,19 @@ class VideoDetailer:
                 "samples": latent_samples,
                 "noise_mask": noise_mask,
             }
+            if ref_image is not None:
+                ref_nchw = ref_image[:, :, :, :3].permute(0, 3, 1, 2)
+                ref_resized = torch.nn.functional.interpolate(
+                    ref_nchw,
+                    size=(img_height, img_width),
+                    mode="bilinear",
+                    align_corners=False,
+                ).permute(0, 2, 3, 1)
+                ref_frames = ref_resized.expand(num_frames, -1, -1, -1)
+                print(
+                    f"[Video Detailer] VAE encoding ref_image {ref_frames.shape} for latent path..."
+                )
+                latent_dict["latent_image"] = vae.encode(ref_frames[:, :, :, :3])
 
         # Sample using ComfyUI's native ksampler
         print(
@@ -417,7 +447,7 @@ class VideoDetailer:
         print(f"[Video Detailer] VAE decoding...")
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
-        decoded_frames = self._fix_decoded_shape(decoded_frames)
+        decoded_frames = self._fix_decoded_shape(decoded_frames, expected_decode_height)
         print(f"[Video Detailer] After shape fix: {decoded_frames.shape}")
 
         if image_frames is not None:
