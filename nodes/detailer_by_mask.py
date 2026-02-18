@@ -161,22 +161,20 @@ class VideoDetailer:
 
     @staticmethod
     def _fix_decoded_shape(
-        decoded: torch.Tensor, latent_samples: torch.Tensor
+        decoded: torch.Tensor, img_height: int, img_width: int
     ) -> torch.Tensor:
         """Normalise VAE output to [F, H, W, C].
 
         WAN VAE returns [B, F, W, H, C] — spatial dims are transposed relative to
         what the rest of the code expects.  We detect this by comparing the decoded
-        spatial dims against the expected pixel size derived from the latent.
+        spatial dims against the known pixel dimensions.
         """
         if decoded.ndim == 5:
             b, f, d1, d2, c = decoded.shape
             decoded = decoded.reshape(b * f, d1, d2, c)
-            # latent_samples is [F, C, lH, lW]; expected pixel size is lH*8 x lW*8
-            expected_h = latent_samples.shape[2] * 8
-            expected_w = latent_samples.shape[3] * 8
-            if decoded.shape[1] == expected_w and decoded.shape[2] == expected_h:
-                decoded = decoded.transpose(1, 2)
+        # After reshape (or if already 4D [F, d1, d2, C]):
+        if decoded.shape[1] == img_width and decoded.shape[2] == img_height:
+            decoded = decoded.transpose(1, 2)
         return decoded
 
     @staticmethod
@@ -257,11 +255,11 @@ class VideoDetailer:
             img_height = image_frames.shape[1]
             img_width = image_frames.shape[2]
         else:
-            # Latent spatial dims are 1/8 of pixel dims
+            # WAN latent is [B, C, F, W, H] — shape[0]=B, shape[2]=F, shape[3]=W, shape[4]=H
             latent_samples = latent["samples"]
-            num_frames = latent_samples.shape[0]
-            img_height = latent_samples.shape[2] * 8
+            num_frames = latent_samples.shape[2]
             img_width = latent_samples.shape[3] * 8
+            img_height = latent_samples.shape[4] * 8
 
         # If no mask provided, create a full mask
         if mask_opt is None:
@@ -417,7 +415,7 @@ class VideoDetailer:
         print(f"[Video Detailer] VAE decoding...")
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
-        decoded_frames = self._fix_decoded_shape(decoded_frames, samples["samples"])
+        decoded_frames = self._fix_decoded_shape(decoded_frames, img_height, img_width)
 
         if image_frames is not None:
             # IMAGE PATH: decoded crop was upscaled — downscale back to original crop size,
@@ -460,7 +458,7 @@ class VideoDetailer:
             print(f"[Video Detailer] Decoding original latent for blending base...")
             original_decoded = vae.decode(latent["samples"])
             original_decoded = self._fix_decoded_shape(
-                original_decoded, latent["samples"]
+                original_decoded, img_height, img_width
             )
 
             output_frames = original_decoded.clone()
