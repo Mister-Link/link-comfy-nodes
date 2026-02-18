@@ -13,7 +13,6 @@ import comfy.samplers
 import comfy.utils
 import node_helpers
 import nodes
-from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 
 class VideoDetailer:
@@ -446,18 +445,16 @@ class VideoDetailer:
         denoise_latent = denoise_latent.to(comfy.model_management.intermediate_device())
         print(f"[Video Detailer] denoise latent {denoise_latent.shape}")
 
-        # Build noise mask for the latent: only right half is denoised
-        feathered_mask = self._gaussian_blur_mask(
-            vace_mask_pixel.squeeze(-1), noise_mask_feather
+        # No noise_mask / DifferentialDiffusion needed here — the VACE mask
+        # already tells the model which regions are frozen vs reactive.
+        # Adding a noise_mask would fight with the VACE conditioning.
+        latent_dict = {"samples": denoise_latent}
+
+        # Sanity check
+        assert denoise_latent.shape[2] == total_latent_length, (
+            f"Latent temporal dim {denoise_latent.shape[2]} != "
+            f"expected {total_latent_length}"
         )
-        # [F, H, W_double] → latent-compatible noise mask
-        noise_mask = feathered_mask.unsqueeze(1)  # [F, 1, H, W_double]
-
-        if "denoise_mask_function" not in model.model_options:
-            model = DifferentialDiffusion.execute(model)[0]
-            print("[Video Detailer] DifferentialDiffusion applied")
-
-        latent_dict = {"samples": denoise_latent, "noise_mask": noise_mask}
 
         # --- Step 9: KSampler ---
         samples = nodes.common_ksampler(
