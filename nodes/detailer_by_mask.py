@@ -160,6 +160,26 @@ class VideoDetailer:
         return (x1, y1, x2, y2)
 
     @staticmethod
+    def _fix_decoded_shape(
+        decoded: torch.Tensor, latent_samples: torch.Tensor
+    ) -> torch.Tensor:
+        """Normalise VAE output to [F, H, W, C].
+
+        WAN VAE returns [B, F, W, H, C] — spatial dims are transposed relative to
+        what the rest of the code expects.  We detect this by comparing the decoded
+        spatial dims against the expected pixel size derived from the latent.
+        """
+        if decoded.ndim == 5:
+            b, f, d1, d2, c = decoded.shape
+            decoded = decoded.reshape(b * f, d1, d2, c)
+            # latent_samples is [F, C, lH, lW]; expected pixel size is lH*8 x lW*8
+            expected_h = latent_samples.shape[2] * 8
+            expected_w = latent_samples.shape[3] * 8
+            if decoded.shape[1] == expected_w and decoded.shape[2] == expected_h:
+                decoded = decoded.transpose(1, 2)
+        return decoded
+
+    @staticmethod
     def _gaussian_blur_mask(mask: torch.Tensor, kernel_size: int) -> torch.Tensor:
         """Apply gaussian blur to mask for feathering."""
         if kernel_size <= 0:
@@ -397,16 +417,7 @@ class VideoDetailer:
         print(f"[Video Detailer] VAE decoding...")
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
-
-        # Handle potential shape mismatches from VAE.
-        # WAN VAE returns [B, F, W, H, C] (width and height are transposed).
-        # Reshape to [B*F, W, H, C] then swap dims 1 and 2 to get [B*F, H, W, C].
-        if decoded_frames.ndim == 5:
-            b, f, d1, d2, c = decoded_frames.shape
-            decoded_frames = decoded_frames.reshape(b * f, d1, d2, c)
-            if d1 != d2 and d1 == img_width and d2 == img_height:
-                # WAN VAE quirk: d1=W, d2=H — transpose to [F, H, W, C]
-                decoded_frames = decoded_frames.transpose(1, 2)
+        decoded_frames = self._fix_decoded_shape(decoded_frames, samples["samples"])
 
         if image_frames is not None:
             # IMAGE PATH: decoded crop was upscaled — downscale back to original crop size,
@@ -448,11 +459,9 @@ class VideoDetailer:
             # original decoded latent as the base.
             print(f"[Video Detailer] Decoding original latent for blending base...")
             original_decoded = vae.decode(latent["samples"])
-            if original_decoded.ndim == 5:
-                b, f, d1, d2, c = original_decoded.shape
-                original_decoded = original_decoded.reshape(b * f, d1, d2, c)
-                if d1 != d2 and d1 == img_width and d2 == img_height:
-                    original_decoded = original_decoded.transpose(1, 2)
+            original_decoded = self._fix_decoded_shape(
+                original_decoded, latent["samples"]
+            )
 
             output_frames = original_decoded.clone()
             for frame_idx in range(num_frames):
