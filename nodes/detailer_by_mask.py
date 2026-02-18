@@ -50,6 +50,7 @@ class VideoDetailer:
                 "image_frames": ("IMAGE",),
                 "latent": ("LATENT",),
                 "mask_opt": ("MASK",),
+                "ref_image": ("IMAGE",),
             },
         }
 
@@ -141,6 +142,7 @@ class VideoDetailer:
         image_frames=None,
         latent=None,
         mask_opt=None,
+        ref_image=None,
     ):
         if image_frames is None and latent is None:
             raise ValueError(
@@ -248,7 +250,24 @@ class VideoDetailer:
             ).unsqueeze(1)
 
         # 5. Encode → sample → decode
-        encoded = vae.encode(up_frames[:, :, :, :3])  # [F, C, lH, lW]
+        # If ref_image provided, use it as the latent starting point so the
+        # sampler denoises from that content rather than from the input frames.
+        if ref_image is not None:
+            # Resize ref_image to match the upscaled crop size, tiled across frames
+            ref_up = (
+                F.interpolate(
+                    ref_image[:1, :, :, :3].permute(0, 3, 1, 2),
+                    size=(up_h, up_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .expand(num_frames, -1, -1, -1)
+            )
+            encoded = vae.encode(ref_up)
+            print(f"[Video Detailer] Using ref_image as latent base {ref_up.shape}")
+        else:
+            encoded = vae.encode(up_frames[:, :, :, :3])  # [F, C, lH, lW]
         latent_dict = {"samples": encoded, "noise_mask": up_mask}
 
         samples = nodes.common_ksampler(
