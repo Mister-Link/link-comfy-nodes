@@ -5,8 +5,10 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+import comfy.latent_formats
 import comfy.model_management
 import comfy.samplers
+import node_helpers
 import nodes
 from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
@@ -57,7 +59,7 @@ class VideoDetailer:
                         "min": 0,
                         "max": 200,
                         "step": 1,
-                        "tooltip": "Gaussian blur for the ref↔frame boundary in "
+                        "tooltip": "Gaussian blur for the ref/frame boundary in "
                         "latent noise mask.",
                     },
                 ),
@@ -123,13 +125,94 @@ class VideoDetailer:
 
     @staticmethod
     def _fix_decoded_shape(decoded: torch.Tensor, expected_height: int) -> torch.Tensor:
-        """Normalise WAN VAE output [B,F,d1,d2,C] → [F,H,W,C]."""
+        """Normalise WAN VAE output [B,F,d1,d2,C] -> [F,H,W,C]."""
         if decoded.ndim == 5:
             b, f, d1, d2, c = decoded.shape
             decoded = decoded.reshape(b * f, d1, d2, c)
         if decoded.shape[1] != expected_height:
             decoded = torch.rot90(decoded, k=3, dims=(1, 2)).contiguous()
         return decoded
+
+    @staticmethod
+    def _build_vace_conditioning(
+        composite_video,
+        vace_mask_pixel,
+        vae,
+        latent_frames,
+        img_height,
+        width_double,
+        strength,
+    ):
+        """
+        Build VACE conditioning for a double-width composite video.
+
+        Args:
+            composite_video: [F, H, W_double, C] pixel frames (ref|frame stitched)
+            vace_mask_pixel: [F, H, W_double, 1] — 0=inactive(ref), 1=reactive(frame)
+            vae: VAE model
+            latent_frames: number of latent temporal frames
+            img_height: pixel height
+            width_double: pixel width of composite (2x)
+            strength: VACE strength value
+
+        Returns:
+            (vace_frames_list, vace_mask_list) ready for conditioning_set_values
+        """
+        num_pixel_frames = composite_video.shape[0]
+
+        # Build inactive/reactive pixel videos (same logic as WanVaceToVideo)
+        # control_video is centered around 0 (subtract 0.5), inactive/reactive
+        # regions are set, then re-centered to 0.5
+        control = composite_video[:, :, :, :3] - 0.5  # [F, H, W_double, 3]
+        inactive = (control * (1 - vace_mask_pixel[:, :, :, :1])) + 0.5
+        reactive = (control * vace_mask_pixel[:, :, :, :1]) + 0.5
+
+        # VAE encode both halves
+        inactive_latent = vae.encode(
+            inactive[:, :, :, :3]
+        )  # [1, 16, LF, H/8, W_double/8]
+        reactive_latent = vae.encode(
+            reactive[:, :, :, :3]
+        )  # [1, 16, LF, H/8, W_double/8]
+        control_video_latent = torch.cat(
+            (inactive_latent, reactive_latent), dim=1
+        )  # [1, 32, LF, H/8, W_double/8]
+
+        print(f"[Video Detailer] VACE latent {control_video_latent.shape}")
+
+        # Build sub-pixel mask (64-channel) — same reshaping as WanVaceToVideo
+        vae_stride = 8
+        height_mask = img_height // vae_stride
+        width_mask = width_double // vae_stride
+
+        # vace_mask_pixel is [F, H, W_double, 1], need [F, H, W_double]
+        mask_2d = vace_mask_pixel[:, :, :, 0]  # [F, H, W_double]
+
+        # Reshape into sub-pixel blocks
+        # [F, H, W] -> [F, h_mask, stride, w_mask, stride]
+        mask_blocks = mask_2d.view(
+            num_pixel_frames, height_mask, vae_stride, width_mask, vae_stride
+        )
+        # -> [stride, stride, F, h_mask, w_mask] = [8, 8, F, H/8, W/8]
+        mask_blocks = mask_blocks.permute(2, 4, 0, 1, 3)
+        # -> [64, F, H/8, W/8]
+        mask_blocks = mask_blocks.reshape(
+            vae_stride * vae_stride, num_pixel_frames, height_mask, width_mask
+        )
+        # Temporal resample to latent_frames
+        mask_blocks = F.interpolate(
+            mask_blocks.unsqueeze(0),
+            size=(latent_frames, height_mask, width_mask),
+            mode="nearest-exact",
+        ).squeeze(0)  # [64, LF, H/8, W/8]
+
+        vace_mask = mask_blocks.unsqueeze(0)  # [1, 64, LF, H/8, W/8]
+
+        print(
+            f"[Video Detailer] VACE mask {vace_mask.shape} mean={vace_mask.mean():.3f}"
+        )
+
+        return [control_video_latent], [vace_mask]
 
     # ------------------------------------------------------------------ main
 
@@ -157,10 +240,10 @@ class VideoDetailer:
         img_width = latent_samples.shape[4] * 8
 
         print(
-            f"[Video Detailer] latent {latent_samples.shape} → {img_width}×{img_height} px"
+            f"[Video Detailer] latent {latent_samples.shape} -> {img_width}x{img_height} px"
         )
 
-        # --- Step 1: Decode original latent → pixel frames ---
+        # --- Step 1: Decode original latent -> pixel frames ---
         original_decoded = vae.decode(latent_samples)
         original_frames = self._fix_decoded_shape(original_decoded, img_height)
         num_pixel_frames = original_frames.shape[0]
@@ -236,12 +319,47 @@ class VideoDetailer:
         composite_video = torch.stack(composite_list)  # [F, H, width_double, C]
         print(f"[Video Detailer] composite {composite_video.shape}")
 
-        # --- Step 5: VAE encode composite → starting latent (img2img) ---
+        # --- Step 5: VAE encode composite -> starting latent (img2img) ---
         composite_latent = vae.encode(composite_video[:, :, :, :3])
-        # [1, 16, latent_frames, H//8, width_double//8]
         print(f"[Video Detailer] encoded composite {composite_latent.shape}")
 
-        # --- Step 6: Build noise mask for double-width latent ---
+        # --- Step 6: Build VACE conditioning for double-width ---
+        # VACE mask: left=0 (inactive/frozen ref), right=1 (reactive/frame)
+        vace_mask_pixel = torch.zeros(
+            (num_pixel_frames, img_height, width_double, 1), dtype=torch.float32
+        )
+        vace_mask_pixel[:, :, half_w:, :] = 1.0
+
+        # Extract existing VACE strength from conditioning (if any)
+        vace_strength = 1.0
+        if len(positive) > 0 and len(positive[0]) > 1:
+            existing_strengths = positive[0][1].get("vace_strength", None)
+            if existing_strengths is not None and len(existing_strengths) > 0:
+                vace_strength = existing_strengths[0]
+                print(f"[Video Detailer] inheriting VACE strength={vace_strength}")
+
+        vace_frames_list, vace_mask_list = self._build_vace_conditioning(
+            composite_video,
+            vace_mask_pixel,
+            vae,
+            latent_frames,
+            img_height,
+            width_double,
+            vace_strength,
+        )
+
+        # Replace VACE values in conditioning (not append — we're replacing
+        # the original-width VACE with our double-width version)
+        vace_values = {
+            "vace_frames": vace_frames_list,
+            "vace_mask": vace_mask_list,
+            "vace_strength": [vace_strength],
+        }
+        positive = node_helpers.conditioning_set_values(positive, vace_values)
+        negative = node_helpers.conditioning_set_values(negative, vace_values)
+        print("[Video Detailer] VACE conditioning rebuilt for double-width")
+
+        # --- Step 7: Build noise mask for double-width latent ---
         # Left half = 0 (reference, no denoising)
         # Right half = user's mask (denoise the frame area)
         noise_mask_wide = torch.zeros(
@@ -272,7 +390,7 @@ class VideoDetailer:
             f"mean={noise_mask_4d.mean():.3f}"
         )
 
-        # --- Step 7: DifferentialDiffusion + KSampler ---
+        # --- Step 8: DifferentialDiffusion + KSampler ---
         if "denoise_mask_function" not in model.model_options:
             model = DifferentialDiffusion.execute(model)[0]
             print("[Video Detailer] DifferentialDiffusion applied")
@@ -295,7 +413,7 @@ class VideoDetailer:
             denoise=denoise,
         )[0]
 
-        # --- Step 8: Decode and extract right halves ---
+        # --- Step 9: Decode and extract right halves ---
         decoded_wide = vae.decode(samples["samples"])
         decoded_wide = self._fix_decoded_shape(decoded_wide, img_height)
         print(f"[Video Detailer] decoded wide {decoded_wide.shape}")
@@ -316,7 +434,7 @@ class VideoDetailer:
 
         print(f"[Video Detailer] refined frames {refined_half.shape}")
 
-        # --- Step 9: Pixel-space compositing ---
+        # --- Step 10: Pixel-space compositing ---
         composite_mask = self._gaussian_blur_mask(mask, feather)
         mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
 
