@@ -398,10 +398,15 @@ class VideoDetailer:
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
 
-        # Handle potential shape mismatches from VAE
+        # Handle potential shape mismatches from VAE.
+        # WAN VAE returns [B, F, W, H, C] (width and height are transposed).
+        # Reshape to [B*F, W, H, C] then swap dims 1 and 2 to get [B*F, H, W, C].
         if decoded_frames.ndim == 5:
-            b, f, h, w, c = decoded_frames.shape
-            decoded_frames = decoded_frames.reshape(b * f, h, w, c)
+            b, f, d1, d2, c = decoded_frames.shape
+            decoded_frames = decoded_frames.reshape(b * f, d1, d2, c)
+            if d1 != d2 and d1 == img_width and d2 == img_height:
+                # WAN VAE quirk: d1=W, d2=H — transpose to [F, H, W, C]
+                decoded_frames = decoded_frames.transpose(1, 2)
 
         if image_frames is not None:
             # IMAGE PATH: decoded crop was upscaled — downscale back to original crop size,
@@ -444,8 +449,10 @@ class VideoDetailer:
             print(f"[Video Detailer] Decoding original latent for blending base...")
             original_decoded = vae.decode(latent["samples"])
             if original_decoded.ndim == 5:
-                b, f, h, w, c = original_decoded.shape
-                original_decoded = original_decoded.reshape(b * f, h, w, c)
+                b, f, d1, d2, c = original_decoded.shape
+                original_decoded = original_decoded.reshape(b * f, d1, d2, c)
+                if d1 != d2 and d1 == img_width and d2 == img_height:
+                    original_decoded = original_decoded.transpose(1, 2)
 
             output_frames = original_decoded.clone()
             for frame_idx in range(num_frames):
