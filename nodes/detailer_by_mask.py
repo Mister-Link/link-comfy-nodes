@@ -173,8 +173,8 @@ class VideoDetailer:
             decoded = decoded.reshape(b * f, d1, d2, c)
         # [F, W, H, C] → [F, H, W, C] via rot90 on the spatial dims
         if decoded.shape[1] == img_width and decoded.shape[2] == img_height:
-            # rot90(k=3) on dims (1,2): rotates W×H content back to H×W
-            decoded = torch.rot90(decoded, k=3, dims=(1, 2))
+            # transpose dims 1 and 2: reinterpret [F, W, H, C] as [F, H, W, C]
+            decoded = decoded.transpose(1, 2)
         return decoded
 
     @staticmethod
@@ -365,7 +365,9 @@ class VideoDetailer:
             # context, so we must never crop/resize the latent tensor itself.
             print(f"[Video Detailer] Latent input — passing full latent to sampler")
             latent_samples = latent["samples"]
-            print(f"[Video Detailer] Latent shape: {latent_samples.shape}")
+            print(
+                f"[Video Detailer] Latent shape: {latent_samples.shape}, img_height={img_height}, img_width={img_width}"
+            )
 
             # Build a full pixel-space noise mask (ComfyUI resizes it to latent space
             # internally). Shape: [F, 1, img_height, img_width].
@@ -387,6 +389,10 @@ class VideoDetailer:
                     region_mask.squeeze(1), noise_mask_feather
                 ).unsqueeze(1)
             noise_mask[:, :, y1:y2, x1:x2] = region_mask
+
+            print(
+                f"[Video Detailer] noise_mask shape: {noise_mask.shape}, min: {noise_mask.min():.3f}, max: {noise_mask.max():.3f}, mean: {noise_mask.mean():.3f}"
+            )
 
             latent_dict = {
                 "samples": latent_samples,
@@ -416,6 +422,7 @@ class VideoDetailer:
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
         decoded_frames = self._fix_decoded_shape(decoded_frames, img_height, img_width)
+        print(f"[Video Detailer] After shape fix: {decoded_frames.shape}")
 
         if image_frames is not None:
             # IMAGE PATH: decoded crop was upscaled — downscale back to original crop size,
