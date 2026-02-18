@@ -1,6 +1,8 @@
-"""Video detailer — refines a video latent using a noise mask."""
+"""Video detailer — refines a video latent with pixel-space compositing."""
 
 from __future__ import annotations
+
+import copy
 
 import torch
 import torch.nn.functional as F
@@ -18,6 +20,9 @@ class VideoDetailer:
     then composites the enhanced result onto the original in pixel space:
       output = (1-mask)*original + mask*enhanced
     This guarantees pixels outside the mask are never modified.
+
+    vace_strength_mult scales the VACE reference influence during denoising
+    so the model stays closer to the reference image.
     """
 
     @classmethod
@@ -39,6 +44,17 @@ class VideoDetailer:
                     "INT",
                     {"default": 20, "min": 0, "max": 200, "step": 1},
                 ),
+                "vace_strength_mult": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.1,
+                        "tooltip": "Multiplier for VACE reference strength during "
+                        "denoising. >1 = stronger reference adherence.",
+                    },
+                ),
             },
             "optional": {
                 "mask_opt": ("MASK",),
@@ -52,7 +68,8 @@ class VideoDetailer:
     DESCRIPTION = (
         "Refines a video latent with pixel-space compositing. "
         "Denoised result is blended onto original frames using the mask, "
-        "so unmasked areas are never modified."
+        "so unmasked areas are never modified. "
+        "vace_strength_mult boosts reference image influence during denoising."
     )
 
     @staticmethod
@@ -100,6 +117,19 @@ class VideoDetailer:
             decoded = torch.rot90(decoded, k=3, dims=(1, 2)).contiguous()
         return decoded
 
+    @staticmethod
+    def _scale_vace_strength(conditioning, mult):
+        """Deep-copy conditioning and multiply all vace_strength values."""
+        if mult == 1.0:
+            return conditioning
+        out = []
+        for tensor, meta in conditioning:
+            meta = copy.copy(meta)
+            if "vace_strength" in meta:
+                meta["vace_strength"] = [s * mult for s in meta["vace_strength"]]
+            out.append([tensor, meta])
+        return out
+
     def execute(
         self,
         latent,
@@ -111,25 +141,29 @@ class VideoDetailer:
         scheduler,
         denoise,
         noise_mask_feather,
+        vace_strength_mult,
         mask_opt=None,
     ):
         model, clip, vae, positive, negative = basic_pipe
 
         # WAN latent: [B, C, F, H, W]
         latent_samples = latent["samples"]
-        num_frames = latent_samples.shape[2]
         img_height = latent_samples.shape[3] * 8
         img_width = latent_samples.shape[4] * 8
 
         print(
             f"[Video Detailer] latent {latent_samples.shape} → "
-            f"{img_width}×{img_height} px, {num_frames} frames"
+            f"{img_width}×{img_height} px"
         )
 
         # --- Step 1: Decode the ORIGINAL latent as reference frames ---
+        # WAN VAE temporally upscales: pixel_frames = max(0, latent_frames*4 - 3)
         original_decoded = vae.decode(latent_samples)
         original_frames = self._fix_decoded_shape(original_decoded, img_height)
-        print(f"[Video Detailer] original frames {original_frames.shape}")
+        num_frames = original_frames.shape[0]
+        print(
+            f"[Video Detailer] original frames {original_frames.shape} ({num_frames} frames)"
+        )
 
         # --- Step 2: Build pixel-space mask [F, H, W] ---
         if mask_opt is None:
@@ -156,7 +190,13 @@ class VideoDetailer:
             model = DifferentialDiffusion.execute(model)[0]
             print("[Video Detailer] DifferentialDiffusion applied")
 
-        # --- Step 4: KSampler denoising ---
+        # --- Step 4: Boost VACE reference strength for this detailer pass ---
+        boosted_positive = self._scale_vace_strength(positive, vace_strength_mult)
+        boosted_negative = self._scale_vace_strength(negative, vace_strength_mult)
+        if vace_strength_mult != 1.0:
+            print(f"[Video Detailer] VACE strength multiplied by {vace_strength_mult}")
+
+        # --- Step 5: KSampler denoising ---
         latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
 
         samples = nodes.common_ksampler(
@@ -166,18 +206,18 @@ class VideoDetailer:
             cfg,
             sampler_name,
             scheduler,
-            positive,
-            negative,
+            boosted_positive,
+            boosted_negative,
             latent_dict,
             denoise=denoise,
         )[0]
 
-        # --- Step 5: Decode the DENOISED latent ---
+        # --- Step 6: Decode the DENOISED latent ---
         enhanced_decoded = vae.decode(samples["samples"])
         enhanced_frames = self._fix_decoded_shape(enhanced_decoded, img_height)
         print(f"[Video Detailer] enhanced frames {enhanced_frames.shape}")
 
-        # --- Step 6: Pixel-space compositing ---
+        # --- Step 7: Pixel-space compositing ---
         # Feather the mask for smooth blending at edges
         composite_mask = self._gaussian_blur_mask(mask, noise_mask_feather)
         # [F, H, W] → [F, H, W, 1] for broadcasting with [F, H, W, C]
