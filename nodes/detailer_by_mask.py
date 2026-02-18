@@ -255,11 +255,11 @@ class VideoDetailer:
             img_height = image_frames.shape[1]
             img_width = image_frames.shape[2]
         else:
-            # WAN latent is [B, C, F, W, H] — shape[0]=B, shape[2]=F, shape[3]=W, shape[4]=H
+            # WAN latent is [B, C, F, H, W] — shape[0]=B, shape[2]=F, shape[3]=H, shape[4]=W
             latent_samples = latent["samples"]
             num_frames = latent_samples.shape[2]
-            img_width = latent_samples.shape[3] * 8
-            img_height = latent_samples.shape[4] * 8
+            img_height = latent_samples.shape[3] * 8
+            img_width = latent_samples.shape[4] * 8
 
         # If no mask provided, create a full mask
         if mask_opt is None:
