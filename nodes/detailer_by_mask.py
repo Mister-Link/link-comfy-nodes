@@ -53,7 +53,6 @@ class VideoDetailer:
                     "INT",
                     {"default": 10, "min": 0, "max": 100, "step": 1},
                 ),
-                "trim_latent": ("INT", {"default": 0, "min": 0, "max": 1024}),
             },
         }
 
@@ -149,7 +148,6 @@ class VideoDetailer:
         latent=None,
         mask_opt=None,
         noise_mask_feather=10,
-        trim_latent=0,
     ):
         """Process all frames as a batch."""
 
@@ -168,12 +166,6 @@ class VideoDetailer:
         else:
             # WAN latent is [B, C, F, H, W] — shape[0]=B, shape[2]=F, shape[3]=H, shape[4]=W
             latent_samples = latent["samples"]
-            # Trim reference frames prepended by WanVaceToVideo when reference_image is used
-            if trim_latent > 0:
-                latent_samples = latent_samples[:, :, trim_latent:, :, :]
-                print(
-                    f"[Video Detailer] Trimmed {trim_latent} reference frames, latent now: {latent_samples.shape}"
-                )
             num_frames = latent_samples.shape[2]
             img_height = latent_samples.shape[3] * 8
             img_width = latent_samples.shape[4] * 8
