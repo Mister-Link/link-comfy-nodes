@@ -250,41 +250,95 @@ class VideoDetailer:
             ).unsqueeze(1)
 
         # 5. Encode → sample → decode
-        # If ref_image provided, use it as the latent starting point so the
-        # sampler denoises from that content rather than from the input frames.
         if ref_image is not None:
-            # Resize ref_image to match the upscaled crop size, tiled across frames
-            ref_up = (
+            # Side-by-side: [ref | frame] so the model sees the reference as
+            # direct pixel context while sampling the frame.
+            # Resize ref to same height as upscaled crop, keep aspect ratio.
+            ref_src = ref_image[:1, :, :, :3]  # [1, rH, rW, C]
+            rH, rW = ref_src.shape[1], ref_src.shape[2]
+            ref_scale = up_h / rH
+            ref_w = self._snap(int(rW * ref_scale), 64)
+            ref_resized = (
                 F.interpolate(
-                    ref_image[:1, :, :, :3].permute(0, 3, 1, 2),
-                    size=(up_h, up_w),
+                    ref_src.permute(0, 3, 1, 2),
+                    size=(up_h, ref_w),
                     mode="bilinear",
                     align_corners=False,
                 )
                 .permute(0, 2, 3, 1)
                 .expand(num_frames, -1, -1, -1)
+            )  # [F, up_h, ref_w, C]
+
+            # Concatenate horizontally: [ref | frame]
+            combined = torch.cat(
+                [ref_resized, up_frames], dim=2
+            )  # [F, up_h, ref_w+up_w, C]
+            combined_w = ref_w + up_w
+            print(
+                f"[Video Detailer] Side-by-side: ref {ref_w}px + frame {up_w}px = {combined_w}px wide"
             )
-            encoded = vae.encode(ref_up)
-            print(f"[Video Detailer] Using ref_image as latent base {ref_up.shape}")
+
+            encoded = vae.encode(combined[:, :, :, :3])  # [F, C, lH, lW_combined]
+
+            # Noise mask: only denoise the right (frame) half
+            ref_lw = ref_w // 8  # latent width of ref portion
+            frame_lw = up_w // 8
+            total_lw = encoded.shape[3]
+            side_mask = torch.zeros(
+                (num_frames, 1, encoded.shape[2], total_lw),
+                dtype=torch.float32,
+                device=encoded.device,
+            )
+            # Right half mask at latent resolution
+            frame_up_mask_lat = F.interpolate(
+                up_mask,
+                size=(encoded.shape[2], frame_lw),
+                mode="bilinear",
+                align_corners=False,
+            )
+            side_mask[:, :, :, ref_lw:] = frame_up_mask_lat
+
+            latent_dict = {"samples": encoded, "noise_mask": side_mask}
+
+            samples = nodes.common_ksampler(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_dict,
+                denoise=denoise,
+            )[0]
+
+            decoded_combined = vae.decode(
+                samples["samples"]
+            )  # [F, up_h, combined_w, C]
+            decoded_combined = self._fix_decoded_shape(decoded_combined, up_h)
+
+            # Crop out only the right (frame) half
+            decoded = decoded_combined[:, :, ref_w:, :]  # [F, up_h, up_w, C]
         else:
             encoded = vae.encode(up_frames[:, :, :, :3])  # [F, C, lH, lW]
-        latent_dict = {"samples": encoded, "noise_mask": up_mask}
+            latent_dict = {"samples": encoded, "noise_mask": up_mask}
 
-        samples = nodes.common_ksampler(
-            model,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            positive,
-            negative,
-            latent_dict,
-            denoise=denoise,
-        )[0]
+            samples = nodes.common_ksampler(
+                model,
+                seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_dict,
+                denoise=denoise,
+            )[0]
 
-        decoded = vae.decode(samples["samples"])  # [F, up_h, up_w, C]
-        decoded = self._fix_decoded_shape(decoded, up_h)
+            decoded = vae.decode(samples["samples"])  # [F, up_h, up_w, C]
+            decoded = self._fix_decoded_shape(decoded, up_h)
 
         # 6. Downscale back to crop size
         enhanced = F.interpolate(
