@@ -452,51 +452,19 @@ class VideoDetailer:
                 )
                 output_frames[frame_idx, y1:y2, x1:x2, :] = blended
         else:
-            # LATENT PATH: decoded_frames is already full-resolution (same shape as
-            # decoding the original latent). Blend the detailed region back using the
-            # original decoded latent as the base.
-            print(f"[Video Detailer] Decoding original latent for blending base...")
-            original_decoded = vae.decode(latent["samples"])
-            original_decoded = self._fix_decoded_shape(
-                original_decoded, img_height, img_width
+            # LATENT PATH: the noise mask already restricted denoising to the target
+            # region during sampling, so decoded_frames is the final result directly.
+            # No need to decode the original latent and blend — that's redundant and
+            # causes frame count/quality issues with WAN's temporal VAE expansion.
+            decoded_num_frames = decoded_frames.shape[0]
+            print(
+                f"[Video Detailer] Latent path: {num_frames} latent frames -> {decoded_num_frames} decoded frames"
             )
+            output_frames = decoded_frames
 
-            # WAN VAE expands frames temporally (e.g. 5 latent → 17 decoded).
-            # Use the actual decoded frame count for blending.
-            decoded_num_frames = original_decoded.shape[0]
-            if decoded_num_frames != num_frames:
-                print(
-                    f"[Video Detailer] Temporal expansion: {num_frames} latent → {decoded_num_frames} decoded frames"
-                )
-                indices = torch.linspace(0, num_frames - 1, decoded_num_frames).long()
-                cropped_mask = cropped_mask[indices]
+        print(f"[Video Detailer] Done - output shape: {output_frames.shape}")
 
-            output_frames = original_decoded.clone()
-            for frame_idx in range(decoded_num_frames):
-                frame_mask = cropped_mask[frame_idx].clone()
-                if feather > 0:
-                    frame_mask = self._gaussian_blur_mask(frame_mask, feather)
-
-                enhanced_crop = (
-                    decoded_frames[frame_idx]
-                    if frame_idx < decoded_frames.shape[0]
-                    else decoded_frames[-1]
-                )
-                enhanced_crop = enhanced_crop[y1:y2, x1:x2, :]
-
-                frame_mask_expanded = frame_mask.unsqueeze(-1).to(output_frames.device)
-                enhanced_crop = enhanced_crop.to(output_frames.device)
-                original_crop = output_frames[frame_idx, y1:y2, x1:x2, :]
-
-                blended = (
-                    original_crop * (1 - frame_mask_expanded)
-                    + enhanced_crop * frame_mask_expanded
-                )
-                output_frames[frame_idx, y1:y2, x1:x2, :] = blended
-
-        print(f"[Video Detailer] Done - processed {num_frames} frames")
-
-        # Return output
+        # Return output — always return a single [H, W] mask from the first frame
         output_mask = mask[0] if mask.ndim == 3 else mask
         return (output_frames, output_mask)
 
