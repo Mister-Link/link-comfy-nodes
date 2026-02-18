@@ -160,21 +160,17 @@ class VideoDetailer:
         return (x1, y1, x2, y2)
 
     @staticmethod
-    def _fix_decoded_shape(
-        decoded: torch.Tensor, img_height: int, img_width: int
-    ) -> torch.Tensor:
-        """Normalise VAE output to [F, H, W, C].
+    def _fix_decoded_shape(decoded: torch.Tensor) -> torch.Tensor:
+        """Normalise WAN VAE output to [F, H, W, C].
 
-        WAN VAE returns [B, F, W, H, C] with pixels rotated 90°.
-        We detect this when the spatial dims are swapped vs expected and rotate back.
+        WAN VAE always returns [B, F, W, H, C] — unconditionally reshape and
+        transpose spatial dims to get [F, H, W, C].
         """
         if decoded.ndim == 5:
-            b, f, d1, d2, c = decoded.shape
-            decoded = decoded.reshape(b * f, d1, d2, c)
-        # [F, W, H, C] → [F, H, W, C] via rot90 on the spatial dims
-        if decoded.shape[1] == img_width and decoded.shape[2] == img_height:
-            # transpose dims 1 and 2: reinterpret [F, W, H, C] as [F, H, W, C]
-            decoded = decoded.transpose(1, 2)
+            b, f, w, h, c = decoded.shape
+            decoded = decoded.reshape(b * f, w, h, c)
+        # [F, W, H, C] → [F, H, W, C]
+        decoded = decoded.transpose(1, 2)
         return decoded
 
     @staticmethod
@@ -421,7 +417,7 @@ class VideoDetailer:
         print(f"[Video Detailer] VAE decoding...")
         decoded_frames = vae.decode(samples["samples"])
         print(f"[Video Detailer] Decoded shape: {decoded_frames.shape}")
-        decoded_frames = self._fix_decoded_shape(decoded_frames, img_height, img_width)
+        decoded_frames = self._fix_decoded_shape(decoded_frames)
         print(f"[Video Detailer] After shape fix: {decoded_frames.shape}")
 
         if image_frames is not None:
