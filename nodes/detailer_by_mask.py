@@ -165,16 +165,16 @@ class VideoDetailer:
     ) -> torch.Tensor:
         """Normalise VAE output to [F, H, W, C].
 
-        WAN VAE returns [B, F, W, H, C] — spatial dims are transposed relative to
-        what the rest of the code expects.  We detect this by comparing the decoded
-        spatial dims against the known pixel dimensions.
+        WAN VAE returns [B, F, W, H, C] with pixels rotated 90°.
+        We detect this when the spatial dims are swapped vs expected and rotate back.
         """
         if decoded.ndim == 5:
             b, f, d1, d2, c = decoded.shape
             decoded = decoded.reshape(b * f, d1, d2, c)
-        # After reshape (or if already 4D [F, d1, d2, C]):
+        # [F, W, H, C] → [F, H, W, C] via rot90 on the spatial dims
         if decoded.shape[1] == img_width and decoded.shape[2] == img_height:
-            decoded = decoded.transpose(1, 2)
+            # rot90(k=3) on dims (1,2): rotates W×H content back to H×W
+            decoded = torch.rot90(decoded, k=3, dims=(1, 2))
         return decoded
 
     @staticmethod
@@ -461,8 +461,18 @@ class VideoDetailer:
                 original_decoded, img_height, img_width
             )
 
+            # WAN VAE expands frames temporally (e.g. 5 latent → 17 decoded).
+            # Use the actual decoded frame count for blending.
+            decoded_num_frames = original_decoded.shape[0]
+            if decoded_num_frames != num_frames:
+                print(
+                    f"[Video Detailer] Temporal expansion: {num_frames} latent → {decoded_num_frames} decoded frames"
+                )
+                indices = torch.linspace(0, num_frames - 1, decoded_num_frames).long()
+                cropped_mask = cropped_mask[indices]
+
             output_frames = original_decoded.clone()
-            for frame_idx in range(num_frames):
+            for frame_idx in range(decoded_num_frames):
                 frame_mask = cropped_mask[frame_idx].clone()
                 if feather > 0:
                     frame_mask = self._gaussian_blur_mask(frame_mask, feather)
