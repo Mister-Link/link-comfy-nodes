@@ -45,7 +45,7 @@ class VideoDetailer:
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
                 "denoise": (
                     "FLOAT",
-                    {"default": 0.35, "min": 0.0001, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0001, "max": 1.0, "step": 0.01},
                 ),
                 "feather": (
                     "INT",
@@ -430,20 +430,20 @@ class VideoDetailer:
             f"latent_length={total_latent_length}"
         )
 
-        # --- Step 8: Encode composite video as starting latent (img2img) ---
-        # The composite video IS the starting point — at low denoise the
-        # sampler stays close to this content.
-        encoded_composite = vae.encode(composite_video[:, :, :, :3])
-        # Shape: [1, 16, latent_frames, H//8, W_double//8]
-        print(f"[Video Detailer] encoded composite {encoded_composite.shape}")
-
-        # Prepend the reference frame latent (just the 16-ch image part, not the 32-ch VACE version)
-        ref_latent_img = vae.encode(ref_wide[:, :, :, :3])
-        # [1, 16, 1, H//8, W_double//8]
-        denoise_latent = torch.cat([ref_latent_img, encoded_composite], dim=2)
-        # [1, 16, 1+latent_frames, H//8, W_double//8] = [1, 16, total_latent_length, ...]
-        denoise_latent = denoise_latent.to(comfy.model_management.intermediate_device())
-        print(f"[Video Detailer] denoise latent {denoise_latent.shape}")
+        # --- Step 8: Build the denoising latent ---
+        # VACE is designed to work from a zero/noise latent — it provides
+        # the guidance, the sampler generates from scratch following it.
+        # Use denoise=1.0 for full VACE-guided generation, or lower to
+        # blend between the encoded content and VACE-guided generation.
+        latent_h = img_height // 8
+        latent_w = width_double // 8
+        denoise_latent = torch.zeros(
+            [1, 16, total_latent_length, latent_h, latent_w],
+            device=comfy.model_management.intermediate_device(),
+        )
+        print(
+            f"[Video Detailer] denoise latent {denoise_latent.shape} (zeros — VACE guides generation)"
+        )
 
         # No noise_mask / DifferentialDiffusion needed here — the VACE mask
         # already tells the model which regions are frozen vs reactive.
