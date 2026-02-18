@@ -99,7 +99,7 @@ class VideoDetailer:
         return decoded
 
     def execute(
-        dsaself,
+        self,
         latent,
         basic_pipe,
         seed,
