@@ -1,35 +1,36 @@
-"""Video detailer — per-frame crop→denoise→paste inspired by Impact MaskDetailer."""
+"""Video detailer — reference-guided refinement using VACE conditioning."""
 
 from __future__ import annotations
 
 import copy
-import math
 
 import torch
 import torch.nn.functional as F
 
-import comfy.sample
+import comfy.latent_formats
+import comfy.model_management
 import comfy.samplers
 import comfy.utils
-import latent_preview
+import node_helpers
 import nodes
 from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 
 class VideoDetailer:
     """
-    MaskDetailer-style node for video.
+    Reference-guided video detailer using VACE conditioning.
 
-    For each frame in the decoded video:
-      1. Crop the masked region (with padding via crop_factor)
-      2. Upscale the crop to guide_size (LANCZOS)
-      3. VAE encode → KSampler img2img at low denoise → VAE decode
-      4. Downscale back to original crop size (LANCZOS)
-      5. Feathered alpha-blend paste onto the original frame
+    Stitches a reference image beside each video frame, then uses the VACE
+    model to denoise the frame half while the reference half stays frozen.
+    The model "sees" the reference and keeps the output consistent with it.
 
-    Because denoise < 1.0, the KSampler starts from the encoded crop itself
-    (img2img), so output naturally stays close to the input.
-    Unmasked areas are never touched — they come from the original decode.
+    Pipeline:
+      1. Decode video latent → pixel frames
+      2. Build composite video: [reference | frame] per frame (double-width)
+      3. Build VACE conditioning: left=inactive (frozen ref), right=reactive
+      4. KSampler denoises the double-width latent
+      5. Decode, crop out right halves (the refined frames)
+      6. Feathered alpha-blend paste onto original frames
     """
 
     @classmethod
@@ -68,47 +69,25 @@ class VideoDetailer:
                         "(DifferentialDiffusion boundary softness).",
                     },
                 ),
-                "crop_factor": (
+                "vace_strength": (
                     "FLOAT",
                     {
-                        "default": 3.0,
-                        "min": 1.0,
-                        "max": 10.0,
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 100.0,
                         "step": 0.1,
-                        "tooltip": "How much to expand the crop beyond the mask bbox. "
-                        "Larger = more context for the model.",
-                    },
-                ),
-                "guide_size": (
-                    "INT",
-                    {
-                        "default": 512,
-                        "min": 64,
-                        "max": 2048,
-                        "step": 64,
-                        "tooltip": "Target resolution for the short side of the crop "
-                        "before denoising. Higher = finer detail.",
-                    },
-                ),
-                "max_size": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 64,
-                        "max": 4096,
-                        "step": 64,
-                        "tooltip": "Maximum resolution cap after upscaling.",
+                        "tooltip": "VACE conditioning strength for reference guidance.",
                     },
                 ),
             },
             "optional": {
                 "mask_opt": ("MASK",),
-                "image_model_pipe": (
-                    "BASIC_PIPE",
+                "reference_image": (
+                    "IMAGE",
                     {
-                        "tooltip": "Optional image (non-video) model pipe for "
-                        "per-frame img2img. If not provided, falls back to "
-                        "video-latent denoise + pixel composite."
+                        "tooltip": "Reference image to guide denoising. The model "
+                        "sees this as frozen context and keeps output "
+                        "consistent with it."
                     },
                 ),
             },
@@ -119,9 +98,9 @@ class VideoDetailer:
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "MaskDetailer for video. Crops masked regions per-frame, "
-        "upscales, img2img denoises, downscales, and pastes back with "
-        "feathered blending. Unmasked areas are never modified."
+        "Reference-guided video detailer. Stitches reference image beside "
+        "each frame, uses VACE to denoise with the reference as frozen "
+        "context. Unmasked areas are never modified."
     )
 
     # ------------------------------------------------------------------ utils
@@ -173,250 +152,112 @@ class VideoDetailer:
         return decoded
 
     @staticmethod
-    def _mask_bbox(mask_2d: torch.Tensor):
-        """Get tight bounding box [x1, y1, x2, y2] of nonzero region in a 2D mask."""
-        rows = torch.any(mask_2d > 0.5, dim=1)
-        cols = torch.any(mask_2d > 0.5, dim=0)
-        if not rows.any():
-            return None
-        y1, y2 = torch.where(rows)[0][[0, -1]]
-        x1, x2 = torch.where(cols)[0][[0, -1]]
-        return (x1.item(), y1.item(), x2.item() + 1, y2.item() + 1)
-
-    @staticmethod
-    def _expand_crop_region(bbox, crop_factor, img_w, img_h):
-        """Expand bbox by crop_factor, clamped to image bounds."""
-        x1, y1, x2, y2 = bbox
-        bw, bh = x2 - x1, y2 - y1
-        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        new_w = bw * crop_factor
-        new_h = bh * crop_factor
-        nx1 = max(0, int(cx - new_w / 2))
-        ny1 = max(0, int(cy - new_h / 2))
-        nx2 = min(img_w, int(cx + new_w / 2))
-        ny2 = min(img_h, int(cy + new_h / 2))
-        return (nx1, ny1, nx2, ny2)
-
-    @staticmethod
-    def _resize_tensor_image(image: torch.Tensor, w: int, h: int) -> torch.Tensor:
-        """Resize [1,H,W,C] image tensor using bilinear interpolation."""
-        # [1,H,W,C] → [1,C,H,W]
-        img = image.permute(0, 3, 1, 2)
-        img = F.interpolate(img, size=(h, w), mode="bilinear", align_corners=False)
-        # [1,C,H,W] → [1,H,W,C]
-        return img.permute(0, 2, 3, 1)
-
-    @staticmethod
-    def _scale_vace_strength(conditioning, mult):
-        """Deep-copy conditioning and multiply all vace_strength values."""
-        if mult == 1.0:
-            return conditioning
+    def _strip_vace_keys(conditioning):
+        """Return a copy of conditioning with VACE keys removed."""
         out = []
         for tensor, meta in conditioning:
-            meta = copy.copy(meta)
-            if "vace_strength" in meta:
-                meta["vace_strength"] = [s * mult for s in meta["vace_strength"]]
+            meta = meta.copy()
+            meta.pop("vace_frames", None)
+            meta.pop("vace_mask", None)
+            meta.pop("vace_strength", None)
             out.append([tensor, meta])
         return out
 
-    # ---------------------------------------------- per-frame detail pipeline
-
-    def _detail_frame(
+    def _build_vace_conditioning(
         self,
-        frame: torch.Tensor,
-        mask_2d: torch.Tensor,
-        model,
         vae,
+        composite_video,
+        vace_mask_pixel,
+        num_pixel_frames,
+        height,
+        width_double,
+        vace_strength,
         positive,
         negative,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        denoise,
-        feather,
-        noise_mask_feather,
-        crop_factor,
-        guide_size,
-        max_size,
-    ) -> torch.Tensor:
-        """Crop→upscale→img2img→downscale→paste for one frame.
+        reference_image_latent=None,
+    ):
+        """Build VACE conditioning from a composite video and mask.
 
         Args:
-            frame: [H, W, C] single frame
-            mask_2d: [H, W] mask for this frame
+            vae: the WAN VAE
+            composite_video: [F, H, W*2, C] pixel frames (ref|frame side by side)
+            vace_mask_pixel: [F, H, W*2, 1] mask (0=frozen, 1=reactive)
+            num_pixel_frames: number of pixel frames
+            height, width_double: spatial dims of composite
+            vace_strength: VACE strength float
+            positive, negative: conditioning to attach VACE to
+            reference_image_latent: optional [1, 32, 1, H//8, W_double//8] prepend ref
         Returns:
-            [H, W, C] refined frame
+            (positive, negative, latent_length)
         """
-        img_h, img_w = frame.shape[0], frame.shape[1]
+        latent_length = ((num_pixel_frames - 1) // 4) + 1
 
-        # Find mask bbox
-        bbox = self._mask_bbox(mask_2d)
-        if bbox is None:
-            return frame  # empty mask, nothing to do
+        # Inactive/reactive split (VACE's core trick)
+        # Grey (0.5) = "no information" signal
+        cv = composite_video - 0.5
+        inactive = (cv * (1 - vace_mask_pixel)) + 0.5  # frozen regions show content
+        reactive = (cv * vace_mask_pixel) + 0.5  # reactive regions show content
 
-        # Expand crop region
-        crop_region = self._expand_crop_region(bbox, crop_factor, img_w, img_h)
-        cx1, cy1, cx2, cy2 = crop_region
-        crop_w, crop_h = cx2 - cx1, cy2 - cy1
+        # VAE encode both halves
+        inactive_latent = vae.encode(inactive[:, :, :, :3])
+        reactive_latent = vae.encode(reactive[:, :, :, :3])
+        control_video_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
+        # Shape: [1, 32, latent_length, H//8, W_double//8]
 
-        # Crop image and mask
-        cropped_image = frame[cy1:cy2, cx1:cx2, :].unsqueeze(0)  # [1, ch, cw, C]
-        cropped_mask = mask_2d[cy1:cy2, cx1:cx2]  # [ch, cw]
-
-        # Compute upscale
-        bbox_w, bbox_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        upscale = guide_size / max(min(bbox_w, bbox_h), 1)
-        new_w = int(crop_w * upscale)
-        new_h = int(crop_h * upscale)
-        if new_w > max_size or new_h > max_size:
-            upscale *= max_size / max(new_w, new_h)
-            new_w = int(crop_w * upscale)
-            new_h = int(crop_h * upscale)
-        # Round to nearest 8 for VAE
-        new_w = max(8, (new_w // 8) * 8)
-        new_h = max(8, (new_h // 8) * 8)
-
-        if upscale < 1.0:
-            upscale = 1.0
-            new_w = max(8, (crop_w // 8) * 8)
-            new_h = max(8, (crop_h // 8) * 8)
-
-        # Upscale crop
-        upscaled = self._resize_tensor_image(cropped_image, new_w, new_h)
-
-        # Build noise mask for the upscaled region
-        upscaled_mask = (
-            F.interpolate(
-                cropped_mask.unsqueeze(0).unsqueeze(0).float(),
-                size=(new_h, new_w),
-                mode="bilinear",
-                align_corners=False,
+        # Optionally prepend reference image on temporal axis
+        if reference_image_latent is not None:
+            control_video_latent = torch.cat(
+                (reference_image_latent, control_video_latent), dim=2
             )
-            .squeeze(0)
-            .squeeze(0)
+
+        # Build the 64-channel sub-pixel mask
+        vae_stride = 8
+        h_mask = height // vae_stride
+        w_mask = width_double // vae_stride
+
+        # vace_mask_pixel: [F, H, W_double, 1] → [F, H, W_double]
+        mask_flat = vace_mask_pixel.squeeze(-1)
+        # Reshape to unfold 8×8 sub-pixels
+        mask_r = mask_flat.view(
+            num_pixel_frames, h_mask, vae_stride, w_mask, vae_stride
+        )
+        mask_r = mask_r.permute(2, 4, 0, 1, 3)  # [8, 8, F, H//8, W//8]
+        mask_r = mask_r.reshape(
+            vae_stride * vae_stride, num_pixel_frames, h_mask, w_mask
+        )  # [64, F, H//8, W//8]
+
+        mask_r = F.interpolate(
+            mask_r.unsqueeze(0),
+            size=(latent_length, h_mask, w_mask),
+            mode="nearest-exact",
+        ).squeeze(0)  # [64, LT, H//8, W//8]
+
+        # Prepend zeros for reference frame if present
+        if reference_image_latent is not None:
+            ref_temporal = reference_image_latent.shape[2]
+            mask_pad = torch.zeros(64, ref_temporal, h_mask, w_mask)
+            mask_r = torch.cat((mask_pad, mask_r), dim=1)
+            latent_length += ref_temporal
+
+        vace_mask = mask_r.unsqueeze(0)  # [1, 64, total_LT, H//8, W//8]
+
+        # Strip old VACE keys and attach new ones
+        new_positive = self._strip_vace_keys(positive)
+        new_negative = self._strip_vace_keys(negative)
+
+        vace_values = {
+            "vace_frames": [control_video_latent],
+            "vace_mask": [vace_mask],
+            "vace_strength": [vace_strength],
+        }
+        new_positive = node_helpers.conditioning_set_values(
+            new_positive, vace_values, append=True
+        )
+        new_negative = node_helpers.conditioning_set_values(
+            new_negative, vace_values, append=True
         )
 
-        # Feather the noise mask for DifferentialDiffusion
-        if noise_mask_feather > 0:
-            upscaled_mask = self._gaussian_blur_mask(upscaled_mask, noise_mask_feather)
-
-        # VAE encode
-        latent = vae.encode(upscaled.squeeze(0).unsqueeze(0))  # expects [B, H, W, C]
-        latent_dict = {"samples": latent}
-
-        # Attach noise mask if not a full mask
-        if upscaled_mask.mean() < 0.99:
-            # Apply DifferentialDiffusion
-            detail_model = model
-            if "denoise_mask_function" not in detail_model.model_options:
-                detail_model = DifferentialDiffusion.execute(detail_model)[0]
-            noise_mask_latent = upscaled_mask.unsqueeze(0).unsqueeze(0)
-            latent_dict["noise_mask"] = noise_mask_latent
-
-            samples = nodes.common_ksampler(
-                detail_model,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive,
-                negative,
-                latent_dict,
-                denoise=denoise,
-            )[0]
-        else:
-            samples = nodes.common_ksampler(
-                model,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive,
-                negative,
-                latent_dict,
-                denoise=denoise,
-            )[0]
-
-        # VAE decode
-        refined = vae.decode(samples["samples"])
-        # Handle shape — image VAE returns [B, H, W, C]
-        if refined.ndim == 5:
-            refined = refined.squeeze(0)
-        if refined.ndim == 4:
-            refined = refined[0]  # [H, W, C]
-
-        # Downscale back to original crop size
-        refined = self._resize_tensor_image(
-            refined.unsqueeze(0), crop_w, crop_h
-        ).squeeze(0)  # [crop_h, crop_w, C]
-
-        # Build feathered paste mask
-        paste_mask = self._gaussian_blur_mask(cropped_mask, feather)
-        paste_mask = paste_mask.unsqueeze(-1).to(frame.device)  # [ch, cw, 1]
-
-        # Composite: paste refined crop back onto frame
-        output = frame.clone()
-        region = output[cy1:cy2, cx1:cx2, :]
-        output[cy1:cy2, cx1:cx2, :] = (
-            1 - paste_mask
-        ) * region + paste_mask * refined.to(frame.device)
-
-        return output
-
-    # ---------------------------------------------- video-latent fallback
-
-    def _detail_video_latent(
-        self,
-        latent_samples,
-        original_frames,
-        mask,
-        num_frames,
-        model,
-        vae,
-        positive,
-        negative,
-        seed,
-        steps,
-        cfg,
-        sampler_name,
-        scheduler,
-        denoise,
-        feather,
-        noise_mask_feather,
-        img_height,
-    ) -> torch.Tensor:
-        """Fallback: denoise the full video latent + pixel composite."""
-        feathered_latent = self._gaussian_blur_mask(mask, noise_mask_feather)
-        noise_mask = feathered_latent.unsqueeze(1).to(latent_samples.device)
-
-        if "denoise_mask_function" not in model.model_options:
-            model = DifferentialDiffusion.execute(model)[0]
-
-        latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
-        samples = nodes.common_ksampler(
-            model,
-            seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            positive,
-            negative,
-            latent_dict,
-            denoise=denoise,
-        )[0]
-
-        enhanced_decoded = vae.decode(samples["samples"])
-        enhanced_frames = self._fix_decoded_shape(enhanced_decoded, img_height)
-
-        composite_mask = self._gaussian_blur_mask(mask, feather)
-        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
-
-        return (1 - mask_4d) * original_frames + mask_4d * enhanced_frames
+        return new_positive, new_negative, latent_length
 
     # ---------------------------------------------- main entry point
 
@@ -432,13 +273,11 @@ class VideoDetailer:
         denoise,
         feather,
         noise_mask_feather,
-        crop_factor,
-        guide_size,
-        max_size,
+        vace_strength,
         mask_opt=None,
-        image_model_pipe=None,
+        reference_image=None,
     ):
-        video_model, clip, video_vae, positive, negative = basic_pipe
+        model, clip, vae, positive, negative = basic_pipe
 
         # WAN latent: [B, C, F, H, W]
         latent_samples = latent["samples"]
@@ -449,13 +288,13 @@ class VideoDetailer:
             f"[Video Detailer] latent {latent_samples.shape} → {img_width}×{img_height} px"
         )
 
-        # Decode the original video latent to pixel frames
-        original_decoded = video_vae.decode(latent_samples)
+        # --- Step 1: Decode the original video latent → pixel frames ---
+        original_decoded = vae.decode(latent_samples)
         original_frames = self._fix_decoded_shape(original_decoded, img_height)
         num_frames = original_frames.shape[0]
         print(f"[Video Detailer] decoded {num_frames} frames {original_frames.shape}")
 
-        # Build pixel-space mask [F, H, W]
+        # --- Step 2: Build pixel-space mask [F, H, W] ---
         if mask_opt is None:
             mask = torch.ones((num_frames, img_height, img_width), dtype=torch.float32)
         else:
@@ -465,66 +304,201 @@ class VideoDetailer:
             elif mask.shape[0] != num_frames:
                 mask = mask[0:1].expand(num_frames, -1, -1).contiguous()
 
-        # Choose pipeline based on whether an image model is available
-        if image_model_pipe is not None:
-            # Per-frame crop→denoise→paste using the image model
-            img_model, img_clip, img_vae, img_pos, img_neg = image_model_pipe
-            print(
-                f"[Video Detailer] per-frame detail with image model, {num_frames} frames"
-            )
-
-            output_frames = []
-            for i in range(num_frames):
-                frame = original_frames[i]  # [H, W, C]
-                frame_mask = mask[i]  # [H, W]
-
-                refined = self._detail_frame(
-                    frame,
-                    frame_mask,
-                    img_model,
-                    img_vae,
-                    img_pos,
-                    img_neg,
-                    seed,
-                    steps,
-                    cfg,
-                    sampler_name,
-                    scheduler,
-                    denoise,
-                    feather,
-                    noise_mask_feather,
-                    crop_factor,
-                    guide_size,
-                    max_size,
+        # --- Step 3: Prepare reference image ---
+        if reference_image is not None:
+            ref = reference_image
+            # Take first frame only
+            if ref.ndim == 4:
+                ref = ref[0]  # [H, W, C]
+            # Resize to match video frame dimensions
+            if ref.shape[0] != img_height or ref.shape[1] != img_width:
+                ref = ref.unsqueeze(0).permute(0, 3, 1, 2)  # [1,C,H,W]
+                ref = F.interpolate(
+                    ref,
+                    size=(img_height, img_width),
+                    mode="bilinear",
+                    align_corners=False,
                 )
-                output_frames.append(refined)
-                print(f"[Video Detailer] frame {i + 1}/{num_frames} done")
-
-            output = torch.stack(output_frames)
+                ref = ref.permute(0, 2, 3, 1).squeeze(0)  # [H,W,C]
+            print(f"[Video Detailer] reference image {ref.shape}")
         else:
-            # Fallback: denoise full video latent + pixel composite
-            print(
-                "[Video Detailer] no image_model_pipe — video latent denoise + composite"
+            # Use first frame as reference
+            ref = original_frames[0]
+            print("[Video Detailer] using first decoded frame as reference")
+
+        # --- Step 4: Build composite video [ref | frame] per frame ---
+        # Double-width: left half = reference (frozen), right half = frame (reactive)
+        width_double = img_width * 2
+        # Round to multiple of 16 for VAE compatibility
+        width_double = ((width_double + 15) // 16) * 16
+
+        composite_frames = []
+        for i in range(num_frames):
+            frame = original_frames[i]  # [H, W, C]
+            # Pad reference and frame to half of width_double each
+            half_w = width_double // 2
+            ref_resized = (
+                F.interpolate(
+                    ref.unsqueeze(0).permute(0, 3, 1, 2),
+                    size=(img_height, half_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .squeeze(0)
             )
-            output = self._detail_video_latent(
-                latent_samples,
-                original_frames,
-                mask,
-                num_frames,
-                video_model,
-                video_vae,
-                positive,
-                negative,
-                seed,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                denoise,
-                feather,
-                noise_mask_feather,
-                img_height,
+            frame_resized = (
+                F.interpolate(
+                    frame.unsqueeze(0).permute(0, 3, 1, 2),
+                    size=(img_height, half_w),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .permute(0, 2, 3, 1)
+                .squeeze(0)
             )
+
+            composite = torch.cat([ref_resized, frame_resized], dim=1)  # [H, W*2, C]
+            composite_frames.append(composite)
+
+        composite_video = torch.stack(composite_frames)  # [F, H, W*2, C]
+        print(f"[Video Detailer] composite video {composite_video.shape}")
+
+        # --- Step 5: Build VACE mask ---
+        # Left half (reference) = 0 (inactive/frozen)
+        # Right half (frame) = 1 (reactive/denoisable)
+        half_w = width_double // 2
+        vace_mask_pixel = torch.zeros(
+            (num_frames, img_height, width_double, 1), dtype=torch.float32
+        )
+        # Apply the user's mask to the right half only
+        for i in range(num_frames):
+            frame_mask = mask[i]  # [H, W]
+            # Resize mask to match half_w if needed
+            if frame_mask.shape[1] != half_w:
+                fm = (
+                    F.interpolate(
+                        frame_mask.unsqueeze(0).unsqueeze(0),
+                        size=(img_height, half_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                )
+            else:
+                fm = frame_mask
+            vace_mask_pixel[i, :, half_w:, 0] = fm
+
+        print(
+            f"[Video Detailer] VACE mask {vace_mask_pixel.shape} "
+            f"mean={vace_mask_pixel.mean():.3f}"
+        )
+
+        # --- Step 6: Encode reference image for VACE temporal prepend ---
+        ref_for_encode = ref.unsqueeze(0)  # [1, H, W, C]
+        # Resize to double-width to match composite
+        ref_wide = F.interpolate(
+            ref_for_encode.permute(0, 3, 1, 2),
+            size=(img_height, width_double),
+            mode="bilinear",
+            align_corners=False,
+        ).permute(0, 2, 3, 1)  # [1, H, W_double, C]
+
+        ref_encoded = vae.encode(ref_wide[:, :, :, :3])
+        # [1, 16, 1, H//8, W_double//8]
+        ref_null = comfy.latent_formats.Wan21().process_out(
+            torch.zeros_like(ref_encoded)
+        )
+        reference_image_latent = torch.cat([ref_encoded, ref_null], dim=1)
+        # [1, 32, 1, H//8, W_double//8]
+
+        # --- Step 7: Build VACE conditioning ---
+        new_positive, new_negative, total_latent_length = self._build_vace_conditioning(
+            vae,
+            composite_video,
+            vace_mask_pixel,
+            num_frames,
+            img_height,
+            width_double,
+            vace_strength,
+            positive,
+            negative,
+            reference_image_latent=reference_image_latent,
+        )
+        print(
+            f"[Video Detailer] VACE conditioning built, "
+            f"latent_length={total_latent_length}"
+        )
+
+        # --- Step 8: Build the denoising latent ---
+        latent_h = img_height // 8
+        latent_w = width_double // 8
+        denoise_latent = torch.zeros(
+            [1, 16, total_latent_length, latent_h, latent_w],
+            device=comfy.model_management.intermediate_device(),
+        )
+
+        # Build noise mask for the latent: only right half is denoised
+        # Using the feathered mask
+        feathered_mask = self._gaussian_blur_mask(
+            vace_mask_pixel.squeeze(-1), noise_mask_feather
+        )
+        # [F, H, W_double] → latent-compatible noise mask
+        noise_mask = feathered_mask.unsqueeze(1)  # [F, 1, H, W_double]
+
+        if "denoise_mask_function" not in model.model_options:
+            model = DifferentialDiffusion.execute(model)[0]
+            print("[Video Detailer] DifferentialDiffusion applied")
+
+        latent_dict = {"samples": denoise_latent, "noise_mask": noise_mask}
+
+        # --- Step 9: KSampler ---
+        samples = nodes.common_ksampler(
+            model,
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            new_positive,
+            new_negative,
+            latent_dict,
+            denoise=denoise,
+        )[0]
+
+        # --- Step 10: Decode and extract right halves ---
+        # Trim the reference temporal frame first
+        trimmed = samples["samples"][:, :, 1:, :, :]  # remove ref frame
+        decoded = vae.decode(trimmed)
+        decoded_frames = self._fix_decoded_shape(decoded, img_height)
+        print(f"[Video Detailer] decoded refined {decoded_frames.shape}")
+
+        # Extract right half of each frame
+        refined_frames = decoded_frames[:, :, half_w:, :]
+        # Resize back to original width if needed
+        if refined_frames.shape[2] != img_width:
+            rf = refined_frames.permute(0, 3, 1, 2)  # [F,C,H,W]
+            rf = F.interpolate(
+                rf,
+                size=(img_height, img_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            refined_frames = rf.permute(0, 2, 3, 1)  # [F,H,W,C]
+
+        print(f"[Video Detailer] refined frames {refined_frames.shape}")
+
+        # --- Step 11: Pixel-space compositing ---
+        composite_mask = self._gaussian_blur_mask(mask, feather)
+        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
+
+        # Match frame counts (decoded may differ due to temporal upscaling)
+        out_frames = min(original_frames.shape[0], refined_frames.shape[0])
+        output = original_frames[:out_frames].clone()
+        output = (1 - mask_4d[:out_frames]) * output + mask_4d[
+            :out_frames
+        ] * refined_frames[:out_frames].to(output.device)
 
         print(f"[Video Detailer] output {output.shape}")
         output_mask = mask[0] if mask.ndim == 3 else mask
