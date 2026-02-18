@@ -1,4 +1,4 @@
-"""Video detailer — refines a video latent with pixel-space compositing."""
+"""Video detailer — refines a video latent with drift-aware compositing."""
 
 from __future__ import annotations
 
@@ -14,15 +14,17 @@ from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 class VideoDetailer:
     """
-    Details a video latent with pixel-space compositing (MaskDetailer-style).
+    Details a video latent with drift-aware pixel-space compositing.
 
-    Decodes the original latent as reference, runs KSampler with a noise mask,
-    then composites the enhanced result onto the original in pixel space:
-      output = (1-mask)*original + mask*enhanced
-    This guarantees pixels outside the mask are never modified.
+    Pipeline:
+      1. Decode original latent → reference frames (or use explicit reference_image)
+      2. KSampler denoise (with noise_mask + DifferentialDiffusion + boosted VACE)
+      3. Decode denoised latent → enhanced frames
+      4. Build a drift map: per-pixel distance between enhanced and reference
+      5. Where drift exceeds threshold, blend back toward reference
+      6. Apply mask compositing on top: unmasked areas always come from reference
 
-    vace_strength_mult scales the VACE reference influence during denoising
-    so the model stays closer to the reference image.
+    This prevents the model from silently changing eye color, accessories, etc.
     """
 
     @classmethod
@@ -51,13 +53,39 @@ class VideoDetailer:
                         "min": 0.0,
                         "max": 10.0,
                         "step": 0.1,
-                        "tooltip": "Multiplier for VACE reference strength during "
-                        "denoising. >1 = stronger reference adherence.",
+                        "tooltip": "Multiplier for VACE reference strength. "
+                        ">1 = stronger reference adherence during denoising.",
+                    },
+                ),
+                "drift_threshold": (
+                    "FLOAT",
+                    {
+                        "default": 0.12,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "Per-pixel color distance threshold (0-1). "
+                        "Pixels drifting more than this from the reference "
+                        "get blended back. 0 = snap everything to reference, "
+                        "1 = allow all changes. Try 0.08-0.15.",
+                    },
+                ),
+                "drift_blend": (
+                    "FLOAT",
+                    {
+                        "default": 0.7,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "How much to pull drifted pixels back toward reference. "
+                        "1.0 = fully replace with reference, "
+                        "0.0 = keep enhanced. Try 0.5-0.8.",
                     },
                 ),
             },
             "optional": {
                 "mask_opt": ("MASK",),
+                "reference_image": ("IMAGE",),
             },
         }
 
@@ -66,10 +94,10 @@ class VideoDetailer:
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Refines a video latent with pixel-space compositing. "
-        "Denoised result is blended onto original frames using the mask, "
-        "so unmasked areas are never modified. "
-        "vace_strength_mult boosts reference image influence during denoising."
+        "Refines a video latent with drift-aware compositing. "
+        "Compares denoised output to a reference image and pulls back "
+        "pixels that drifted too far (eye color changes, added accessories, etc). "
+        "Unmasked areas are always preserved from the reference."
     )
 
     @staticmethod
@@ -130,6 +158,65 @@ class VideoDetailer:
             out.append([tensor, meta])
         return out
 
+    @staticmethod
+    def _build_drift_correction(
+        enhanced: torch.Tensor,
+        reference: torch.Tensor,
+        threshold: float,
+        blend: float,
+    ) -> torch.Tensor:
+        """Blend enhanced frames back toward reference where drift exceeds threshold.
+
+        Args:
+            enhanced:  [F, H, W, C] enhanced pixel frames
+            reference: [F, H, W, C] reference pixel frames
+            threshold: max per-pixel color distance before correction kicks in (0-1)
+            blend:     how much to pull back toward reference (0=keep enhanced, 1=full ref)
+
+        Returns:
+            [F, H, W, C] corrected frames
+        """
+        if blend <= 0.0 or threshold >= 1.0:
+            return enhanced
+
+        # Per-pixel color distance across channels: [F, H, W]
+        diff = (enhanced - reference).abs().mean(dim=-1)
+
+        # Smooth the drift map to avoid pixel-level noise
+        # Use the gaussian blur on each frame
+        kernel_size = 5
+        sigma = 1.5
+        x = (
+            torch.arange(kernel_size, dtype=torch.float32, device=diff.device)
+            - kernel_size // 2
+        )
+        gauss = torch.exp(-(x**2) / (2 * sigma**2))
+        k1d = gauss / gauss.sum()
+        k2d = (k1d.unsqueeze(0) * k1d.unsqueeze(1)).unsqueeze(0).unsqueeze(0)
+        pad = kernel_size // 2
+
+        smoothed_frames = []
+        for frame_diff in diff:
+            smoothed = (
+                F.conv2d(frame_diff.unsqueeze(0).unsqueeze(0), k2d, padding=pad)
+                .squeeze(0)
+                .squeeze(0)
+            )
+            smoothed_frames.append(smoothed)
+        diff_smooth = torch.stack(smoothed_frames)
+
+        # Build correction weight: 0 where diff <= threshold, ramps up above
+        # Soft ramp over a band of 0.5*threshold width above threshold
+        ramp_width = max(threshold * 0.5, 0.01)
+        correction_weight = ((diff_smooth - threshold) / ramp_width).clamp(0.0, 1.0)
+        # Scale by blend strength
+        correction_weight = correction_weight * blend
+        # [F, H, W] → [F, H, W, 1]
+        correction_weight = correction_weight.unsqueeze(-1)
+
+        corrected = (1 - correction_weight) * enhanced + correction_weight * reference
+        return corrected
+
     def execute(
         self,
         latent,
@@ -142,7 +229,10 @@ class VideoDetailer:
         denoise,
         noise_mask_feather,
         vace_strength_mult,
+        drift_threshold,
+        drift_blend,
         mask_opt=None,
+        reference_image=None,
     ):
         model, clip, vae, positive, negative = basic_pipe
 
@@ -156,14 +246,40 @@ class VideoDetailer:
             f"{img_width}×{img_height} px"
         )
 
-        # --- Step 1: Decode the ORIGINAL latent as reference frames ---
+        # --- Step 1: Get reference frames ---
         # WAN VAE temporally upscales: pixel_frames = max(0, latent_frames*4 - 3)
         original_decoded = vae.decode(latent_samples)
         original_frames = self._fix_decoded_shape(original_decoded, img_height)
         num_frames = original_frames.shape[0]
         print(
-            f"[Video Detailer] original frames {original_frames.shape} ({num_frames} frames)"
+            f"[Video Detailer] decoded frames {original_frames.shape} ({num_frames} frames)"
         )
+
+        # Use explicit reference_image if provided, otherwise use decoded latent
+        if reference_image is not None:
+            ref_frames = reference_image
+            # Expand single image to all frames
+            if ref_frames.shape[0] == 1:
+                ref_frames = ref_frames.expand(num_frames, -1, -1, -1)
+            elif ref_frames.shape[0] != num_frames:
+                ref_frames = ref_frames[0:1].expand(num_frames, -1, -1, -1)
+            # Resize if spatial dims don't match
+            if (
+                ref_frames.shape[1] != original_frames.shape[1]
+                or ref_frames.shape[2] != original_frames.shape[2]
+            ):
+                ref_frames = ref_frames.permute(0, 3, 1, 2)  # [F,H,W,C] → [F,C,H,W]
+                ref_frames = F.interpolate(
+                    ref_frames,
+                    size=(original_frames.shape[1], original_frames.shape[2]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                ref_frames = ref_frames.permute(0, 2, 3, 1)  # [F,C,H,W] → [F,H,W,C]
+            print(f"[Video Detailer] using explicit reference image {ref_frames.shape}")
+        else:
+            ref_frames = original_frames
+            print("[Video Detailer] using decoded latent as reference")
 
         # --- Step 2: Build pixel-space mask [F, H, W] ---
         if mask_opt is None:
@@ -194,7 +310,7 @@ class VideoDetailer:
         boosted_positive = self._scale_vace_strength(positive, vace_strength_mult)
         boosted_negative = self._scale_vace_strength(negative, vace_strength_mult)
         if vace_strength_mult != 1.0:
-            print(f"[Video Detailer] VACE strength multiplied by {vace_strength_mult}")
+            print(f"[Video Detailer] VACE strength ×{vace_strength_mult}")
 
         # --- Step 5: KSampler denoising ---
         latent_dict = {"samples": latent_samples, "noise_mask": noise_mask}
@@ -217,13 +333,26 @@ class VideoDetailer:
         enhanced_frames = self._fix_decoded_shape(enhanced_decoded, img_height)
         print(f"[Video Detailer] enhanced frames {enhanced_frames.shape}")
 
-        # --- Step 7: Pixel-space compositing ---
-        # Feather the mask for smooth blending at edges
+        # --- Step 7: Drift correction ---
+        # Compare enhanced to reference; pull back pixels that drifted too far
+        corrected = self._build_drift_correction(
+            enhanced_frames.to(ref_frames.device),
+            ref_frames,
+            drift_threshold,
+            drift_blend,
+        )
+        print(
+            f"[Video Detailer] drift correction applied "
+            f"(threshold={drift_threshold}, blend={drift_blend})"
+        )
+
+        # --- Step 8: Mask compositing ---
+        # Unmasked areas always come from reference, masked areas get corrected result
         composite_mask = self._gaussian_blur_mask(mask, noise_mask_feather)
         # [F, H, W] → [F, H, W, 1] for broadcasting with [F, H, W, C]
-        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
+        mask_4d = composite_mask.unsqueeze(-1).to(ref_frames.device)
 
-        output = (1 - mask_4d) * original_frames + mask_4d * enhanced_frames
+        output = (1 - mask_4d) * ref_frames + mask_4d * corrected
         print(f"[Video Detailer] composited {output.shape}")
 
         output_mask = mask[0] if mask.ndim == 3 else mask
