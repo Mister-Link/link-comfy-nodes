@@ -66,7 +66,7 @@ class WanVaceToVideoControlStrength:
         "WanVaceToVideo with a separate control_video_strength slider. "
         "Scales the centered control_video signal toward zero before VAE encoding, "
         "cleanly attenuating pose/motion influence at any background color. "
-        "Reference image and masks are unaffected."
+        "Reference image and masks are unaffected.
     )
 
     @classmethod
