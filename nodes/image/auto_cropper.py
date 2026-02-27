@@ -133,7 +133,7 @@ class AutoCropperNode:
         border_q90 = float(np.quantile(border_diff, 0.90))
         min_t = max(0.004, border_q90 * 0.20)
         max_t = max(min_t + 1e-6, (border_q90 * 2.8) + 0.08)
-        curve = (1.0 - sensitivity) ** 1.8
+        curve = sensitivity ** 1.8
         diff_threshold = min_t + ((max_t - min_t) * curve)
 
         diff = np.linalg.norm(rgb - bg_color[None, None, :], axis=2)
