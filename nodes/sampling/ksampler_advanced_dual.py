@@ -32,10 +32,6 @@ class KSamplerAdvancedDual:
                 "latent_image": ("LATENT",),
                 "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
                 "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000}),
-                "denoise": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
             }
         }
 
@@ -66,7 +62,6 @@ class KSamplerAdvancedDual:
         latent_image,
         start_at_step,
         end_at_step,
-        denoise=1.0,
     ):
         disable_noise = add_noise == "disable"
 
@@ -80,7 +75,7 @@ class KSamplerAdvancedDual:
             positive,
             negative,
             latent_image,
-            denoise=denoise,
+            denoise=1.0,
             disable_noise=disable_noise,
             start_step=start_at_step,
             last_step=end_at_step,
@@ -102,7 +97,7 @@ class KSamplerAdvancedDual:
                 positive,
                 negative,
                 latent_image,
-                denoise=denoise,
+                denoise=1.0,
                 disable_noise=disable_noise,
                 start_step=start_at_step,
                 last_step=end_at_step,
