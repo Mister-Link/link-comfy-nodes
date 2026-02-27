@@ -36,18 +36,19 @@ class WanVaceToVideoControlStrength:
                 "negative": ("CONDITIONING",),
                 "vae": ("VAE",),
                 "width": ("INT", {"default": 832, "min": 16, "max": 16384, "step": 16}),
-                "height": ("INT", {"default": 480, "min": 16, "max": 16384, "step": 16}),
+                "height": (
+                    "INT",
+                    {"default": 480, "min": 16, "max": 16384, "step": 16},
+                ),
                 "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01},
+                ),
                 "control_video_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "control_video_neutral": (
-                    "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Value to fade toward at strength=0. Use 0.5 for general VACE inputs, 0.0 for black-background OpenPose frames."},
                 ),
             },
             "optional": {
@@ -63,9 +64,8 @@ class WanVaceToVideoControlStrength:
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
         "WanVaceToVideo with a separate control_video_strength slider. "
-        "Attenuates the control_video signal before VAE encoding by lerping "
-        "toward control_video_neutral. Use neutral=0.5 for general VACE inputs; "
-        "use neutral=0.0 for black-background OpenPose frames. "
+        "Scales the centered control_video signal toward zero before VAE encoding, "
+        "cleanly attenuating pose/motion influence at any background color. "
         "Reference image and masks are unaffected."
     )
 
@@ -81,7 +81,6 @@ class WanVaceToVideoControlStrength:
         batch_size,
         strength,
         control_video_strength,
-        control_video_neutral=0.5,
         control_video=None,
         control_masks=None,
         reference_image=None,
@@ -91,21 +90,20 @@ class WanVaceToVideoControlStrength:
 
         if control_video is not None:
             control_video = comfy.utils.common_upscale(
-                control_video[:length].movedim(-1, 1), width, height, "bilinear", "center"
+                control_video[:length].movedim(-1, 1),
+                width,
+                height,
+                "bilinear",
+                "center",
             ).movedim(1, -1)
             if control_video.shape[0] < length:
                 control_video = torch.nn.functional.pad(
-                    control_video, (0, 0, 0, 0, 0, 0, 0, length - control_video.shape[0]), value=0.5
+                    control_video,
+                    (0, 0, 0, 0, 0, 0, 0, length - control_video.shape[0]),
+                    value=0.5,
                 )
         else:
             control_video = torch.ones((length, height, width, 3)) * 0.5
-
-        # --- Attenuate control_video toward neutral before encoding ---
-        # At strength=1.0 this is a no-op.
-        # neutral=0.5 for general VACE; neutral=0.0 for black-bg OpenPose.
-        if abs(control_video_strength - 1.0) > 1e-6:
-            neutral = torch.full_like(control_video, control_video_neutral)
-            control_video = neutral + (control_video - neutral) * control_video_strength
 
         # --- reference_image ---
         if reference_image is not None:
@@ -114,7 +112,12 @@ class WanVaceToVideoControlStrength:
             ).movedim(1, -1)
             reference_image = vae.encode(reference_image[:, :, :, :3])
             reference_image = torch.cat(
-                [reference_image, comfy.latent_formats.Wan21().process_out(torch.zeros_like(reference_image))],
+                [
+                    reference_image,
+                    comfy.latent_formats.Wan21().process_out(
+                        torch.zeros_like(reference_image)
+                    ),
+                ],
                 dim=1,
             )
 
@@ -134,7 +137,9 @@ class WanVaceToVideoControlStrength:
                 )
 
         # --- inactive / reactive encode ---
-        control_video = control_video - 0.5
+        # Center around zero (latent neutral). Then attenuate: scaling toward
+        # zero uniformly reduces signal strength regardless of bg color.
+        control_video = (control_video - 0.5) * control_video_strength
         inactive = (control_video * (1 - mask)) + 0.5
         reactive = (control_video * mask) + 0.5
 
@@ -143,7 +148,9 @@ class WanVaceToVideoControlStrength:
         control_video_latent = torch.cat((inactive, reactive), dim=1)
 
         if reference_image is not None:
-            control_video_latent = torch.cat((reference_image, control_video_latent), dim=2)
+            control_video_latent = torch.cat(
+                (reference_image, control_video_latent), dim=2
+            )
 
         # --- mask to latent space ---
         vae_stride = 8
@@ -153,7 +160,9 @@ class WanVaceToVideoControlStrength:
         mask = mask.permute(2, 4, 0, 1, 3)
         mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
         mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="nearest-exact"
+            mask.unsqueeze(0),
+            size=(latent_length, height_mask, width_mask),
+            mode="nearest-exact",
         ).squeeze(0)
 
         trim_latent = 0
@@ -167,14 +176,23 @@ class WanVaceToVideoControlStrength:
 
         # --- conditioning ---
         import node_helpers
+
         positive = node_helpers.conditioning_set_values(
             positive,
-            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
+            {
+                "vace_frames": [control_video_latent],
+                "vace_mask": [mask],
+                "vace_strength": [strength],
+            },
             append=True,
         )
         negative = node_helpers.conditioning_set_values(
             negative,
-            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
+            {
+                "vace_frames": [control_video_latent],
+                "vace_mask": [mask],
+                "vace_strength": [strength],
+            },
             append=True,
         )
 
