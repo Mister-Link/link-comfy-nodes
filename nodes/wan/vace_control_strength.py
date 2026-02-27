@@ -63,36 +63,24 @@ class VaceControlStrength:
         split = max(0, min(int(trim_amount), int(total)))
 
         new_meta = dict(meta)
+        frames_out = frames.clone()
+        mask_out = mask.clone()
 
         if split <= 0:
-            new_meta["vace_frames"] = [frames]
-            new_meta["vace_mask"] = [mask]
-            new_meta["vace_strength"] = [float(control_strength)]
-            return new_meta
+            frames_out *= float(control_strength)
+        elif split >= total:
+            frames_out *= float(reference_strength)
+            mask_out[:, :, :split] = 1.0
+        else:
+            frames_out[:, :, :split] *= float(reference_strength)
+            frames_out[:, :, split:] *= float(control_strength)
+            # Ensure reference region contributes.
+            mask_out[:, :, :split] = 1.0
 
-        if split >= total:
-            new_meta["vace_frames"] = [frames]
-            new_meta["vace_mask"] = [mask]
-            new_meta["vace_strength"] = [float(reference_strength)]
-            return new_meta
-
-        zeros = torch.zeros_like(frames)
-        zeros_mask = torch.zeros_like(mask)
-
-        ref_frames = zeros.clone()
-        ref_mask = zeros_mask.clone()
-        ref_frames[:, :, :split] = frames[:, :, :split]
-        # Force reference mask on for prefix frames to preserve reference influence.
-        ref_mask[:, :, :split] = 1.0
-
-        ctrl_frames = zeros.clone()
-        ctrl_mask = zeros_mask.clone()
-        ctrl_frames[:, :, split:] = frames[:, :, split:]
-        ctrl_mask[:, :, split:] = mask[:, :, split:]
-
-        new_meta["vace_frames"] = [ref_frames, ctrl_frames]
-        new_meta["vace_mask"] = [ref_mask, ctrl_mask]
-        new_meta["vace_strength"] = [float(reference_strength), float(control_strength)]
+        new_meta["vace_frames"] = [frames_out]
+        new_meta["vace_mask"] = [mask_out]
+        # Strength is now baked into frames; keep scalar at 1.
+        new_meta["vace_strength"] = [1.0]
         return new_meta
 
     @classmethod
