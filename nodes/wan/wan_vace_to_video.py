@@ -232,8 +232,10 @@ class WanVaceToVideoControlStrength:
         mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
         mask = mask.permute(2, 4, 0, 1, 3)
         mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
+        # Use linear interpolation for temporal dimension to avoid artifacts in longer sequences
+        # where nearest-neighbor can cause discontinuities in the control signal
         mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="nearest-exact"
+            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="trilinear", align_corners=False
         ).squeeze(0)
 
         trim_latent = 0
