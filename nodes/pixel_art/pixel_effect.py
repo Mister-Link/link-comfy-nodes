@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
 
 
 class PixelEffectModule(nn.Module):
@@ -284,36 +283,3 @@ class PixelEffectModule(nn.Module):
         result_rgb = result_rgb * alpha_mask
 
         return result_rgb, result_alpha
-
-
-def test1():
-    img = Image.open("../images/example_input_mountain.jpg").convert("RGB")
-    img_np = np.array(img).astype(np.float32)
-    img_np = np.transpose(img_np, axes=[2, 0, 1])[np.newaxis, :, :, :]
-    img_pt = torch.from_numpy(img_np)
-    alpha_pt = (
-        torch.ones([1, 1, img_pt.shape[2], img_pt.shape[3]], dtype=img_pt.dtype) * 255.0
-    )
-
-    model = PixelEffectModule()
-    model.eval()
-
-    with torch.no_grad():
-        result_rgb_pt, _ = model(
-            img_pt,
-            alpha_pt,
-            param_num_bins=4,
-            param_kernel_size=11,
-            param_pixel_size=16,
-        )
-        result_rgb_pt = result_rgb_pt[0, ...].permute(1, 2, 0)
-
-    print("img_pt", img_pt.shape)
-    print("result_rgb_pt", result_rgb_pt.shape)
-
-    result_rgb_np = result_rgb_pt.cpu().numpy().astype(np.uint8)
-    Image.fromarray(result_rgb_np).save("./test_result_pixel_effect.png")
-
-
-if __name__ == "__main__":
-    test1()

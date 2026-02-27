@@ -1,14 +1,11 @@
-from __future__ import annotations
-
 import re
-from typing import Iterable, Tuple
 
 HEX_PATTERN = re.compile(r"^#?[0-9a-fA-F]{1,6}$")
 
 
 def parse_hex_color(
-    hex_color: str, fallback: Tuple[int, int, int] = (0, 0, 0)
-) -> Tuple[int, int, int]:
+    hex_color: str, fallback: tuple[int, int, int] = (0, 0, 0)
+) -> tuple[int, int, int]:
     """Convert a hex string into an RGB tuple (0-255)."""
     hex_color = (hex_color or "").strip()
     if not HEX_PATTERN.match(hex_color):
@@ -30,7 +27,7 @@ def rgb_to_int(r: int, g: int, b: int) -> int:
     return (int(r) << 16) | (int(g) << 8) | int(b)
 
 
-def int_to_rgb(value_int: int) -> Tuple[int, int, int]:
+def int_to_rgb(value_int: int) -> tuple[int, int, int]:
     """Convert a 24-bit integer into an RGB tuple."""
     value_int = ensure_24bit(value_int)
     r = (value_int >> 16) & 0xFF
@@ -46,14 +43,14 @@ def ensure_24bit(value_int: int) -> int:
     return value_int
 
 
-def format_color_outputs(value_int: int) -> Tuple[int, str, str]:
+def format_color_outputs(value_int: int) -> tuple[int, str, str]:
     """Return integer, hex string, and human-readable RGB string."""
     value_int = ensure_24bit(value_int)
     r, g, b = int_to_rgb(value_int)
     return value_int, f"#{value_int:06X}", f"{r}, {g}, {b}"
 
 
-def parse_color_value(value: str | int) -> Tuple[int, str, str]:
+def parse_color_value(value: str | int) -> tuple[int, str, str]:
     """Parse user-supplied color into standard outputs."""
     value_str = str(value).strip()
     try:
@@ -69,7 +66,7 @@ def parse_color_value(value: str | int) -> Tuple[int, str, str]:
     return format_color_outputs(value_int)
 
 
-def rgb_to_hsv(r: float, g: float, b: float) -> Tuple[float, float, float]:
+def rgb_to_hsv(r: float, g: float, b: float) -> tuple[float, float, float]:
     """Convert RGB (0-255) to HSV (H: 0-360, S/V: 0-1)."""
     r, g, b = r / 255.0, g / 255.0, b / 255.0
     max_c = max(r, g, b)

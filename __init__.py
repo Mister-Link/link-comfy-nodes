@@ -8,6 +8,7 @@ from .nodes import (
     BatchImageSave,
     BulkBackgroundRemoverBgEraserNode,
     ColorParserNode,
+    ConvertToPixelArt,
     CropToContentNode,
     FarthestColorNode,
     FastImagePreviewNode,
@@ -32,7 +33,6 @@ from .nodes import (
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
-from .nodes.pixel_art.node import ConvertToPixelArt
 
 NODE_CLASS_MAPPINGS = {
     "Add Image to Batch": AddImageToBatchNode,
@@ -124,26 +124,24 @@ def _load_model_downloader():
 _load_model_downloader()
 
 
-# Auto-patch Impact Pack for 5D tensor support
 def _apply_impact_pack_patches():
-    """Apply compatibility patches to Impact Pack on startup."""
+    install_script = Path(__file__).parent / "install.py"
+    if not install_script.exists():
+        return
+
     try:
-        from pathlib import Path
+        import subprocess
 
-        install_script = Path(__file__).parent / "install.py"
-        if install_script.exists():
-            import subprocess
-
-            result = subprocess.run(
-                ["python3", str(install_script)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                print("[link-comfy-nodes] Impact Pack patches applied successfully")
-            else:
-                print(f"[link-comfy-nodes] Patch script warning: {result.stdout}")
+        result = subprocess.run(
+            ["python3", str(install_script)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            print("[link-comfy-nodes] Impact Pack patches applied successfully")
+        else:
+            print(f"[link-comfy-nodes] Patch script warning: {result.stdout}")
     except Exception as exc:
         print(f"[link-comfy-nodes] Could not apply patches: {exc}")
 
