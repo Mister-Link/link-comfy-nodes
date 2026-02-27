@@ -74,10 +74,15 @@ class WanVaceStrengthPatch:
                 return apply_model(args["input"], args["timestep"], **c)
 
             # vace_ctx shape: [batch, n_streams, 96, T, H_latent, W_latent]
-            # Scale only reactive channels (16:32) for control temporal positions.
+            #   0:16  = inactive (background)  — keep at full strength
+            #  16:32  = reactive (pose/skeleton) — scale by control strength
+            #  32:96  = mask (64 spatial patches) — scale proportionally so
+            #           the model sees consistent "X% control here" rather
+            #           than "100% mask but only X% signal"
             c_mod = dict(c)
             ctx = vace_ctx.clone()
             ctx[:, 0, 16:32, _trim:, :, :] *= _ctrl
+            ctx[:, 0, 32:96, _trim:, :, :] *= _ctrl
             c_mod["vace_context"] = ctx
             return apply_model(args["input"], args["timestep"], **c_mod)
 
