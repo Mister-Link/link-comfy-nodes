@@ -9,27 +9,25 @@ import comfy.model_management
 import comfy.utils
 
 
-def _make_vace_block_wrapper(original_forward, per_token_strength):
-    """Wrap a VaceWanAttentionBlock.forward to scale c_skip per-token."""
-    def wrapped(c, x, **kwargs):
-        c_skip, c_out = original_forward(c, x, **kwargs)
-        c_skip = c_skip * per_token_strength.to(device=c_skip.device, dtype=c_skip.dtype)
-        return c_skip, c_out
-    return wrapped
-
-
 class WanVaceStrengthPatch:
-    """Patches the model to apply independent transformer-space strengths to the
-    reference_image and control_video regions of a WanVaceToVideo VACE stream.
+    """Patches the model to apply independent strengths to the reference_image
+    and control_video regions of a WanVaceToVideo VACE stream.
 
     Wire this into your model chain before KSampler.  Connect trim_latent from
     WanVaceToVideo (or any VACE conditioning node) to the trim_latent input.
 
-    At each denoising step the patch temporarily wraps the model's
-    VaceWanAttentionBlock.forward methods so that c_skip is multiplied by a
-    per-token strength tensor before being added to x.  Full-quality,
-    on-distribution inputs are always passed to the VACE blocks — only the
-    contribution weight changes.
+    At each denoising step the patch modifies the vace_context tensor before
+    it reaches vace_patch_embedding:
+
+      - reference frames  (temporal indices 0..trim_latent-1):
+          all latent channels (inactive + reactive, 0:32) are scaled by
+          reference_strength.
+
+      - control frames (temporal indices trim_latent..end):
+          only the REACTIVE channels (16:32, which carry the pose / mask
+          signal) are scaled by control_video_strength.  The INACTIVE
+          channels (0:16, which carry background) remain at full strength,
+          so the background is preserved even when pose adherence is reduced.
     """
 
     @classmethod
@@ -42,12 +40,13 @@ class WanVaceStrengthPatch:
                 "reference_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the reference_image VACE stream in transformer space."},
+                     "tooltip": "Strength of the reference_image VACE stream."},
                 ),
                 "control_video_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the control_video VACE stream in transformer space. Reduce to loosen pose adherence."},
+                     "tooltip": "Strength of the pose/mask signal in the control_video VACE stream. "
+                                "Reduce to loosen pose adherence while keeping the background intact."},
                 ),
             },
         }
@@ -56,59 +55,58 @@ class WanVaceStrengthPatch:
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
-        "Patches a WAN VACE model to apply separate transformer-space strengths "
-        "to the reference_image and control_video regions. Wire trim_latent from "
-        "WanVaceToVideo here and insert this node in your model chain before KSampler."
+        "Patches a WAN VACE model to apply separate strengths to the "
+        "reference_image and control_video regions. control_video_strength "
+        "scales only the reactive (pose) channels, preserving the background. "
+        "Wire trim_latent from WanVaceToVideo here and insert this node in "
+        "your model chain before KSampler."
     )
 
     @classmethod
     def execute(cls, model, trim_latent, reference_strength, control_video_strength):
-        needs_patch = trim_latent > 0 and (
-            abs(reference_strength - 1.0) > 1e-6 or abs(control_video_strength - 1.0) > 1e-6
-        )
+        needs_ref_patch = trim_latent > 0 and abs(reference_strength - 1.0) > 1e-6
+        needs_ctrl_patch = abs(control_video_strength - 1.0) > 1e-6
 
-        if not needs_patch:
+        if not needs_ref_patch and not needs_ctrl_patch:
             return (model.clone(),)
 
         m = model.clone()
-        _base_model = m.model
         _ref_strength = reference_strength
         _ctrl_strength = control_video_strength
         _trim_latent = trim_latent
 
         def vace_unet_wrapper(apply_model, args):
-            input_x = args["input"]
-            # input_x: [batch, 16, T, H_latent, W_latent]
-            T = input_x.shape[2]
-            H_latent = input_x.shape[3]
-            W_latent = input_x.shape[4]
+            c = args["c"]
+            vace_ctx = c.get("vace_context", None)
 
-            # vace_patch_embedding stride is (1, 2, 2):
-            # T' = T, H' = H_latent // 2, W' = W_latent // 2
-            tokens_per_frame = (H_latent // 2) * (W_latent // 2)
-            total_tokens = T * tokens_per_frame
-            ref_tokens = _trim_latent * tokens_per_frame
+            if vace_ctx is None:
+                return apply_model(args["input"], args["timestep"], **c)
 
-            per_token = torch.ones(1, total_tokens, 1)
-            per_token[:, :ref_tokens, :] = _ref_strength
-            per_token[:, ref_tokens:, :] = _ctrl_strength
+            # vace_ctx: [batch_chunks, n_streams, C, T, H_latent, W_latent]
+            # C = 96: channels 0:16 = inactive (background),
+            #          channels 16:32 = reactive (pose/mask signal),
+            #          channels 32:96 = mask
+            # Temporal layout (dim 3): [0:trim_latent] = reference frames,
+            #                          [trim_latent:] = control frames
 
-            diff_model = _base_model.diffusion_model
-            vace_blocks = getattr(diff_model, "vace_blocks", None)
-            if vace_blocks is None:
-                return apply_model(args["input"], args["timestep"], **args["c"])
+            c_modified = dict(c)
+            vace_ctx = vace_ctx.clone()
 
-            originals = {}
-            try:
-                for ii, block in enumerate(vace_blocks):
-                    originals[ii] = block.forward
-                    block.forward = _make_vace_block_wrapper(block.forward, per_token)
-                result = apply_model(args["input"], args["timestep"], **args["c"])
-            finally:
-                for ii, orig in originals.items():
-                    vace_blocks[ii].forward = orig
+            if needs_ref_patch and _trim_latent > 0:
+                # Scale all latent channels for reference temporal frames
+                vace_ctx[:, 0, :32, :_trim_latent, :, :] = (
+                    vace_ctx[:, 0, :32, :_trim_latent, :, :] * _ref_strength
+                )
 
-            return result
+            if needs_ctrl_patch:
+                # Scale ONLY the reactive channels (pose signal) for control frames.
+                # Inactive channels (background) stay at full strength.
+                vace_ctx[:, 0, 16:32, _trim_latent:, :, :] = (
+                    vace_ctx[:, 0, 16:32, _trim_latent:, :, :] * _ctrl_strength
+                )
+
+            c_modified["vace_context"] = vace_ctx
+            return apply_model(args["input"], args["timestep"], **c_modified)
 
         m.set_model_unet_function_wrapper(vace_unet_wrapper)
         return (m,)
@@ -118,8 +116,7 @@ class WanVaceToVideoControlStrength:
     """WanVaceToVideo node that outputs trim_latent for use with WanVaceStrengthPatch.
 
     Identical to the stock WanVaceToVideo node.  Use WanVaceStrengthPatch in your
-    model chain to apply independent transformer-space strengths to the reference
-    and control regions.
+    model chain to apply independent reference_strength and control_video_strength.
     """
 
     @classmethod
