@@ -1,4 +1,4 @@
-"""WanVaceToVideo variant with independent control_video strength."""
+"""WanVaceToVideo variant with independent reference and control_video strengths."""
 
 from __future__ import annotations
 
@@ -10,18 +10,23 @@ import comfy.utils
 
 
 class WanVaceToVideoControlStrength:
-    """WanVaceToVideo with a separate control_video_strength input.
+    """WanVaceToVideo with separate strength inputs for reference_image and control_video.
 
-    control_video is lerped toward control_video_neutral before encoding:
+    The model processes each VACE stream independently:
+        x += c_skip_ref   * reference_strength
+        x += c_skip_ctrl  * control_video_strength
 
-      lerped = (control_video - neutral) * strength + neutral
+    This is achieved by splitting reference and control into two separate
+    conditioning entries (vace_frames lists), each with its own vace_strength.
 
-    At strength=1.0 this is a no-op (identical to WanVaceToVideo).
-    At strength=0.0 the entire control_video becomes the neutral value.
-
-    Use neutral=0.5 for general VACE inputs (gray background).
-    Use neutral=0.0 for black-background OpenPose frames — the background
-    stays at 0.0 at all strength values, and the skeleton signal scales cleanly.
+    control_video_neutral:
+        The background color of the control_video in 0-1 pixel space.
+        Used to lerp the control_video toward silence when control_video_strength < 1.
+        After the lerp the pipeline subtracts 0.5, so the effective silence point is
+        always 0.5 in pixel space.  Set neutral=0.5 for gray-bg VACE inputs (default).
+        Set neutral=0.0 for black-background OpenPose frames — at strength<1 the black
+        background is pushed toward 0.5 (silence) while the skeleton is attenuated.
+        At strength=1.0 this is a no-op regardless of neutral.
     """
 
     @classmethod
@@ -35,10 +40,15 @@ class WanVaceToVideoControlStrength:
                 "height": ("INT", {"default": 480, "min": 16, "max": 16384, "step": 16}),
                 "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
+                "reference_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01,
+                     "tooltip": "vace_strength for the reference_image stream."},
+                ),
                 "control_video_strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
+                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01,
+                     "tooltip": "vace_strength for the control_video stream. Reduce to loosen pose adherence."},
                 ),
                 "control_video_neutral": (
                     "FLOAT",
@@ -48,9 +58,11 @@ class WanVaceToVideoControlStrength:
                         "max": 1.0,
                         "step": 0.01,
                         "tooltip": (
-                            "Background color of control_video in 0-1 range. "
-                            "Use 0.5 for general VACE inputs, "
-                            "0.0 for black-background OpenPose frames."
+                            "Background color of control_video in 0-1 pixel space. "
+                            "Use 0.5 for gray-background VACE inputs. "
+                            "Use 0.0 for black-background OpenPose frames — the black "
+                            "background is lerped toward 0.5 (latent silence) as "
+                            "control_video_strength decreases. No effect at strength=1.0."
                         ),
                     },
                 ),
@@ -67,11 +79,10 @@ class WanVaceToVideoControlStrength:
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
-        "WanVaceToVideo with a separate control_video_strength slider. "
-        "Lerps control_video toward control_video_neutral before VAE encoding. "
-        "Set neutral=0.0 for black-background OpenPose frames, 0.5 for general VACE. "
-        "At strength=1.0 the result is identical to WanVaceToVideo. "
-        "Reference image and masks are unaffected."
+        "WanVaceToVideo with separate strength sliders for reference_image and "
+        "control_video. Each is injected as an independent VACE stream so their "
+        "strengths are fully decoupled. Reduce control_video_strength to loosen "
+        "pose/motion adherence without affecting the reference frame."
     )
 
     @classmethod
@@ -84,16 +95,16 @@ class WanVaceToVideoControlStrength:
         height,
         length,
         batch_size,
-        strength,
+        reference_strength,
         control_video_strength,
         control_video_neutral=0.5,
         control_video=None,
         control_masks=None,
         reference_image=None,
     ):
-        # --- control_video preparation (mirrors WanVaceToVideo exactly) ---
         latent_length = ((length - 1) // 4) + 1
 
+        # --- control_video preparation ---
         if control_video is not None:
             control_video = comfy.utils.common_upscale(
                 control_video[:length].movedim(-1, 1), width, height, "bilinear", "center"
@@ -105,25 +116,30 @@ class WanVaceToVideoControlStrength:
         else:
             control_video = torch.ones((length, height, width, 3)) * 0.5
 
-        # --- Attenuate control_video toward neutral before encoding ---
-        # Lerp keeps background pixels at exactly neutral at all strengths.
-        # neutral=0.0: black-bg OpenPose — background stays 0.0, skeleton scales.
-        # neutral=0.5: general VACE — background stays 0.5, signal scales.
-        # At strength=1.0 this is a no-op.
+        # Attenuate control_video toward 0.5 (latent silence after - 0.5 centering).
+        # control_video_neutral is the background pixel value of the input:
+        #   neutral=0.5 (gray bg): background is already at 0.5, lerp is a clean scale of signal.
+        #   neutral=0.0 (black bg OpenPose): background (0.0) is pushed toward 0.5 as
+        #     strength decreases, preventing -0.5 background artifacts in the VAE encode.
+        # At strength=1.0 this is always a no-op.
         if abs(control_video_strength - 1.0) > 1e-6:
-            control_video = (
-                (control_video - control_video_neutral) * control_video_strength
-                + control_video_neutral
-            )
+            # Remap neutral -> 0.5 first, then scale signal around 0.5.
+            # background: neutral -> 0.5 + (neutral - 0.5) * s  (approaches 0.5 as s->0)
+            # skeleton:   pixel  -> 0.5 + (pixel  - 0.5) * s
+            # At s=1 both are identities. At s=0 everything becomes 0.5.
+            offset = 0.5 - control_video_neutral * control_video_strength
+            control_video = offset + control_video * control_video_strength
 
         # --- reference_image ---
+        ref_latent = None
+        trim_latent = 0
         if reference_image is not None:
             reference_image = comfy.utils.common_upscale(
                 reference_image[:1].movedim(-1, 1), width, height, "bilinear", "center"
             ).movedim(1, -1)
-            reference_image = vae.encode(reference_image[:, :, :, :3])
-            reference_image = torch.cat(
-                [reference_image, comfy.latent_formats.Wan21().process_out(torch.zeros_like(reference_image))],
+            ref_latent = vae.encode(reference_image[:, :, :, :3])
+            ref_latent = torch.cat(
+                [ref_latent, comfy.latent_formats.Wan21().process_out(torch.zeros_like(ref_latent))],
                 dim=1,
             )
 
@@ -143,52 +159,66 @@ class WanVaceToVideoControlStrength:
                 )
 
         # --- inactive / reactive encode ---
-        control_video = control_video - 0.5
-        inactive = (control_video * (1 - mask)) + 0.5
-        reactive = (control_video * mask) + 0.5
+        cv = control_video - 0.5
+        inactive = (cv * (1 - mask)) + 0.5
+        reactive = (cv * mask) + 0.5
 
         inactive = vae.encode(inactive[:, :, :, :3])
         reactive = vae.encode(reactive[:, :, :, :3])
-        control_video_latent = torch.cat((inactive, reactive), dim=1)
-
-        if reference_image is not None:
-            control_video_latent = torch.cat((reference_image, control_video_latent), dim=2)
+        ctrl_latent = torch.cat((inactive, reactive), dim=1)
 
         # --- mask to latent space ---
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
-        mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
-        mask = mask.permute(2, 4, 0, 1, 3)
-        mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
-        mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="nearest-exact"
-        ).squeeze(0)
+        ctrl_mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
+        ctrl_mask = ctrl_mask.permute(2, 4, 0, 1, 3)
+        ctrl_mask = ctrl_mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
+        ctrl_mask = torch.nn.functional.interpolate(
+            ctrl_mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="nearest-exact"
+        ).squeeze(0).unsqueeze(0)
 
-        trim_latent = 0
-        if reference_image is not None:
-            mask_pad = torch.zeros_like(mask[:, : reference_image.shape[2], :, :])
-            mask = torch.cat((mask_pad, mask), dim=1)
-            latent_length += reference_image.shape[2]
-            trim_latent = reference_image.shape[2]
+        # --- reference latent mask (zeros = "already known, don't inpaint") ---
+        ref_mask = None
+        if ref_latent is not None:
+            ref_mask = torch.zeros(1, 64, ref_latent.shape[2], height_mask, width_mask)
+            trim_latent = ref_latent.shape[2]
 
-        mask = mask.unsqueeze(0)
-
-        # --- conditioning ---
+        # --- Build two separate VACE streams ---
+        # Stream 0: reference_image (if present) — strength = reference_strength
+        # Stream 1: control_video — strength = control_video_strength
         import node_helpers
+
+        if ref_latent is not None:
+            # Reference stream: just the reference frame(s)
+            positive = node_helpers.conditioning_set_values(
+                positive,
+                {"vace_frames": [ref_latent], "vace_mask": [ref_mask], "vace_strength": [reference_strength]},
+                append=True,
+            )
+            negative = node_helpers.conditioning_set_values(
+                negative,
+                {"vace_frames": [ref_latent], "vace_mask": [ref_mask], "vace_strength": [reference_strength]},
+                append=True,
+            )
+            latent_length_out = latent_length + trim_latent
+        else:
+            latent_length_out = latent_length
+
+        # Control video stream: control frames with their mask
         positive = node_helpers.conditioning_set_values(
             positive,
-            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
+            {"vace_frames": [ctrl_latent], "vace_mask": [ctrl_mask], "vace_strength": [control_video_strength]},
             append=True,
         )
         negative = node_helpers.conditioning_set_values(
             negative,
-            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
+            {"vace_frames": [ctrl_latent], "vace_mask": [ctrl_mask], "vace_strength": [control_video_strength]},
             append=True,
         )
 
         latent = torch.zeros(
-            [batch_size, 16, latent_length, height // 8, width // 8],
+            [batch_size, 16, latent_length_out, height // 8, width // 8],
             device=comfy.model_management.intermediate_device(),
         )
         return (positive, negative, {"samples": latent}, trim_latent)
