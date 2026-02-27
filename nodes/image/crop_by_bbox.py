@@ -18,7 +18,7 @@ class CropByBBoxNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
-                "bbox": ("STRING", {"default": "{}"}),
+                "bbox": ("STRING",),
                 "padding": (
                     "INT",
                     {"default": 0, "min": 0, "max": 500, "step": 1},
