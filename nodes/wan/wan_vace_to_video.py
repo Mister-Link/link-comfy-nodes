@@ -249,7 +249,6 @@ class WanVaceToVideoControlStrength:
         mask = mask.view(latent_length, height_mask, vae_stride, width_mask, vae_stride)
         mask = mask.permute(2, 4, 0, 1, 3)  # [vae_stride, vae_stride, latent_length, height_mask, width_mask]
         mask = mask.reshape(vae_stride * vae_stride, latent_length, height_mask, width_mask)
-        mask = mask.unsqueeze(0)  # [1, 64, latent_length, height_mask, width_mask]
 
         trim_latent = 0
         if reference_image is not None:
