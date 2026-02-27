@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 
 class VaceControlStrength:
     """Scale VACE control_video strength via the vace_strength scalar.
@@ -39,16 +41,29 @@ class VaceControlStrength:
     def _apply(meta: dict, control_strength: float) -> dict:
         if "vace_frames" not in meta:
             return meta
+
+        control_strength = float(control_strength)
         new_meta = dict(meta)
-        new_meta["vace_strength"] = [float(control_strength)]
+        new_meta["vace_strength"] = [control_strength]
+
+        # Attenuate vace_mask alongside vace_strength. With pose controls such
+        # as OpenPose, keeping masks at full scale can still imprint skeleton
+        # structure in longer clips even when strength is reduced.
+        vace_mask = new_meta.get("vace_mask")
+        if isinstance(vace_mask, (list, tuple)):
+            scaled_mask = []
+            for mask in vace_mask:
+                if torch.is_tensor(mask):
+                    scaled_mask.append(mask * control_strength)
+                else:
+                    scaled_mask.append(mask)
+            new_meta["vace_mask"] = scaled_mask
+
         return new_meta
 
     @classmethod
     def _adjust_cond(cls, cond: list, control_strength: float) -> list:
-        return [
-            (tensor, cls._apply(meta, control_strength))
-            for tensor, meta in cond
-        ]
+        return [(tensor, cls._apply(meta, control_strength)) for tensor, meta in cond]
 
     def execute(self, positive, negative, control_strength):
         if abs(control_strength - 1.0) < 1e-6:
