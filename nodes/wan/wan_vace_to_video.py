@@ -19,9 +19,10 @@ class WanVaceStrengthPatch:
     At each denoising step the patch modifies the vace_context tensor before
     it reaches vace_patch_embedding:
 
-      - reference frames  (temporal indices 0..trim_latent-1):
-          all latent channels (inactive + reactive, 0:32) are scaled by
-          reference_strength.
+      - reference frames (temporal indices 0..trim_latent-1):
+          image channels (0:16) are blended toward reference baseline channels
+          (16:32) with reference_strength, avoiding noisy attenuation from
+          scaling latents toward zero.
 
       - control frames (temporal indices trim_latent..end):
           REACTIVE channels (16:32, pose/mask signal) are blended toward
@@ -56,8 +57,9 @@ class WanVaceStrengthPatch:
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
         "Patches a WAN VACE model to apply separate strengths to the "
-        "reference_image and control_video regions. control_video_strength "
-        "blends reactive channels toward inactive channels for smoother control. "
+        "reference_image and control_video regions. Both reference and control "
+        "strengths blend signal channels toward baseline channels for smooth "
+        "attenuation without noisy thresholding. "
         "Wire trim_latent from WanVaceToVideo here and insert this node in "
         "your model chain before KSampler."
     )
@@ -93,9 +95,12 @@ class WanVaceStrengthPatch:
             vace_ctx = vace_ctx.clone()
 
             if needs_ref_patch and _trim_latent > 0:
-                # Scale all latent channels for reference temporal frames
-                vace_ctx[:, 0, :32, :_trim_latent, :, :] = (
-                    vace_ctx[:, 0, :32, :_trim_latent, :, :] * _ref_strength
+                # Blend reference image channels toward reference baseline
+                # channels instead of scaling all channels toward zero.
+                ref_image_ctx = vace_ctx[:, 0, 0:16, :_trim_latent, :, :]
+                ref_base_ctx = vace_ctx[:, 0, 16:32, :_trim_latent, :, :]
+                vace_ctx[:, 0, 0:16, :_trim_latent, :, :] = (
+                    ref_base_ctx + ((ref_image_ctx - ref_base_ctx) * _ref_strength)
                 )
 
             if needs_ctrl_patch:
