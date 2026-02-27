@@ -1,9 +1,10 @@
 """WanVaceToVideo variant with independent reference and control_video strengths.
 
-Uses a model patch that modifies vace_context before vace_patch_embedding:
-only the REACTIVE channels (16:32) for control frames are scaled by
-control_video_strength, preserving the INACTIVE channels (0:16, background)
-at full strength.  This loosens pose adherence without changing the background.
+Uses a model patch that scales the vace_strength per-token AFTER the VACE
+attention blocks run. Reference frames (0:trim_latent) get full strength=1.0,
+control frames (trim_latent:) get strength=control_video_strength. This operates
+on the skip connection influence (c_skip) rather than distorting the input latent,
+avoiding latent-space artifacts while maintaining clean pose separation.
 """
 
 from __future__ import annotations
@@ -16,20 +17,16 @@ import comfy.utils
 
 
 class WanVaceStrengthPatch:
-    """Patches the model to scale only the reactive (pose) channels of the
-    control_video region in the VACE stream, preserving background.
+    """Patches the model to apply per-frame strength scaling to VACE injection.
 
-    Wire this into your model chain before KSampler.  Connect trim_latent
+    Reference frames (0:trim_latent) are injected at full strength (1.0),
+    control frames (trim_latent:) at reduced strength (control_video_strength).
+    This scaling is applied to the skip connection AFTER the VACE attention
+    blocks, so it controls the influence on the main denoising stream without
+    distorting the latent space.
+
+    Wire this into your model chain before KSampler. Connect trim_latent
     from WanVaceToVideo to the trim_latent input.
-
-    The vace_context tensor has 96 channels:
-      - 0:16   = inactive (background where mask=0)
-      - 16:32  = reactive (pose/skeleton where mask=1)
-      - 32:96  = mask (64 spatial-patch channels)
-
-    control_video_strength scales ONLY channels 16:32 for the control
-    temporal positions (trim_latent onward), so the background signal
-    stays at full strength even when pose adherence is loosened.
     """
 
     @classmethod
@@ -42,8 +39,8 @@ class WanVaceStrengthPatch:
                 "control_video_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Scales only the reactive (pose) channels of the "
-                                "control_video. Background channels are preserved."},
+                     "tooltip": "Strength for control frame tokens (0=no pose "
+                                "guidance from control video, 1=full)."},
                 ),
             },
         }
@@ -52,9 +49,9 @@ class WanVaceStrengthPatch:
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
-        "Scales only the reactive (pose) channels of the control_video "
-        "VACE stream, preserving background at full strength. Wire "
-        "trim_latent from WanVaceToVideo and insert before KSampler."
+        "Per-frame VACE strength scaling. Reference frames at 1.0, control "
+        "frames at specified strength. Wire trim_latent from WanVaceToVideo "
+        "and insert before KSampler."
     )
 
     @classmethod
@@ -68,38 +65,51 @@ class WanVaceStrengthPatch:
 
         def vace_unet_wrapper(apply_model, args):
             c = args["c"]
-            vace_ctx = c.get("vace_context", None)
+            vace_strength = c.get("vace_strength", None)
 
-            if vace_ctx is None:
+            # Only patch if vace_strength exists and is a list
+            if vace_strength is None or not isinstance(vace_strength, list) or len(vace_strength) == 0:
                 return apply_model(args["input"], args["timestep"], **c)
 
-            # vace_ctx shape: [batch, n_streams, 96, T, H_latent, W_latent]
-            #   0:16  = inactive (background latent)
-            #  16:32  = reactive (pose/skeleton latent)
-            #  32:96  = mask (64 spatial-patch channels)
-            #
-            # Blend reactive toward inactive (background) rather than
-            # scaling — keeps us on the valid latent manifold.  A raw
-            # multiply moves the latent to an invalid point that the
-            # model interprets as artifacts / motion blur.
+            # Extract latent shape to derive token geometry.
+            # args["input"] shape: [batch, channels, T_latent, H_latent, W_latent]
+            inp = args["input"]
+            T = inp.shape[2]
+            H = inp.shape[3]
+            W = inp.shape[4]
+
+            # vace_patch_embedding has kernel/stride = (1, 2, 2).
+            # After embedding: [B, 2048, T_patches, H_patches, W_patches]
+            # After flatten: [B, T_patches * H_patches * W_patches, 2048]
+            h_p = H // 2
+            w_p = W // 2
+            tokens_per_frame = h_p * w_p
+            total_tokens = T * tokens_per_frame
+
+            # Build per-token strength mask: reference frames at 1.0, control at _ctrl.
+            # Frame i spans token indices [i*tokens_per_frame : (i+1)*tokens_per_frame]
+            strength_mask = torch.ones(1, total_tokens, 1, device=inp.device, dtype=inp.dtype)
+            control_start_token = _trim * tokens_per_frame
+            if control_start_token < total_tokens:
+                strength_mask[0, control_start_token:, 0] = _ctrl
+
+            # Replace scalar vace_strength with per-token tensor.
+            # The model does: x += c_skip * vace_strength[iii]
+            # Broadcasting: [B, seq_len, 2048] * [1, seq_len, 1] works.
             c_mod = dict(c)
-            ctx = vace_ctx.clone()
-            bg = ctx[:, 0, 0:16, _trim:, :, :]
-            rx = ctx[:, 0, 16:32, _trim:, :, :]
-            ctx[:, 0, 16:32, _trim:, :, :] = bg + (rx - bg) * _ctrl
-            ctx[:, 0, 32:96, _trim:, :, :] *= _ctrl
-            c_mod["vace_context"] = ctx
-            return apply_model(args["input"], args["timestep"], **c_mod)
+            c_mod["vace_strength"] = [strength_mask]
+            return apply_model(inp, args["timestep"], **c_mod)
 
         m.set_model_unet_function_wrapper(vace_unet_wrapper)
         return (m,)
 
 
 class WanVaceToVideoControlStrength:
-    """Stock WanVaceToVideo behaviour with an extra trim_latent output.
+    """Stock WanVaceToVideo with trim_latent output for frame indexing.
 
-    Use WanVaceStrengthPatch in your model chain to control pose strength
-    while preserving the background.
+    Pairs with WanVaceStrengthPatch. The strength parameter controls overall
+    VACE guidance strength. WanVaceStrengthPatch then further reduces the
+    control frame contribution via per-token scaling.
     """
 
     @classmethod
