@@ -24,11 +24,6 @@ class WanVaceToVideoControlStrength:
     The zero-padded regions produce near-zero c_skip contributions because
     both latent and mask are zero ("known nothing"), minimizing cross-talk.
 
-    control_video_neutral:
-        Background pixel value of the control_video input (0-1).
-        Remaps background toward 0.5 before VAE encoding to avoid artifacts.
-        Use 0.5 for gray-background VACE inputs (default).
-        Use 0.0 for black-background OpenPose frames.
     """
 
     @classmethod
@@ -65,21 +60,6 @@ class WanVaceToVideoControlStrength:
                         "tooltip": "Transformer-space strength for the control_video VACE stream. Reduce to loosen pose adherence.",
                     },
                 ),
-                "control_video_neutral": (
-                    "FLOAT",
-                    {
-                        "default": 0.5,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": (
-                            "Background color of control_video in 0-1 pixel space. "
-                            "Use 0.5 for gray-background VACE inputs. "
-                            "Use 0.0 for black-background OpenPose frames — the black "
-                            "background is remapped toward 0.5 before VAE encoding."
-                        ),
-                    },
-                ),
             },
             "optional": {
                 "control_video": ("IMAGE",),
@@ -112,7 +92,6 @@ class WanVaceToVideoControlStrength:
         batch_size,
         reference_strength,
         control_video_strength,
-        control_video_neutral=0.5,
         control_video=None,
         control_masks=None,
         reference_image=None,
@@ -136,12 +115,6 @@ class WanVaceToVideoControlStrength:
                 )
         else:
             control_video = torch.ones((length, height, width, 3)) * 0.5
-
-        # Remap control_video background toward 0.5 to avoid VAE artifacts.
-        # At neutral=0.5 this is identity. At neutral=0.0 (black bg OpenPose),
-        # remaps black -> 0.5 so VAE sees silence for the background.
-        if abs(control_video_neutral - 0.5) > 1e-6:
-            control_video = 0.5 + (control_video - control_video_neutral)
 
         # --- reference_image ---
         ref_latent = None
