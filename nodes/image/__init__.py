@@ -2,6 +2,7 @@ from .auto_cropper import AutoCropperNode
 from .background_remover import BulkBackgroundRemoverBgEraserNode
 from .batch import AddImageToBatchNode
 from .crop import CropToContentNode
+from .crop_by_bbox import CropByBBoxNode
 from .dimensions import PixelationDimensionsNode
 from .pose_setup import PoseImageSetupNode
 from .resize import ResizeImageAndMaskBySideNode

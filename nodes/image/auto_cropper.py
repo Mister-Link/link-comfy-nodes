@@ -17,8 +17,8 @@ except Exception as e:
 
 class AutoCropperNode:
     CATEGORY = "image/transform"
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")
-    RETURN_NAMES = ("cropped_frames", "cropped_alpha", "width", "height")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("cropped_frames", "cropped_alpha", "width", "height", "bbox_x", "bbox_y", "bbox_w", "bbox_h")
     FUNCTION = "auto_crop"
 
     _model = None
@@ -357,4 +357,4 @@ class AutoCropperNode:
             f"(with {padding}px padding)"
         )
 
-        return (result_frames, result_alphas, final_width, final_height)
+        return (result_frames, result_alphas, final_width, final_height, x1, y1, crop_width, crop_height)
