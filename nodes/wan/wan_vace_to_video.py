@@ -1,9 +1,9 @@
 """WanVaceToVideo variant with independent reference and control_video strengths.
 
-Uses two separate VACE streams so that reference and control go through
-vace_blocks independently (no cross-attention mixing).  Each stream gets
-its own vace_strength, giving clean per-region control without skeleton
-bleed from attention signal mixing.
+Uses a model patch that modifies vace_context before vace_patch_embedding:
+only the REACTIVE channels (16:32) for control frames are scaled by
+control_video_strength, preserving the INACTIVE channels (0:16, background)
+at full strength.  This loosens pose adherence without changing the background.
 """
 
 from __future__ import annotations
@@ -15,20 +15,81 @@ import comfy.model_management
 import comfy.utils
 
 
+class WanVaceStrengthPatch:
+    """Patches the model to scale only the reactive (pose) channels of the
+    control_video region in the VACE stream, preserving background.
+
+    Wire this into your model chain before KSampler.  Connect trim_latent
+    from WanVaceToVideo to the trim_latent input.
+
+    The vace_context tensor has 96 channels:
+      - 0:16   = inactive (background where mask=0)
+      - 16:32  = reactive (pose/skeleton where mask=1)
+      - 32:96  = mask (64 spatial-patch channels)
+
+    control_video_strength scales ONLY channels 16:32 for the control
+    temporal positions (trim_latent onward), so the background signal
+    stays at full strength even when pose adherence is loosened.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "trim_latent": ("INT", {"default": 0, "min": 0, "max": 99999,
+                                        "tooltip": "trim_latent output from WanVaceToVideo."}),
+                "control_video_strength": (
+                    "FLOAT",
+                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+                     "tooltip": "Scales only the reactive (pose) channels of the "
+                                "control_video. Background channels are preserved."},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "execute"
+    CATEGORY = "conditioning/video_models"
+    DESCRIPTION = (
+        "Scales only the reactive (pose) channels of the control_video "
+        "VACE stream, preserving background at full strength. Wire "
+        "trim_latent from WanVaceToVideo and insert before KSampler."
+    )
+
+    @classmethod
+    def execute(cls, model, trim_latent, control_video_strength):
+        if abs(control_video_strength - 1.0) < 1e-6:
+            return (model.clone(),)
+
+        m = model.clone()
+        _ctrl = control_video_strength
+        _trim = trim_latent
+
+        def vace_unet_wrapper(apply_model, args):
+            c = args["c"]
+            vace_ctx = c.get("vace_context", None)
+
+            if vace_ctx is None:
+                return apply_model(args["input"], args["timestep"], **c)
+
+            # vace_ctx shape: [batch, n_streams, 96, T, H_latent, W_latent]
+            # Scale only reactive channels (16:32) for control temporal positions.
+            c_mod = dict(c)
+            ctx = vace_ctx.clone()
+            ctx[:, 0, 16:32, _trim:, :, :] *= _ctrl
+            c_mod["vace_context"] = ctx
+            return apply_model(args["input"], args["timestep"], **c_mod)
+
+        m.set_model_unet_function_wrapper(vace_unet_wrapper)
+        return (m,)
+
+
 class WanVaceToVideoControlStrength:
-    """WanVaceToVideo with separate reference and control strengths.
+    """Stock WanVaceToVideo behaviour with an extra trim_latent output.
 
-    When a reference_image is provided, two VACE streams are created:
-      - Stream 0: reference frame + neutral padding, strength = reference_strength
-      - Stream 1: neutral padding + control frames, strength = control_video_strength
-
-    Each stream goes through vace_blocks independently so reference and
-    control tokens never attend to each other.  This prevents skeleton
-    bleed that occurs when per-token scaling is applied after attention
-    has already mixed the signals.
-
-    When no reference_image is provided, a single stream is used with
-    control_video_strength as its vace_strength.
+    Use WanVaceStrengthPatch in your model chain to control pose strength
+    while preserving the background.
     """
 
     @classmethod
@@ -45,16 +106,9 @@ class WanVaceToVideoControlStrength:
                 ),
                 "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
-                "reference_strength": (
+                "strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the reference_image VACE stream."},
-                ),
-                "control_video_strength": (
-                    "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the control_video VACE stream. "
-                                "Reduce to loosen pose adherence."},
+                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01},
                 ),
             },
             "optional": {
@@ -79,15 +133,13 @@ class WanVaceToVideoControlStrength:
         height,
         length,
         batch_size,
-        reference_strength,
-        control_video_strength,
+        strength,
         control_video=None,
         control_masks=None,
         reference_image=None,
     ):
         latent_length = ((length - 1) // 4) + 1
 
-        # --- process control_video (identical to stock) ---
         if control_video is not None:
             control_video = comfy.utils.common_upscale(
                 control_video[:length].movedim(-1, 1),
@@ -100,7 +152,6 @@ class WanVaceToVideoControlStrength:
         else:
             control_video = torch.ones((length, height, width, 3)) * 0.5
 
-        # --- process reference_image (identical to stock) ---
         if reference_image is not None:
             reference_image = comfy.utils.common_upscale(
                 reference_image[:1].movedim(-1, 1), width, height, "bilinear", "center"
@@ -111,7 +162,6 @@ class WanVaceToVideoControlStrength:
                 dim=1,
             )
 
-        # --- process control_masks (identical to stock) ---
         if control_masks is None:
             mask = torch.ones((length, height, width, 1))
         else:
@@ -126,16 +176,16 @@ class WanVaceToVideoControlStrength:
                     mask, (0, 0, 0, 0, 0, 0, 0, length - mask.shape[0]), value=1.0
                 )
 
-        # --- encode inactive / reactive (identical to stock) ---
         control_video = control_video - 0.5
         inactive = (control_video * (1 - mask)) + 0.5
         reactive = (control_video * mask) + 0.5
 
         inactive = vae.encode(inactive[:, :, :, :3])
         reactive = vae.encode(reactive[:, :, :, :3])
-        control_latent = torch.cat((inactive, reactive), dim=1)
+        control_video_latent = torch.cat((inactive, reactive), dim=1)
+        if reference_image is not None:
+            control_video_latent = torch.cat((reference_image, control_video_latent), dim=2)
 
-        # --- process mask into 64-channel VAE-stride form (identical to stock) ---
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
@@ -145,66 +195,25 @@ class WanVaceToVideoControlStrength:
         mask = torch.nn.functional.interpolate(
             mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode='nearest-exact'
         ).squeeze(0)
-        # mask: [64, latent_length, height_mask, width_mask]
 
         trim_latent = 0
-
         if reference_image is not None:
-            ref_T = reference_image.shape[2]
-            total_T = ref_T + latent_length
-            trim_latent = ref_T
+            mask_pad = torch.zeros_like(mask[:, :reference_image.shape[2], :, :])
+            mask = torch.cat((mask_pad, mask), dim=1)
+            latent_length += reference_image.shape[2]
+            trim_latent = reference_image.shape[2]
 
-            H_latent = height // 8
-            W_latent = width // 8
-
-            # Neutral padding: process_out(zeros) = latent mean.
-            # After process_latent_in in extra_conds this becomes zero
-            # in model space, contributing no signal to attention.
-            wan_fmt = comfy.latent_formats.Wan21()
-            neutral_16 = wan_fmt.process_out(torch.zeros(1, 16, 1, H_latent, W_latent))
-            neutral_32 = torch.cat([neutral_16, neutral_16], dim=1)
-
-            # Stream 0 (reference): reference frame + neutral padding
-            stream_ref = torch.cat([
-                reference_image,
-                neutral_32.expand(-1, -1, latent_length, -1, -1),
-            ], dim=2)
-
-            # Stream 1 (control): neutral padding + control frames
-            stream_ctrl = torch.cat([
-                neutral_32.expand(-1, -1, ref_T, -1, -1),
-                control_latent,
-            ], dim=2)
-
-            # Reference mask: all zeros (reference convention)
-            ref_mask = torch.zeros(1, 64, total_T, height_mask, width_mask)
-
-            # Control mask: zeros for padding, control mask for control frames
-            ctrl_mask = torch.cat([
-                torch.zeros(64, ref_T, height_mask, width_mask),
-                mask,
-            ], dim=1).unsqueeze(0)
-
-            vace_frames = [stream_ref, stream_ctrl]
-            vace_masks = [ref_mask, ctrl_mask]
-            vace_strengths = [reference_strength, control_video_strength]
-
-            latent_length = total_T
-        else:
-            # No reference: single control stream
-            vace_frames = [control_latent]
-            vace_masks = [mask.unsqueeze(0)]
-            vace_strengths = [control_video_strength]
+        mask = mask.unsqueeze(0)
 
         import node_helpers
         positive = node_helpers.conditioning_set_values(
             positive,
-            {"vace_frames": vace_frames, "vace_mask": vace_masks, "vace_strength": vace_strengths},
+            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
             append=True,
         )
         negative = node_helpers.conditioning_set_values(
             negative,
-            {"vace_frames": vace_frames, "vace_mask": vace_masks, "vace_strength": vace_strengths},
+            {"vace_frames": [control_video_latent], "vace_mask": [mask], "vace_strength": [strength]},
             append=True,
         )
 
