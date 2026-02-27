@@ -31,10 +31,11 @@ class AutoCropperNode:
                 "frames": ("IMAGE",),
                 "method": (
                     [
-                        "anime_seg",
-                        "background_subtraction",
+                        "bbox",
+                        "anime",
+                        "bg_sub",
                     ],
-                    {"default": "background_subtraction"},
+                    {"default": "bg_sub"},
                 ),
                 "sensitivity": (
                     "FLOAT",
@@ -98,6 +99,17 @@ class AutoCropperNode:
             largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
             mask = (labels == largest).astype(np.uint8) * 255
 
+        return mask
+
+    def _detect_bbox(self, frame_np, sensitivity):
+        frame_uint8 = (frame_np * 255).astype(np.uint8)
+        if frame_np.shape[2] >= 3:
+            rgb_channels = frame_uint8[:, :, :3]
+        else:
+            rgb_channels = frame_uint8
+        mask = (
+            np.any(rgb_channels > int(sensitivity * 255), axis=2).astype(np.uint8) * 255
+        )
         return mask
 
     def _detect_background_subtraction(self, frame_np, sensitivity):
@@ -197,7 +209,15 @@ class AutoCropperNode:
     ):
         print(f"[AutoCropper] Processing {frames.shape[0]} frames using {method}...")
 
+        # Backward compatibility for older workflow values.
         if method == "anime_seg":
+            method = "anime"
+        elif method == "background_subtraction":
+            method = "bg_sub"
+        elif method in ("bbox_detection", "alpha_channel", "contour_detection"):
+            method = "bbox"
+
+        if method == "anime":
             model, device = self._get_model()
         else:
             model, device = None, None
@@ -229,10 +249,12 @@ class AutoCropperNode:
         global_box = None
 
         for i, frame in enumerate(frames_np):
-            if method == "anime_seg":
+            if method == "anime":
                 mask = self._segment_frame_anime(frame, model, device, sensitivity)
-            elif method == "background_subtraction":
+            elif method == "bg_sub":
                 mask = self._detect_background_subtraction(frame, sensitivity)
+            elif method == "bbox":
+                mask = self._detect_bbox(frame, sensitivity)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
