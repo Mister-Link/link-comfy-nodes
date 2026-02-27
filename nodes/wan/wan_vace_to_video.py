@@ -10,10 +10,15 @@ import comfy.utils
 
 
 def _make_vace_block_wrapper(original_forward, per_token_strength):
-    """Wrap a VaceWanAttentionBlock.forward to scale c_skip per-token."""
+    """Wrap a VaceWanAttentionBlock.forward to scale c_skip and c_out per-token."""
     def wrapped(c, x, **kwargs):
         c_skip, c_out = original_forward(c, x, **kwargs)
-        c_skip = c_skip * per_token_strength.to(device=c_skip.device, dtype=c_skip.dtype)
+        s = per_token_strength.to(device=c_skip.device, dtype=c_skip.dtype)
+        c_skip = c_skip * s
+        # Also attenuate internal VACE state toward the denoising signal so
+        # that subsequent blocks see a weaker control signal, reducing
+        # skeleton bleed that accumulates across the ~40 block chain.
+        c_out = c_out * s + x * (1 - s)
         return c_skip, c_out
     return wrapped
 
