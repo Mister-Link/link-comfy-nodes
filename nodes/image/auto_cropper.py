@@ -50,6 +50,16 @@ class AutoCropperNode:
                     "STRING",
                     {"default": "#000000"},
                 ),
+                "use_image_padding": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "If true, padding area is taken from the original frame when in bounds; "
+                            "out-of-bounds area uses padding_color."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -189,6 +199,7 @@ class AutoCropperNode:
         sensitivity: float,
         padding: int,
         padding_color: str,
+        use_image_padding: bool,
         alpha: torch.Tensor = None,
     ):
         print(f"[AutoCropper] Processing {frames.shape[0]} frames using {method}...")
@@ -295,12 +306,32 @@ class AutoCropperNode:
 
                 padded_alpha = np.zeros((padded_h, padded_w), dtype=cropped_alpha.dtype)
 
-                padded_frame[
-                    padding : padding + crop_height, padding : padding + crop_width
-                ] = cropped_frame
-                padded_alpha[
-                    padding : padding + crop_height, padding : padding + crop_width
-                ] = cropped_alpha
+                if use_image_padding:
+                    src_x1 = x1 - padding
+                    src_y1 = y1 - padding
+                    src_x2 = x2 + padding
+                    src_y2 = y2 + padding
+
+                    # Copy only the in-bounds part from the original frame.
+                    ix1 = max(0, src_x1)
+                    iy1 = max(0, src_y1)
+                    ix2 = min(W, src_x2)
+                    iy2 = min(H, src_y2)
+
+                    if ix2 > ix1 and iy2 > iy1:
+                        dx1 = ix1 - src_x1
+                        dy1 = iy1 - src_y1
+                        dx2 = dx1 + (ix2 - ix1)
+                        dy2 = dy1 + (iy2 - iy1)
+                        padded_frame[dy1:dy2, dx1:dx2] = frame[iy1:iy2, ix1:ix2]
+                        padded_alpha[dy1:dy2, dx1:dx2] = alpha_frame[iy1:iy2, ix1:ix2]
+                else:
+                    padded_frame[
+                        padding : padding + crop_height, padding : padding + crop_width
+                    ] = cropped_frame
+                    padded_alpha[
+                        padding : padding + crop_height, padding : padding + crop_width
+                    ] = cropped_alpha
 
                 cropped_frames.append(padded_frame)
                 cropped_alphas.append(padded_alpha)
