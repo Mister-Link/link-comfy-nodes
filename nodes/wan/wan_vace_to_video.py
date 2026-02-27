@@ -68,20 +68,22 @@ class WanVaceStrengthPatch:
             if vace_ctx is None:
                 return apply_model(args["input"], args["timestep"], **c)
 
-            # Blend reactive channels toward inactive (background) for control frames.
+            # Blend reactive channels toward inactive (background) for control frames,
+            # and scale mask channels proportionally.
             # vace_ctx shape: [batch, n_streams, 96, T, H_latent, W_latent]
             #   0:16  = inactive (background) — reference point for blending
             #  16:32  = reactive (pose) — blended toward inactive by _ctrl
-            #  32:96  = mask (spatial distribution) — keep untouched
+            #  32:96  = mask (spatial distribution) — scaled by _ctrl
             c_mod = dict(c)
             ctx = vace_ctx.clone()
 
-            # Blend reactive toward inactive: at strength=0.35, the model sees
-            # mostly background with a hint of pose, creating ambiguity rather
-            # than just a dim but clear pose signal.
+            # Blend reactive toward inactive for control frames.
             bg = ctx[:, 0, 0:16, _trim:, :, :]
             rx = ctx[:, 0, 16:32, _trim:, :, :]
             ctx[:, 0, 16:32, _trim:, :, :] = bg + (rx - bg) * _ctrl
+            # Scale mask channels so the model knows the control signal is weak,
+            # not "strong control pointing at nothing" (which causes black output).
+            ctx[:, 0, 32:96, _trim:, :, :] *= _ctrl
 
             c_mod["vace_context"] = ctx
             return apply_model(args["input"], args["timestep"], **c_mod)
