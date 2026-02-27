@@ -46,6 +46,15 @@ app.registerExtension({
             nodeData = { id: node.id, type: node.type };
           }
 
+          // When a widget is converted to a linked input ("link_to_input"),
+          // its value is dropped from widgets_values in the serialized form.
+          // Recover all widget values directly from the live node.widgets array
+          // so model filenames on linked widgets are still detected.
+          if (Array.isArray(node.widgets)) {
+            const extraValues = node.widgets.map((w) => w.value);
+            nodeData._widget_values_all = extraValues;
+          }
+
           result.nodes.push(nodeData);
 
           if (node.isSubgraphNode?.() && node.subgraph) {
