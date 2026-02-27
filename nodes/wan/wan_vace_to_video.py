@@ -44,6 +44,11 @@ class WanVaceToVideoControlStrength:
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01},
                 ),
+                "control_video_neutral": (
+                    "FLOAT",
+                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01,
+                     "tooltip": "Value to fade toward at strength=0. Use 0.5 for general VACE inputs, 0.0 for black-background OpenPose frames."},
+                ),
             },
             "optional": {
                 "control_video": ("IMAGE",),
@@ -59,7 +64,9 @@ class WanVaceToVideoControlStrength:
     DESCRIPTION = (
         "WanVaceToVideo with a separate control_video_strength slider. "
         "Attenuates the control_video signal before VAE encoding by lerping "
-        "toward neutral (0.5). Reference image and masks are unaffected."
+        "toward control_video_neutral. Use neutral=0.5 for general VACE inputs; "
+        "use neutral=0.0 for black-background OpenPose frames. "
+        "Reference image and masks are unaffected."
     )
 
     @classmethod
@@ -74,6 +81,7 @@ class WanVaceToVideoControlStrength:
         batch_size,
         strength,
         control_video_strength,
+        control_video_neutral=0.5,
         control_video=None,
         control_masks=None,
         reference_image=None,
@@ -93,9 +101,10 @@ class WanVaceToVideoControlStrength:
             control_video = torch.ones((length, height, width, 3)) * 0.5
 
         # --- Attenuate control_video toward neutral before encoding ---
-        # At strength=1.0 this is a no-op. At 0.0 the tensor becomes all 0.5.
+        # At strength=1.0 this is a no-op.
+        # neutral=0.5 for general VACE; neutral=0.0 for black-bg OpenPose.
         if abs(control_video_strength - 1.0) > 1e-6:
-            neutral = torch.full_like(control_video, 0.5)
+            neutral = torch.full_like(control_video, control_video_neutral)
             control_video = neutral + (control_video - neutral) * control_video_strength
 
         # --- reference_image ---

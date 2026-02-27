@@ -19,6 +19,7 @@ from .preview import (
     PreviewWebmNode,
     SpritesheetPreviewNode,
 )
+from .latent import ChangeLatentDimensions
 from .sampling import KSamplerAdvancedDual
 from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
 from .text import AdvancedStringConcat, PreviewAsMarkdown
@@ -40,6 +41,7 @@ from .wan import (
 __all__ = [
     "AddImageToBatchNode",
     "AdvancedStringConcat",
+    "ChangeLatentDimensions",
     "AutoCropperNode",
     "BatchImageSave",
     "BulkBackgroundRemoverBgEraserNode",
