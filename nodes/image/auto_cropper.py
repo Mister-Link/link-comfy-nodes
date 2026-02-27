@@ -118,50 +118,38 @@ class AutoCropperNode:
 
         sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
 
-        border = max(1, int(round(min(h, w) * 0.02)))
-        top = rgb[:border, :, :].reshape(-1, 3)
-        bottom = rgb[h - border :, :, :].reshape(-1, 3)
-        left = rgb[:, :border, :].reshape(-1, 3)
-        right = rgb[:, w - border :, :].reshape(-1, 3)
-        border_pixels = np.concatenate([top, bottom, left, right], axis=0)
+        # Sample background from corners (most reliable for uniform backgrounds)
+        corner_size = max(2, int(min(h, w) * 0.05))
+        corners = [
+            rgb[:corner_size, :corner_size],
+            rgb[:corner_size, -corner_size:],
+            rgb[-corner_size:, :corner_size],
+            rgb[-corner_size:, -corner_size:],
+        ]
+        corner_pixels = np.vstack([c.reshape(-1, 3) for c in corners])
+        bg_color = np.median(corner_pixels, axis=0)
 
-        bg_color = np.median(border_pixels, axis=0)
-
-        # Adaptive threshold from border variability, with stronger sensitivity
-        # response so 0.0 vs 1.0 produces visibly different masks.
-        border_diff = np.linalg.norm(border_pixels - bg_color[None, :], axis=1)
-        border_q90 = float(np.quantile(border_diff, 0.90))
-        min_t = max(0.004, border_q90 * 0.20)
-        max_t = max(min_t + 1e-6, (border_q90 * 2.8) + 0.08)
-        curve = sensitivity ** 1.8
-        diff_threshold = min_t + ((max_t - min_t) * curve)
-
+        # Simple threshold: pixels far enough from background are foreground
+        # sensitivity: 0.0 = very permissive (small threshold), 1.0 = very strict (large threshold)
         diff = np.linalg.norm(rgb - bg_color[None, None, :], axis=2)
-        bg_candidate = (diff <= diff_threshold).astype(np.uint8)
 
-        # Keep only background that is connected to image borders.
-        num_labels, labels, _, _ = cv2.connectedComponentsWithStats(bg_candidate, 8)
-        bg_mask = np.zeros_like(bg_candidate, dtype=np.uint8)
-        if num_labels > 1:
-            border_labels = set(np.unique(labels[0, :]).tolist())
-            border_labels.update(np.unique(labels[h - 1, :]).tolist())
-            border_labels.update(np.unique(labels[:, 0]).tolist())
-            border_labels.update(np.unique(labels[:, w - 1]).tolist())
-            for label in border_labels:
-                if label != 0:
-                    bg_mask[labels == label] = 1
+        # Map sensitivity to threshold range
+        # Low sensitivity: threshold ~0.02 (pick up any difference)
+        # High sensitivity: threshold ~0.25 (only major differences)
+        base_threshold = 0.02 + (sensitivity * 0.23)
+        fg_mask = (diff > base_threshold).astype(np.uint8) * 255
 
-        fg_mask = (1 - bg_mask).astype(np.uint8) * 255
-
-        # Fill tiny holes, then expand low-sensitivity masks to keep soft edges.
-        close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        # Clean up: close small holes, erode to remove noise, dilate to restore size
+        close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_k)
-        expand = int(round((1.0 - sensitivity) * 12.0))
-        if expand > 0:
-            dilate_k = cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE, (expand * 2 + 1, expand * 2 + 1)
-            )
-            fg_mask = cv2.dilate(fg_mask, dilate_k, iterations=1)
+
+        # Erode to remove thin noise
+        erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+        fg_mask = cv2.erode(fg_mask, erode_k, iterations=1)
+
+        # Dilate to restore edges and connect small gaps
+        dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        fg_mask = cv2.dilate(fg_mask, dilate_k, iterations=2)
 
         return fg_mask
 
