@@ -235,12 +235,21 @@ class WanVaceToVideoControlStrength:
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
-        mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
-        mask = mask.permute(2, 4, 0, 1, 3)
-        mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
+
+        # Interpolate mask BEFORE decomposing spatial patches to prevent temporal
+        # blurring across patches. This ensures sharp boundaries on the mask.
+        mask = mask[:, :, :, 0]  # [length, height, width]
         mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode='nearest-exact'
-        ).squeeze(0)
+            mask.unsqueeze(0).unsqueeze(0),  # [1, 1, length, height, width]
+            size=(latent_length, height, width),
+            mode='nearest-exact'
+        ).squeeze(0).squeeze(0)  # [latent_length, height, width]
+
+        # Now decompose spatial dimensions into VAE stride patches
+        mask = mask.view(latent_length, height_mask, vae_stride, width_mask, vae_stride)
+        mask = mask.permute(2, 4, 0, 1, 3)  # [vae_stride, vae_stride, latent_length, height_mask, width_mask]
+        mask = mask.reshape(vae_stride * vae_stride, latent_length, height_mask, width_mask)
+        mask = mask.unsqueeze(0)  # [1, 64, latent_length, height_mask, width_mask]
 
         trim_latent = 0
         if reference_image is not None:
