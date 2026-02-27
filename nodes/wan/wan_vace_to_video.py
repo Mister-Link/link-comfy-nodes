@@ -112,6 +112,12 @@ class WanVaceStrengthPatch:
                 vace_ctx[:, 0, 16:32, _trim_latent:, :, :] = (
                     inactive_ctx + ((reactive_ctx - inactive_ctx) * _ctrl_strength)
                 )
+                # Also scale the mask channels (32:96) for control frames.
+                # The mask tells the model WHERE control is active; leaving it
+                # at full strength causes skeleton structure to bleed through
+                # even when reactive channels are attenuated, especially in
+                # longer sequences where the model relies more on the mask.
+                vace_ctx[:, 0, 32:96, _trim_latent:, :, :] *= _ctrl_strength
 
             c_modified["vace_context"] = vace_ctx
             return apply_model(args["input"], args["timestep"], **c_modified)
@@ -229,20 +235,12 @@ class WanVaceToVideoControlStrength:
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
-
-        # Interpolate mask to latent frame count BEFORE VAE stride decomposition
-        # This ensures cleaner temporal boundaries for long sequences
-        mask_temporal = mask[:, :, :, 0]  # Use single channel for temporal interpolation [length, height, width]
-        mask_temporal = torch.nn.functional.interpolate(
-            mask_temporal.unsqueeze(0).unsqueeze(0),  # [1, 1, length, height, width]
-            size=(latent_length, height, width),
-            mode="nearest"
-        ).squeeze(0).squeeze(0)  # [latent_length, height, width]
-
-        # Reshape back to mask spatial dimensions
-        mask = mask_temporal.view(latent_length, height_mask, vae_stride, width_mask, vae_stride)
+        mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
         mask = mask.permute(2, 4, 0, 1, 3)
-        mask = mask.reshape(vae_stride * vae_stride, latent_length, height_mask, width_mask)
+        mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
+        mask = torch.nn.functional.interpolate(
+            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode='nearest-exact'
+        ).squeeze(0)
 
         trim_latent = 0
         if reference_image is not None:
