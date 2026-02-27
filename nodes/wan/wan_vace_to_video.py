@@ -229,14 +229,20 @@ class WanVaceToVideoControlStrength:
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
-        mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
+
+        # Interpolate mask to latent frame count BEFORE VAE stride decomposition
+        # This ensures cleaner temporal boundaries for long sequences
+        mask_temporal = mask[:, :, :, 0]  # Use single channel for temporal interpolation [length, height, width]
+        mask_temporal = torch.nn.functional.interpolate(
+            mask_temporal.unsqueeze(0).unsqueeze(0),  # [1, 1, length, height, width]
+            size=(latent_length, height, width),
+            mode="nearest"
+        ).squeeze(0).squeeze(0)  # [latent_length, height, width]
+
+        # Reshape back to mask spatial dimensions
+        mask = mask_temporal.view(latent_length, height_mask, vae_stride, width_mask, vae_stride)
         mask = mask.permute(2, 4, 0, 1, 3)
-        mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
-        # Use linear interpolation for temporal dimension to avoid artifacts in longer sequences
-        # where nearest-neighbor can cause discontinuities in the control signal
-        mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode="trilinear", align_corners=False
-        ).squeeze(0)
+        mask = mask.reshape(vae_stride * vae_stride, latent_length, height_mask, width_mask)
 
         trim_latent = 0
         if reference_image is not None:
