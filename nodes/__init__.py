@@ -35,6 +35,7 @@ from .wan import (
     VaceControlStrength,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
+    WanVaceStrengthPatch,
     WanVaceToVideoControlStrength,
 )
 
@@ -55,6 +56,7 @@ __all__ = [
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
     "VaceControlStrength",
+    "WanVaceStrengthPatch",
     "WanVaceToVideoControlStrength",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
