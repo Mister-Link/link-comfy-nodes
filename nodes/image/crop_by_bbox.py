@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import numpy as np
 import torch
 
@@ -17,10 +18,7 @@ class CropByBBoxNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
-                "bbox_x": ("INT", {"default": 0, "min": 0}),
-                "bbox_y": ("INT", {"default": 0, "min": 0}),
-                "bbox_w": ("INT", {"default": 256, "min": 1}),
-                "bbox_h": ("INT", {"default": 256, "min": 1}),
+                "bbox": ("STRING", {"default": "{}"}),
                 "padding": (
                     "INT",
                     {"default": 0, "min": 0, "max": 500, "step": 1},
@@ -59,15 +57,23 @@ class CropByBBoxNode:
     def crop_by_bbox(
         self,
         frames: torch.Tensor,
-        bbox_x: int,
-        bbox_y: int,
-        bbox_w: int,
-        bbox_h: int,
+        bbox: str,
         padding: int,
         padding_color: str,
         use_image_padding: bool,
         alpha: torch.Tensor = None,
     ):
+        # Parse bbox JSON
+        try:
+            bbox_data = json.loads(bbox)
+        except json.JSONDecodeError:
+            raise ValueError(f"Invalid bbox JSON: {bbox}")
+
+        bbox_x = bbox_data.get("x", 0)
+        bbox_y = bbox_data.get("y", 0)
+        bbox_w = bbox_data.get("w", 256)
+        bbox_h = bbox_data.get("h", 256)
+
         frames_np = frames.cpu().numpy()
 
         if frames_np.ndim != 4:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import cv2
+import json
 import numpy as np
 import torch
 
@@ -17,8 +18,8 @@ except Exception as e:
 
 class AutoCropperNode:
     CATEGORY = "image/transform"
-    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("cropped_frames", "cropped_alpha", "width", "height", "bbox_x", "bbox_y", "bbox_w", "bbox_h")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("cropped_frames", "cropped_alpha", "bbox")
     FUNCTION = "auto_crop"
 
     _model = None
@@ -357,4 +358,14 @@ class AutoCropperNode:
             f"(with {padding}px padding)"
         )
 
-        return (result_frames, result_alphas, final_width, final_height, x1, y1, crop_width, crop_height)
+        bbox_data = {
+            "x": int(x1),
+            "y": int(y1),
+            "w": int(crop_width),
+            "h": int(crop_height),
+            "width": int(final_width),
+            "height": int(final_height),
+        }
+        bbox_json = json.dumps(bbox_data)
+
+        return (result_frames, result_alphas, bbox_json)
