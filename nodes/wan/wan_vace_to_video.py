@@ -24,10 +24,10 @@ class WanVaceStrengthPatch:
           reference_strength.
 
       - control frames (temporal indices trim_latent..end):
-          only the REACTIVE channels (16:32, which carry the pose / mask
-          signal) are scaled by control_video_strength.  The INACTIVE
-          channels (0:16, which carry background) remain at full strength,
-          so the background is preserved even when pose adherence is reduced.
+          REACTIVE channels (16:32, pose/mask signal) are blended toward
+          INACTIVE channels (0:16, background baseline) using
+          control_video_strength. This avoids hard thresholding that can
+          happen when scaling reactive channels toward zero.
     """
 
     @classmethod
@@ -57,7 +57,7 @@ class WanVaceStrengthPatch:
     DESCRIPTION = (
         "Patches a WAN VACE model to apply separate strengths to the "
         "reference_image and control_video regions. control_video_strength "
-        "scales only the reactive (pose) channels, preserving the background. "
+        "blends reactive channels toward inactive channels for smoother control. "
         "Wire trim_latent from WanVaceToVideo here and insert this node in "
         "your model chain before KSampler."
     )
@@ -99,10 +99,13 @@ class WanVaceStrengthPatch:
                 )
 
             if needs_ctrl_patch:
-                # Scale ONLY the reactive channels (pose signal) for control frames.
-                # Inactive channels (background) stay at full strength.
+                # Blend reactive pose channels toward inactive/background channels
+                # instead of scaling toward zero. At 0.0 this becomes inactive;
+                # at 1.0 it is unchanged.
+                inactive_ctx = vace_ctx[:, 0, 0:16, _trim_latent:, :, :]
+                reactive_ctx = vace_ctx[:, 0, 16:32, _trim_latent:, :, :]
                 vace_ctx[:, 0, 16:32, _trim_latent:, :, :] = (
-                    vace_ctx[:, 0, 16:32, _trim_latent:, :, :] * _ctrl_strength
+                    inactive_ctx + ((reactive_ctx - inactive_ctx) * _ctrl_strength)
                 )
 
             c_modified["vace_context"] = vace_ctx
