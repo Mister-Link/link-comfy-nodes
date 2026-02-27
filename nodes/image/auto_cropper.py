@@ -116,6 +116,8 @@ class AutoCropperNode:
         h, w = frame_np.shape[:2]
         rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
 
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+
         border = max(1, int(round(min(h, w) * 0.02)))
         top = rgb[:border, :, :].reshape(-1, 3)
         bottom = rgb[h - border :, :, :].reshape(-1, 3)
@@ -125,8 +127,15 @@ class AutoCropperNode:
 
         bg_color = np.median(border_pixels, axis=0)
 
-        # Higher sensitivity -> tighter foreground mask.
-        diff_threshold = 0.02 + ((1.0 - sensitivity) * 0.20)
+        # Adaptive threshold from border variability, with stronger sensitivity
+        # response so 0.0 vs 1.0 produces visibly different masks.
+        border_diff = np.linalg.norm(border_pixels - bg_color[None, :], axis=1)
+        border_q90 = float(np.quantile(border_diff, 0.90))
+        min_t = max(0.004, border_q90 * 0.20)
+        max_t = max(min_t + 1e-6, (border_q90 * 2.8) + 0.08)
+        curve = (1.0 - sensitivity) ** 1.8
+        diff_threshold = min_t + ((max_t - min_t) * curve)
+
         diff = np.linalg.norm(rgb - bg_color[None, None, :], axis=2)
         bg_candidate = (diff <= diff_threshold).astype(np.uint8)
 
@@ -144,14 +153,15 @@ class AutoCropperNode:
 
         fg_mask = (1 - bg_mask).astype(np.uint8) * 255
 
-        # Fill tiny holes and slightly expand so blurred edges aren't clipped.
+        # Fill tiny holes, then expand low-sensitivity masks to keep soft edges.
         close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_k)
-        expand = max(1, int(round((1.0 - sensitivity) * 6.0)))
-        dilate_k = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (expand * 2 + 1, expand * 2 + 1)
-        )
-        fg_mask = cv2.dilate(fg_mask, dilate_k, iterations=1)
+        expand = int(round((1.0 - sensitivity) * 12.0))
+        if expand > 0:
+            dilate_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (expand * 2 + 1, expand * 2 + 1)
+            )
+            fg_mask = cv2.dilate(fg_mask, dilate_k, iterations=1)
 
         return fg_mask
 
