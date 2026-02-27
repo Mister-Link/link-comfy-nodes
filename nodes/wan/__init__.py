@@ -2,4 +2,4 @@ from .frame_adjuster import WANFramesToAddAndCut
 from .frame_calculator import WANFrameCalculatorNode
 from .pose_strength import NativeWanPoseStrength
 from .vace_control_strength import VaceControlStrength
-from .wan_vace_to_video import WanVaceStrengthPatch, WanVaceToVideoControlStrength
+from .wan_vace_to_video import WanVaceToVideoControlStrength
