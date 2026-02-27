@@ -68,19 +68,17 @@ class WanVaceStrengthPatch:
             if vace_ctx is None:
                 return apply_model(args["input"], args["timestep"], **c)
 
-            # Hybrid approach: modify vace_context channel-selectively for control
-            # frames, keeping inactive (background) at full strength.
+            # Scale only reactive (pose) channels for control frames.
             # vace_ctx shape: [batch, n_streams, 96, T, H_latent, W_latent]
-            #   0:16  = inactive (background) — preserved at full strength
-            #  16:32  = reactive (pose) — scaled by _ctrl for control frames
-            #  32:96  = mask (64 spatial patches) — scaled by _ctrl for control frames
+            #   0:16  = inactive (background) — keep untouched
+            #  16:32  = reactive (pose) — scale by _ctrl for control frames
+            #  32:96  = mask (spatial distribution) — keep untouched
             c_mod = dict(c)
             ctx = vace_ctx.clone()
 
-            # Scale only reactive channels and mask for control frames (trim_latent onward).
-            # This weakens the pose guidance while keeping background guidance strong.
+            # Scale ONLY reactive channels for control frames (trim_latent onward).
+            # Background and spatial distribution stay at full strength.
             ctx[:, 0, 16:32, _trim:, :, :] *= _ctrl
-            ctx[:, 0, 32:96, _trim:, :, :] *= _ctrl
 
             c_mod["vace_context"] = ctx
             return apply_model(args["input"], args["timestep"], **c_mod)
