@@ -9,25 +9,38 @@ import comfy.model_management
 import comfy.utils
 
 
+def _make_vace_block_wrapper(original_forward, per_token_strength):
+    """Wrap a VaceWanAttentionBlock.forward to scale c_skip per-token.
+
+    per_token_strength is a [1, total_tokens, 1] tensor with
+    reference_strength for ref-region tokens and control_video_strength
+    for control-region tokens.
+    """
+
+    def wrapped(c, x, **kwargs):
+        c_skip, c_out = original_forward(c, x, **kwargs)
+        c_skip = c_skip * per_token_strength.to(device=c_skip.device, dtype=c_skip.dtype)
+        return c_skip, c_out
+
+    return wrapped
+
+
 class WanVaceToVideoControlStrength:
-    """WanVaceToVideo with separate strengths for reference_image and control_video.
+    """WanVaceToVideo with separate transformer-space strengths for reference and control.
 
-    Uses latent-space attenuation: each input is VAE-encoded normally, then
-    lerped toward its silence latent (VAE-encoded 0.5 pixels) before being
-    combined into a single VACE stream.  This avoids the torch.stack shape
-    mismatch of separate streams and gives a true strength gradient (unlike
-    pixel-space attenuation which was binary due to VAE nonlinearity).
+    Patches the model's VaceWanAttentionBlock.forward methods so that
+    c_skip is scaled per-token before being added to x.  The VACE blocks
+    always see full-quality on-distribution inputs — only the contribution
+    weight changes, preserving output quality at any strength.
 
-        attenuated = silence_latent + (actual_latent - silence_latent) * strength
-
-    At strength=1.0 this is identity (no extra VAE work).
-    At strength=0.0 the input is fully replaced with silence.
+    Requires MODEL as input so it can apply the patch.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "model": ("MODEL",),
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "vae": ("VAE",),
@@ -45,7 +58,7 @@ class WanVaceToVideoControlStrength:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "tooltip": "Latent-space strength for the reference_image. Lerps toward silence at <1.0.",
+                        "tooltip": "Transformer-space strength for the reference_image region. Scales the VACE c_skip contribution for reference tokens.",
                     },
                 ),
                 "control_video_strength": (
@@ -55,7 +68,7 @@ class WanVaceToVideoControlStrength:
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "tooltip": "Latent-space strength for the control_video. Lerps toward silence at <1.0. Reduce to loosen pose adherence.",
+                        "tooltip": "Transformer-space strength for the control_video region. Reduce to loosen pose adherence while preserving quality.",
                     },
                 ),
             },
@@ -66,21 +79,22 @@ class WanVaceToVideoControlStrength:
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT")
-    RETURN_NAMES = ("positive", "negative", "latent", "trim_latent")
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING", "LATENT", "INT")
+    RETURN_NAMES = ("model", "positive", "negative", "latent", "trim_latent")
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
         "WanVaceToVideo with separate strength sliders for reference_image and "
-        "control_video. Each is attenuated independently in latent space by "
-        "lerping toward its VAE-encoded silence (0.5 pixels). This gives a "
-        "true strength gradient — reduce control_video_strength to loosen "
-        "pose adherence without affecting the reference frame."
+        "control_video. Patches the model so VACE blocks always process "
+        "full-quality inputs — only the c_skip contribution weight is scaled "
+        "per-token in transformer space. This preserves output quality at any "
+        "strength level."
     )
 
     @classmethod
     def execute(
         cls,
+        model,
         positive,
         negative,
         vae,
@@ -96,7 +110,7 @@ class WanVaceToVideoControlStrength:
     ):
         latent_length = ((length - 1) // 4) + 1
 
-        # --- control_video preparation ---
+        # --- control_video preparation (same as stock WanVaceToVideo) ---
         if control_video is not None:
             control_video = comfy.utils.common_upscale(
                 control_video[:length].movedim(-1, 1),
@@ -114,7 +128,7 @@ class WanVaceToVideoControlStrength:
         else:
             control_video = torch.ones((length, height, width, 3)) * 0.5
 
-        # --- reference_image ---
+        # --- reference_image (same as stock) ---
         if reference_image is not None:
             reference_image = comfy.utils.common_upscale(
                 reference_image[:1].movedim(-1, 1), width, height, "bilinear", "center"
@@ -130,22 +144,7 @@ class WanVaceToVideoControlStrength:
                 dim=1,
             )
 
-            # Latent-space attenuation: lerp toward silence (VAE-encoded 0.5 pixels)
-            if abs(reference_strength - 1.0) > 1e-6:
-                silence_ref_pixels = torch.ones((1, height, width, 3)) * 0.5
-                silence_ref = vae.encode(silence_ref_pixels)
-                silence_ref = torch.cat(
-                    [
-                        silence_ref,
-                        comfy.latent_formats.Wan21().process_out(
-                            torch.zeros_like(silence_ref)
-                        ),
-                    ],
-                    dim=1,
-                )
-                reference_image = silence_ref + (reference_image - silence_ref) * reference_strength
-
-        # --- control_masks ---
+        # --- control_masks (same as stock) ---
         if control_masks is None:
             mask = torch.ones((length, height, width, 1))
         else:
@@ -160,27 +159,20 @@ class WanVaceToVideoControlStrength:
                     mask, (0, 0, 0, 0, 0, 0, 0, length - mask.shape[0]), value=1.0
                 )
 
-        # --- inactive / reactive encode ---
-        cv = control_video - 0.5
-        inactive = (cv * (1 - mask)) + 0.5
-        reactive = (cv * mask) + 0.5
+        # --- inactive / reactive encode (same as stock) ---
+        control_video = control_video - 0.5
+        inactive = (control_video * (1 - mask)) + 0.5
+        reactive = (control_video * mask) + 0.5
 
         inactive = vae.encode(inactive[:, :, :, :3])
         reactive = vae.encode(reactive[:, :, :, :3])
-        ctrl_latent = torch.cat((inactive, reactive), dim=1)
-
-        # Latent-space attenuation: lerp toward silence (VAE-encoded 0.5 pixels)
-        if abs(control_video_strength - 1.0) > 1e-6:
-            silence_pixels = torch.ones((length, height, width, 3)) * 0.5
-            silence_enc = vae.encode(silence_pixels)
-            silence_ctrl = torch.cat((silence_enc, silence_enc), dim=1)
-            ctrl_latent = silence_ctrl + (ctrl_latent - silence_ctrl) * control_video_strength
-
-        # --- combine into single stream (same as stock WanVaceToVideo) ---
+        control_video_latent = torch.cat((inactive, reactive), dim=1)
         if reference_image is not None:
-            ctrl_latent = torch.cat((reference_image, ctrl_latent), dim=2)
+            control_video_latent = torch.cat(
+                (reference_image, control_video_latent), dim=2
+            )
 
-        # --- mask to latent space ---
+        # --- mask to latent space (same as stock) ---
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
@@ -213,7 +205,7 @@ class WanVaceToVideoControlStrength:
         positive = node_helpers.conditioning_set_values(
             positive,
             {
-                "vace_frames": [ctrl_latent],
+                "vace_frames": [control_video_latent],
                 "vace_mask": [mask],
                 "vace_strength": [1.0],
             },
@@ -222,15 +214,79 @@ class WanVaceToVideoControlStrength:
         negative = node_helpers.conditioning_set_values(
             negative,
             {
-                "vace_frames": [ctrl_latent],
+                "vace_frames": [control_video_latent],
                 "vace_mask": [mask],
                 "vace_strength": [1.0],
             },
             append=True,
         )
 
+        # --- model patch: per-token vace_strength ---
+        m = model.clone()
+
+        needs_patch = (
+            reference_image is not None
+            and (abs(reference_strength - 1.0) > 1e-6 or abs(control_video_strength - 1.0) > 1e-6)
+        )
+
+        if needs_patch:
+            _ref_strength = reference_strength
+            _ctrl_strength = control_video_strength
+            _trim_latent = trim_latent
+            _base_model = m.model  # BaseModel — holds diffusion_model
+
+            def vace_unet_wrapper(apply_model, args):
+                input_x = args["input"]
+                # input_x shape: [batch, 16, T, H_latent, W_latent]
+                T = input_x.shape[2]
+
+                # After vace_patch_embedding (stride (1,2,2)):
+                #   T' = T, H' = H_latent//2, W' = W_latent//2
+                # Tokens are flattened in T × H' × W' order.
+                H_latent = input_x.shape[3]
+                W_latent = input_x.shape[4]
+                tokens_per_frame = (H_latent // 2) * (W_latent // 2)
+                total_tokens = T * tokens_per_frame
+                ref_tokens = _trim_latent * tokens_per_frame
+
+                per_token = torch.ones(1, total_tokens, 1)
+                per_token[:, :ref_tokens, :] = _ref_strength
+                per_token[:, ref_tokens:, :] = _ctrl_strength
+
+                # Access diffusion model from captured BaseModel
+                diff_model = _base_model.diffusion_model
+                vace_blocks = getattr(diff_model, "vace_blocks", None)
+                if vace_blocks is None:
+                    return apply_model(args["input"], args["timestep"], **args["c"])
+
+                originals = {}
+                try:
+                    for ii, block in enumerate(vace_blocks):
+                        originals[ii] = block.forward
+                        block.forward = _make_vace_block_wrapper(block.forward, per_token)
+
+                    result = apply_model(args["input"], args["timestep"], **args["c"])
+                finally:
+                    for ii, orig in originals.items():
+                        vace_blocks[ii].forward = orig
+
+                return result
+
+            m.set_model_unet_function_wrapper(vace_unet_wrapper)
+        elif reference_image is None and abs(control_video_strength - 1.0) > 1e-6:
+            # No reference — just use scalar vace_strength for control
+            # Re-do conditioning with the actual strength
+            positive = node_helpers.conditioning_set_values(
+                positive,
+                {"vace_strength": [control_video_strength]},
+            )
+            negative = node_helpers.conditioning_set_values(
+                negative,
+                {"vace_strength": [control_video_strength]},
+            )
+
         latent = torch.zeros(
             [batch_size, 16, latent_length, height // 8, width // 8],
             device=comfy.model_management.intermediate_device(),
         )
-        return (positive, negative, {"samples": latent}, trim_latent)
+        return (m, positive, negative, {"samples": latent}, trim_latent)
