@@ -130,14 +130,11 @@ class VideoDetailer:
             + 0.5 * denoise_mask_pixel
         )
 
-        ones_mask = torch.ones(
-            (num_pixel_frames, img_height, width_double, 1),
-            dtype=torch.float32,
-        )
+        mask_pixel = denoise_mask_pixel
 
         control = greyed_video - 0.5
-        inactive = (control * (1 - ones_mask[:, :, :, :1])) + 0.5
-        reactive = (control * ones_mask[:, :, :, :1]) + 0.5
+        inactive = (control * (1 - mask_pixel[:, :, :, :1])) + 0.5
+        reactive = (control * mask_pixel[:, :, :, :1]) + 0.5
 
         inactive_latent = vae.encode(inactive[:, :, :, :3])
         reactive_latent = vae.encode(reactive[:, :, :, :3])
@@ -149,7 +146,7 @@ class VideoDetailer:
         height_mask = img_height // vae_stride
         width_mask = width_double // vae_stride
 
-        mask_2d = ones_mask[:, :, :, 0]
+        mask_2d = mask_pixel[:, :, :, 0]
         mask_blocks = mask_2d.view(
             num_pixel_frames, height_mask, vae_stride, width_mask, vae_stride
         )
@@ -297,8 +294,13 @@ class VideoDetailer:
                 print(f"[Video Detailer] inheriting VACE strength={vace_strength}")
 
         vace_frames_list, vace_mask_list = self._build_vace_conditioning(
-            composite_video, denoise_mask_pixel, vae, latent_frames,
-            img_height, width_double, vace_strength,
+            composite_video,
+            denoise_mask_pixel,
+            vae,
+            latent_frames,
+            img_height,
+            width_double,
+            vace_strength,
         )
 
         vace_values = {
@@ -346,8 +348,19 @@ class VideoDetailer:
         }
 
         samples = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
-            model, "enable", seed, steps, cfg, sampler_name, scheduler,
-            positive, negative, latent_dict, start_step, end_step, "disable",
+            model,
+            "enable",
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            latent_dict,
+            start_step,
+            end_step,
+            "disable",
         )[0]
 
         decoded_wide = vae.decode(samples["samples"])
@@ -359,7 +372,10 @@ class VideoDetailer:
         if refined_half.shape[2] != img_width:
             rf = refined_half.permute(0, 3, 1, 2)
             rf = F.interpolate(
-                rf, size=(img_height, img_width), mode="bilinear", align_corners=False,
+                rf,
+                size=(img_height, img_width),
+                mode="bilinear",
+                align_corners=False,
             )
             refined_half = rf.permute(0, 2, 3, 1)
 

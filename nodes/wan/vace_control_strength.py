@@ -38,7 +38,9 @@ class VaceControlStrength:
         }
 
     @staticmethod
-    def _split_vace(meta: dict, trim_amount: int, control_strength: float, reference_strength: float) -> dict:
+    def _split_vace(
+        meta: dict, trim_amount: int, control_strength: float, reference_strength: float
+    ) -> dict:
         if "vace_frames" not in meta or "vace_mask" not in meta:
             return meta
 
@@ -74,10 +76,18 @@ class VaceControlStrength:
             new_meta["vace_strength"] = [float(reference_strength)]
             return new_meta
 
-        ref_frames = frames[:, :, :split]
-        ref_mask = mask[:, :, :split]
-        ctrl_frames = frames[:, :, split:]
-        ctrl_mask = mask[:, :, split:]
+        zeros = torch.zeros_like(frames)
+        zeros_mask = torch.zeros_like(mask)
+
+        ref_frames = zeros.clone()
+        ref_mask = zeros_mask.clone()
+        ref_frames[:, :, :split] = frames[:, :, :split]
+        ref_mask[:, :, :split] = mask[:, :, :split]
+
+        ctrl_frames = zeros.clone()
+        ctrl_mask = zeros_mask.clone()
+        ctrl_frames[:, :, split:] = frames[:, :, split:]
+        ctrl_mask[:, :, split:] = mask[:, :, split:]
 
         new_meta["vace_frames"] = [ref_frames, ctrl_frames]
         new_meta["vace_mask"] = [ref_mask, ctrl_mask]
@@ -85,18 +95,36 @@ class VaceControlStrength:
         return new_meta
 
     @classmethod
-    def _adjust_cond(cls, cond: list, trim_amount: int, control_strength: float, reference_strength: float) -> list:
+    def _adjust_cond(
+        cls,
+        cond: list,
+        trim_amount: int,
+        control_strength: float,
+        reference_strength: float,
+    ) -> list:
         out = []
         for entry in cond:
             tensor, meta = entry
-            new_meta = cls._split_vace(meta, trim_amount, control_strength, reference_strength)
+            new_meta = cls._split_vace(
+                meta, trim_amount, control_strength, reference_strength
+            )
             out.append((tensor, new_meta))
         return out
 
-    def execute(self, positive, negative, trim_amount, control_strength, reference_strength):
-        if trim_amount <= 0 and abs(control_strength - 1.0) < 1e-6 and abs(reference_strength - 1.0) < 1e-6:
+    def execute(
+        self, positive, negative, trim_amount, control_strength, reference_strength
+    ):
+        if (
+            trim_amount <= 0
+            and abs(control_strength - 1.0) < 1e-6
+            and abs(reference_strength - 1.0) < 1e-6
+        ):
             return (positive, negative)
 
-        pos = self._adjust_cond(positive, trim_amount, control_strength, reference_strength)
-        neg = self._adjust_cond(negative, trim_amount, control_strength, reference_strength)
+        pos = self._adjust_cond(
+            positive, trim_amount, control_strength, reference_strength
+        )
+        neg = self._adjust_cond(
+            negative, trim_amount, control_strength, reference_strength
+        )
         return (pos, neg)
