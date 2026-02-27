@@ -9,26 +9,26 @@ import comfy.model_management
 import comfy.utils
 
 
+def _make_vace_block_wrapper(original_forward, per_token_strength):
+    """Wrap a VaceWanAttentionBlock.forward to scale c_skip per-token."""
+    def wrapped(c, x, **kwargs):
+        c_skip, c_out = original_forward(c, x, **kwargs)
+        c_skip = c_skip * per_token_strength.to(device=c_skip.device, dtype=c_skip.dtype)
+        return c_skip, c_out
+    return wrapped
+
+
 class WanVaceStrengthPatch:
-    """Patches the model to apply independent strengths to the reference_image
-    and control_video regions of a WanVaceToVideo VACE stream.
+    """Patches the model to apply independent transformer-space strengths
+    to the reference_image and control_video regions of a VACE stream.
 
-    Wire this into your model chain before KSampler.  Connect trim_latent from
-    WanVaceToVideo (or any VACE conditioning node) to the trim_latent input.
+    Wire this into your model chain before KSampler.  Connect trim_latent
+    from WanVaceToVideo to the trim_latent input.
 
-    At each denoising step the patch modifies the vace_context tensor before
-    it reaches vace_patch_embedding:
-
-      - reference frames (temporal indices 0..trim_latent-1):
-          image channels (0:16) are blended toward reference baseline channels
-          (16:32) with reference_strength, avoiding noisy attenuation from
-          scaling latents toward zero.
-
-      - control frames (temporal indices trim_latent..end):
-          REACTIVE channels (16:32, pose/mask signal) are blended toward
-          INACTIVE channels (0:16, background baseline) using
-          control_video_strength. This avoids hard thresholding that can
-          happen when scaling reactive channels toward zero.
+    At each denoising step the patch temporarily wraps the VACE attention
+    blocks so that c_skip is multiplied by a per-token strength tensor
+    before being added to the denoising path.  Full-quality inputs always
+    reach the VACE blocks — only the output contribution weight changes.
     """
 
     @classmethod
@@ -41,13 +41,13 @@ class WanVaceStrengthPatch:
                 "reference_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the reference_image VACE stream."},
+                     "tooltip": "Strength of the reference_image region."},
                 ),
                 "control_video_strength": (
                     "FLOAT",
                     {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
-                     "tooltip": "Strength of the pose/mask signal in the control_video VACE stream. "
-                                "Reduce to loosen pose adherence while keeping the background intact."},
+                     "tooltip": "Strength of the control_video region. "
+                                "Reduce to loosen pose adherence."},
                 ),
             },
         }
@@ -56,81 +56,72 @@ class WanVaceStrengthPatch:
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
     DESCRIPTION = (
-        "Patches a WAN VACE model to apply separate strengths to the "
-        "reference_image and control_video regions. Both reference and control "
-        "strengths blend signal channels toward baseline channels for smooth "
-        "attenuation without noisy thresholding. "
-        "Wire trim_latent from WanVaceToVideo here and insert this node in "
-        "your model chain before KSampler."
+        "Patches a WAN VACE model so that the reference_image and "
+        "control_video regions of the VACE stream each get their own "
+        "strength.  Wire trim_latent from WanVaceToVideo here and insert "
+        "this node in your model chain before KSampler."
     )
 
     @classmethod
     def execute(cls, model, trim_latent, reference_strength, control_video_strength):
-        needs_ref_patch = trim_latent > 0 and abs(reference_strength - 1.0) > 1e-6
-        needs_ctrl_patch = abs(control_video_strength - 1.0) > 1e-6
+        needs_patch = (
+            (trim_latent > 0 and abs(reference_strength - 1.0) > 1e-6)
+            or abs(control_video_strength - 1.0) > 1e-6
+        )
 
-        if not needs_ref_patch and not needs_ctrl_patch:
+        if not needs_patch:
             return (model.clone(),)
 
         m = model.clone()
+        _base_model = m.model
         _ref_strength = reference_strength
         _ctrl_strength = control_video_strength
         _trim_latent = trim_latent
 
         def vace_unet_wrapper(apply_model, args):
-            c = args["c"]
-            vace_ctx = c.get("vace_context", None)
+            input_x = args["input"]
+            # input_x: [batch, 16, T, H_latent, W_latent]
+            T = input_x.shape[2]
+            H_latent = input_x.shape[3]
+            W_latent = input_x.shape[4]
 
-            if vace_ctx is None:
-                return apply_model(args["input"], args["timestep"], **c)
+            # vace_patch_embedding stride is (1, 2, 2):
+            # T' = T, H' = H_latent // 2, W' = W_latent // 2
+            tokens_per_frame = (H_latent // 2) * (W_latent // 2)
+            total_tokens = T * tokens_per_frame
+            ref_tokens = _trim_latent * tokens_per_frame
 
-            # vace_ctx: [batch_chunks, n_streams, C, T, H_latent, W_latent]
-            # C = 96: channels 0:16 = inactive (background),
-            #          channels 16:32 = reactive (pose/mask signal),
-            #          channels 32:96 = mask
-            # Temporal layout (dim 3): [0:trim_latent] = reference frames,
-            #                          [trim_latent:] = control frames
+            per_token = torch.ones(1, total_tokens, 1)
+            if _trim_latent > 0:
+                per_token[:, :ref_tokens, :] = _ref_strength
+            per_token[:, ref_tokens:, :] = _ctrl_strength
 
-            c_modified = dict(c)
-            vace_ctx = vace_ctx.clone()
+            diff_model = _base_model.diffusion_model
+            vace_blocks = getattr(diff_model, "vace_blocks", None)
+            if vace_blocks is None:
+                return apply_model(args["input"], args["timestep"], **args["c"])
 
-            if needs_ref_patch and _trim_latent > 0:
-                # Blend reference image channels toward reference baseline
-                # channels instead of scaling all channels toward zero.
-                ref_image_ctx = vace_ctx[:, 0, 0:16, :_trim_latent, :, :]
-                ref_base_ctx = vace_ctx[:, 0, 16:32, :_trim_latent, :, :]
-                vace_ctx[:, 0, 0:16, :_trim_latent, :, :] = (
-                    ref_base_ctx + ((ref_image_ctx - ref_base_ctx) * _ref_strength)
-                )
+            originals = {}
+            try:
+                for ii, block in enumerate(vace_blocks):
+                    originals[ii] = block.forward
+                    block.forward = _make_vace_block_wrapper(block.forward, per_token)
+                result = apply_model(args["input"], args["timestep"], **args["c"])
+            finally:
+                for ii, orig in originals.items():
+                    vace_blocks[ii].forward = orig
 
-            if needs_ctrl_patch:
-                # Blend reactive pose channels toward inactive/background channels
-                # instead of scaling toward zero. At 0.0 this becomes inactive;
-                # at 1.0 it is unchanged.
-                inactive_ctx = vace_ctx[:, 0, 0:16, _trim_latent:, :, :]
-                reactive_ctx = vace_ctx[:, 0, 16:32, _trim_latent:, :, :]
-                vace_ctx[:, 0, 16:32, _trim_latent:, :, :] = (
-                    inactive_ctx + ((reactive_ctx - inactive_ctx) * _ctrl_strength)
-                )
-                # Also scale the mask channels (32:96) for control frames.
-                # The mask tells the model WHERE control is active; leaving it
-                # at full strength causes skeleton structure to bleed through
-                # even when reactive channels are attenuated, especially in
-                # longer sequences where the model relies more on the mask.
-                vace_ctx[:, 0, 32:96, _trim_latent:, :, :] *= _ctrl_strength
-
-            c_modified["vace_context"] = vace_ctx
-            return apply_model(args["input"], args["timestep"], **c_modified)
+            return result
 
         m.set_model_unet_function_wrapper(vace_unet_wrapper)
         return (m,)
 
 
 class WanVaceToVideoControlStrength:
-    """WanVaceToVideo node that outputs trim_latent for use with WanVaceStrengthPatch.
+    """Stock WanVaceToVideo behaviour with an extra trim_latent output.
 
-    Identical to the stock WanVaceToVideo node.  Use WanVaceStrengthPatch in your
-    model chain to apply independent reference_strength and control_video_strength.
+    Use WanVaceStrengthPatch in your model chain to apply independent
+    reference_strength and control_video_strength.
     """
 
     @classmethod
@@ -149,8 +140,7 @@ class WanVaceToVideoControlStrength:
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096}),
                 "strength": (
                     "FLOAT",
-                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01,
-                     "tooltip": "Overall vace_strength for the combined VACE stream."},
+                    {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.01},
                 ),
             },
             "optional": {
@@ -164,10 +154,6 @@ class WanVaceToVideoControlStrength:
     RETURN_NAMES = ("positive", "negative", "latent", "trim_latent")
     FUNCTION = "execute"
     CATEGORY = "conditioning/video_models"
-    DESCRIPTION = (
-        "WanVaceToVideo. Use WanVaceStrengthPatch in your model chain to apply "
-        "independent reference_strength and control_video_strength."
-    )
 
     @classmethod
     def execute(
@@ -232,23 +218,16 @@ class WanVaceToVideoControlStrength:
         if reference_image is not None:
             control_video_latent = torch.cat((reference_image, control_video_latent), dim=2)
 
+        # --- mask processing: identical to stock WanVaceToVideo ---
         vae_stride = 8
         height_mask = height // vae_stride
         width_mask = width // vae_stride
-
-        # Interpolate mask BEFORE decomposing spatial patches to prevent temporal
-        # blurring across patches. This ensures sharp boundaries on the mask.
-        mask = mask[:, :, :, 0]  # [length, height, width]
+        mask = mask.view(length, height_mask, vae_stride, width_mask, vae_stride)
+        mask = mask.permute(2, 4, 0, 1, 3)
+        mask = mask.reshape(vae_stride * vae_stride, length, height_mask, width_mask)
         mask = torch.nn.functional.interpolate(
-            mask.unsqueeze(0).unsqueeze(0),  # [1, 1, length, height, width]
-            size=(latent_length, height, width),
-            mode='nearest-exact'
-        ).squeeze(0).squeeze(0)  # [latent_length, height, width]
-
-        # Now decompose spatial dimensions into VAE stride patches
-        mask = mask.view(latent_length, height_mask, vae_stride, width_mask, vae_stride)
-        mask = mask.permute(2, 4, 0, 1, 3)  # [vae_stride, vae_stride, latent_length, height_mask, width_mask]
-        mask = mask.reshape(vae_stride * vae_stride, latent_length, height_mask, width_mask)
+            mask.unsqueeze(0), size=(latent_length, height_mask, width_mask), mode='nearest-exact'
+        ).squeeze(0)
 
         trim_latent = 0
         if reference_image is not None:
