@@ -28,7 +28,12 @@ from .video import (
     VideoDetailer,
     VideoMaskEditor,
 )
-from .wan import NativeWanPoseStrength, WANFrameCalculatorNode, WANFramesToAddAndCut
+from .wan import (
+    NativeWanPoseStrength,
+    VaceControlStrength,
+    WANFrameCalculatorNode,
+    WANFramesToAddAndCut,
+)
 
 __all__ = [
     "AddImageToBatchNode",
@@ -44,6 +49,7 @@ __all__ = [
     "ImageRotatorNode",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
+    "VaceControlStrength",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
     "PreviewAsMarkdown",
