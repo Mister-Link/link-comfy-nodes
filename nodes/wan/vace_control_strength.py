@@ -82,7 +82,8 @@ class VaceControlStrength:
         ref_frames = zeros.clone()
         ref_mask = zeros_mask.clone()
         ref_frames[:, :, :split] = frames[:, :, :split]
-        ref_mask[:, :, :split] = mask[:, :, :split]
+        # Force reference mask on for prefix frames to preserve reference influence.
+        ref_mask[:, :, :split] = 1.0
 
         ctrl_frames = zeros.clone()
         ctrl_mask = zeros_mask.clone()
