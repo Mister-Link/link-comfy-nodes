@@ -87,21 +87,28 @@ class KSamplerAdvancedDual:
             force_full_denoise=False,
         )
 
-        latent_denoised = common_ksampler(
-            model,
-            noise_seed,
-            steps,
-            cfg,
-            sampler_name,
-            scheduler,
-            positive,
-            negative,
-            latent_image,
-            denoise=denoise,
-            disable_noise=disable_noise,
-            start_step=start_at_step,
-            last_step=end_at_step,
-            force_full_denoise=True,
-        )
+        # force_full_denoise only differs from the above when end_at_step
+        # truncates the sigma schedule (samplers.py sets sigmas[-1] = 0).
+        # When end_at_step >= steps the two outputs are identical, so skip
+        # the second full sampling pass entirely.
+        if end_at_step < steps:
+            latent_denoised = common_ksampler(
+                model,
+                noise_seed,
+                steps,
+                cfg,
+                sampler_name,
+                scheduler,
+                positive,
+                negative,
+                latent_image,
+                denoise=denoise,
+                disable_noise=disable_noise,
+                start_step=start_at_step,
+                last_step=end_at_step,
+                force_full_denoise=True,
+            )
+        else:
+            latent_denoised = latent
 
         return (latent[0], latent_denoised[0])
