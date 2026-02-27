@@ -105,11 +105,13 @@ class ModelManager:
 
 
 class WorkflowAnalyzer:
-    """Analyzes workflows and finds safetensors models."""
+    """Analyzes workflows and finds model references."""
+
+    _MODEL_EXTENSIONS = (".safetensors", ".pth")
 
     @staticmethod
     def extract_safetensors(workflow):
-        """Recursively find all .safetensors references in workflow."""
+        """Recursively find all model references in workflow."""
         found = set()
 
         def traverse(obj):
@@ -119,12 +121,12 @@ class WorkflowAnalyzer:
             elif isinstance(obj, list):
                 for v in obj:
                     traverse(v)
-            elif (
-                isinstance(obj, str)
-                and ".safetensors" in obj
-                and obj.strip().endswith(".safetensors")
-            ):
-                found.add(os.path.basename(obj.strip()))
+            elif isinstance(obj, str):
+                candidate = obj.strip()
+                if candidate and candidate.lower().endswith(
+                    WorkflowAnalyzer._MODEL_EXTENSIONS
+                ):
+                    found.add(os.path.basename(candidate))
 
         for node in workflow.get("nodes", []):
             traverse(node)

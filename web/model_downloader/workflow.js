@@ -9,11 +9,15 @@ export function watchWorkflow(app) {
 
   app.loadGraphData = async function (graphData) {
     const found = new Set();
+    const modelExtensions = [".safetensors", ".pth"];
 
     for (const node of graphData.nodes || []) {
       const traverse = (obj) => {
-        if (typeof obj === "string" && obj.endsWith(".safetensors")) {
-          found.add(obj);
+        if (typeof obj === "string") {
+          const lower = obj.toLowerCase();
+          if (modelExtensions.some((ext) => lower.endsWith(ext))) {
+            found.add(obj);
+          }
         } else if (Array.isArray(obj)) {
           obj.forEach(traverse);
         } else if (obj && typeof obj === "object") {
@@ -28,14 +32,14 @@ export function watchWorkflow(app) {
 
     // Wait for graph load to complete, then trigger callback
     const result = await origLoad.apply(this, arguments);
-    
+
     // Defer callback to next tick so graph is fully loaded
     setTimeout(() => {
       if (workflowChangeCallback) {
         workflowChangeCallback();
       }
     }, 0);
-    
+
     return result;
   };
 }
