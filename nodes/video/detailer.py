@@ -122,6 +122,7 @@ class VideoDetailer:
         img_height,
         width_double,
         strength,
+        device,
     ):
         num_pixel_frames = composite_video.shape[0]
 
@@ -136,8 +137,8 @@ class VideoDetailer:
         inactive = (control * (1 - mask_pixel[:, :, :, :1])) + 0.5
         reactive = (control * mask_pixel[:, :, :, :1]) + 0.5
 
-        inactive_latent = vae.encode(inactive[:, :, :, :3])
-        reactive_latent = vae.encode(reactive[:, :, :, :3])
+        inactive_latent = vae.encode(inactive[:, :, :, :3]).to(device)
+        reactive_latent = vae.encode(reactive[:, :, :, :3]).to(device)
         control_video_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
 
         print(f"[Video Detailer] VACE latent {control_video_latent.shape}")
@@ -186,6 +187,8 @@ class VideoDetailer:
     ):
         model, clip, vae, positive, negative = basic_pipe
 
+        device = comfy.model_management.get_torch_device()
+
         latent_samples = latent["samples"]
         latent_frames = latent_samples.shape[2]
         img_height = latent_samples.shape[3] * 8
@@ -193,11 +196,11 @@ class VideoDetailer:
 
         print(
             f"[Video Detailer] latent {latent_samples.shape} "
-            f"-> {img_width}x{img_height} px"
+            f"-> {img_width}x{img_height} px, device={device}"
         )
 
         original_decoded = vae.decode(latent_samples)
-        original_frames = self._fix_decoded_shape(original_decoded, img_height)
+        original_frames = self._fix_decoded_shape(original_decoded, img_height).to(device)
         num_pixel_frames = original_frames.shape[0]
         print(
             f"[Video Detailer] decoded {num_pixel_frames} frames "
@@ -206,17 +209,17 @@ class VideoDetailer:
 
         if mask_opt is None:
             mask = torch.ones(
-                (num_pixel_frames, img_height, img_width), dtype=torch.float32
+                (num_pixel_frames, img_height, img_width), dtype=torch.float32, device=device
             )
         else:
-            mask = mask_opt.clone()
+            mask = mask_opt.clone().to(device)
             if mask.ndim == 2:
                 mask = mask.unsqueeze(0).expand(num_pixel_frames, -1, -1).contiguous()
             elif mask.shape[0] != num_pixel_frames:
                 mask = mask[0:1].expand(num_pixel_frames, -1, -1).contiguous()
 
         if reference_image is not None:
-            ref = reference_image[0] if reference_image.ndim == 4 else reference_image
+            ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
             if ref.shape[0] != img_height or ref.shape[1] != img_width:
                 ref = (
                     F.interpolate(
@@ -265,11 +268,11 @@ class VideoDetailer:
         composite_video = torch.stack(composite_list)
         print(f"[Video Detailer] composite {composite_video.shape}")
 
-        composite_latent = vae.encode(composite_video[:, :, :, :3])
+        composite_latent = vae.encode(composite_video[:, :, :, :3]).to(device)
         print(f"[Video Detailer] encoded composite {composite_latent.shape}")
 
         denoise_mask_pixel = torch.zeros(
-            (num_pixel_frames, img_height, width_double, 1), dtype=torch.float32
+            (num_pixel_frames, img_height, width_double, 1), dtype=torch.float32, device=device
         )
         for i in range(num_pixel_frames):
             fm = mask[i]
@@ -301,6 +304,7 @@ class VideoDetailer:
             img_height,
             width_double,
             vace_strength,
+            device,
         )
 
         vace_values = {
@@ -313,7 +317,7 @@ class VideoDetailer:
         print("[Video Detailer] VACE conditioning rebuilt for double-width")
 
         noise_mask_wide = torch.zeros(
-            (num_pixel_frames, img_height, width_double), dtype=torch.float32
+            (num_pixel_frames, img_height, width_double), dtype=torch.float32, device=device
         )
         for i in range(num_pixel_frames):
             fm = mask[i]
@@ -331,7 +335,7 @@ class VideoDetailer:
             noise_mask_wide[i, :, half_w:] = fm
 
         noise_mask_wide = self._gaussian_blur_mask(noise_mask_wide, noise_mask_feather)
-        noise_mask_4d = noise_mask_wide.unsqueeze(1).to(composite_latent.device)
+        noise_mask_4d = noise_mask_wide.unsqueeze(1)
 
         print(
             f"[Video Detailer] noise_mask {noise_mask_4d.shape} "
@@ -364,7 +368,7 @@ class VideoDetailer:
         )[0]
 
         decoded_wide = vae.decode(samples["samples"])
-        decoded_wide = self._fix_decoded_shape(decoded_wide, img_height)
+        decoded_wide = self._fix_decoded_shape(decoded_wide, img_height).to(device)
         print(f"[Video Detailer] decoded wide {decoded_wide.shape}")
 
         refined_half = decoded_wide[:, :, half_w:, :]
@@ -382,12 +386,10 @@ class VideoDetailer:
         print(f"[Video Detailer] refined frames {refined_half.shape}")
 
         composite_mask = self._gaussian_blur_mask(mask, feather)
-        mask_4d = composite_mask.unsqueeze(-1).to(original_frames.device)
+        mask_4d = composite_mask.unsqueeze(-1)
 
         out_n = min(original_frames.shape[0], refined_half.shape[0])
-        output = (1 - mask_4d[:out_n]) * original_frames[:out_n] + mask_4d[
-            :out_n
-        ] * refined_half[:out_n].to(original_frames.device)
+        output = (1 - mask_4d[:out_n]) * original_frames[:out_n] + mask_4d[:out_n] * refined_half[:out_n]
         print(f"[Video Detailer] output {output.shape}")
 
         output_mask = mask[0] if mask.ndim == 3 else mask
