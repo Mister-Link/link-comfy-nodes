@@ -79,6 +79,20 @@ app.registerExtension({
         workflow = { nodes: [] };
       }
 
+      // Also include the API-format workflow as a supplemental source.
+      // Some nodes (e.g. UpscaleModelLoader) may not surface their widget
+      // values via graph serialisation, but the API prompt always includes
+      // every input value explicitly (e.g. model_name: "4x-AnimeSharp.pth").
+      // Python's traverse() will recurse into _api_output automatically.
+      try {
+        const apiPrompt = await app.graphToPrompt?.();
+        if (apiPrompt?.output) {
+          workflow._api_output = apiPrompt.output;
+        }
+      } catch (err) {
+        // non-critical – graph-format traversal is the primary path
+      }
+
       try {
         const response = await fetch("/workflow_checker/analyze", {
           method: "POST",
