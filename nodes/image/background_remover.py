@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 
 try:
-    from curl_cffi import requests
+    from curl_cffi import requests, CurlMime
     from curl_cffi.requests import RequestsError as _HTTPError
     _RequestException = _HTTPError
     _IMPERSONATE: str | None = "firefox"
@@ -20,12 +20,13 @@ except ImportError:
     import subprocess, sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi", "-q"])
     try:
-        from curl_cffi import requests  # type: ignore[no-redef]
+        from curl_cffi import requests, CurlMime  # type: ignore[no-redef]
         from curl_cffi.requests import RequestsError as _HTTPError  # type: ignore[no-redef]
         _RequestException = _HTTPError
         _IMPERSONATE = "firefox"
     except ImportError:
         import requests  # type: ignore[no-redef]
+        CurlMime = None  # type: ignore[assignment,misc]
         _HTTPError = requests.HTTPError  # type: ignore[attr-defined]
         _RequestException = requests.RequestException  # type: ignore[attr-defined]
         _IMPERSONATE = None
@@ -128,15 +129,14 @@ def _upload_image(
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            if _IMPERSONATE:
-                # curl_cffi uses `multipart` instead of `files`
-                multipart = {
-                    "file": (name, image_bytes, "image/jpeg"),
-                    "type": "4",
-                    "mattValue": "0",
-                }
+            if _IMPERSONATE and CurlMime is not None:
+                # curl_cffi requires a CurlMime object for multipart uploads
+                mp = CurlMime()
+                mp.addpart(name="file", filename=name, content_type="image/jpeg", data=image_bytes)
+                mp.addpart(name="type", data=b"4")
+                mp.addpart(name="mattValue", data=b"0")
                 resp = session.post(
-                    UPLOAD_URL, headers=headers, multipart=multipart, timeout=30
+                    UPLOAD_URL, headers=headers, multipart=mp, timeout=30
                 )
             else:
                 files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
