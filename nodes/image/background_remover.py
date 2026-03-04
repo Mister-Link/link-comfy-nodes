@@ -36,18 +36,29 @@ MAX_WAITING_CHECKS = 40
 def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     upload_headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
-        "Origin": "https://bgeraser.com",
-        "Referer": "https://bgeraser.com/",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
+        "Origin": "https://bgeraser.com",
+        "Connection": "keep-alive",
+        "Referer": "https://bgeraser.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site",
+        "Pragma": "no-cache",
+        "Cache-Control": "no-cache",
+        "TE": "trailers",
     }
     download_headers = {
         "User-Agent": upload_headers["User-Agent"],
-        "Referer": upload_headers["Referer"],
         "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
         "Accept-Language": upload_headers["Accept-Language"],
         "Accept-Encoding": upload_headers["Accept-Encoding"],
+        "Referer": upload_headers["Referer"],
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "cross-site",
     }
     status_headers = {
         "User-Agent": upload_headers["User-Agent"],
@@ -56,9 +67,15 @@ def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
         "Accept-Encoding": upload_headers["Accept-Encoding"],
         "Referer": upload_headers["Referer"],
         "Origin": upload_headers["Origin"],
+        "Connection": "keep-alive",
         "Content-Type": "text/plain;charset=UTF-8",
         "Next-Action": STATUS_ACTION,
         "Next-Router-State-Tree": STATUS_STATE,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Pragma": "no-cache",
+        "Cache-Control": "no-cache",
     }
     return upload_headers, status_headers, download_headers
 
