@@ -12,20 +12,27 @@ import torch
 from PIL import Image
 
 try:
-    from curl_cffi import requests, CurlMime
+    from curl_cffi import CurlMime, requests
     from curl_cffi.requests import RequestsError as _HTTPError
+
     _RequestException = _HTTPError
     _IMPERSONATE: str | None = "firefox"
 except ImportError:
-    import subprocess, sys
+    import subprocess
+    import sys
+
     subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi", "-q"])
     try:
-        from curl_cffi import requests, CurlMime  # type: ignore[no-redef]
-        from curl_cffi.requests import RequestsError as _HTTPError  # type: ignore[no-redef]
+        from curl_cffi import CurlMime, requests  # type: ignore[no-redef]
+        from curl_cffi.requests import (
+            RequestsError as _HTTPError,  # type: ignore[no-redef]
+        )
+
         _RequestException = _HTTPError
         _IMPERSONATE = "firefox"
     except ImportError:
         import requests  # type: ignore[no-redef]
+
         CurlMime = None  # type: ignore[assignment,misc]
         _HTTPError = requests.HTTPError  # type: ignore[attr-defined]
         _RequestException = requests.RequestException  # type: ignore[attr-defined]
@@ -53,49 +60,56 @@ MAX_WAITING_CHECKS = 40
 
 
 def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    upload_headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br, zstd",
-        "Origin": "https://bgeraser.com",
-        "Connection": "keep-alive",
-        "Referer": "https://bgeraser.com/",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-        "TE": "trailers",
-    }
-    download_headers = {
-        "User-Agent": upload_headers["User-Agent"],
-        "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
-        "Accept-Language": upload_headers["Accept-Language"],
-        "Accept-Encoding": upload_headers["Accept-Encoding"],
-        "Referer": upload_headers["Referer"],
-        "Connection": "keep-alive",
-        "Sec-Fetch-Dest": "image",
-        "Sec-Fetch-Mode": "no-cors",
-        "Sec-Fetch-Site": "cross-site",
-    }
-    status_headers = {
-        "User-Agent": upload_headers["User-Agent"],
-        "Accept": "text/x-component",
-        "Accept-Language": upload_headers["Accept-Language"],
-        "Accept-Encoding": upload_headers["Accept-Encoding"],
-        "Referer": upload_headers["Referer"],
-        "Origin": upload_headers["Origin"],
-        "Connection": "keep-alive",
-        "Content-Type": "text/plain;charset=UTF-8",
-        "Next-Action": STATUS_ACTION,
-        "Next-Router-State-Tree": STATUS_STATE,
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache",
-    }
+    if _IMPERSONATE:
+        # curl_cffi impersonation sets UA, Accept-Encoding, Connection, Sec-Fetch-* etc.
+        # automatically — only pass request-specific headers to avoid fingerprint conflicts.
+        upload_headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Origin": "https://bgeraser.com",
+            "Referer": "https://bgeraser.com/",
+        }
+        download_headers = {
+            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Referer": "https://bgeraser.com/",
+        }
+        status_headers = {
+            "Accept": "text/x-component",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Origin": "https://bgeraser.com",
+            "Referer": "https://bgeraser.com/",
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Next-Action": STATUS_ACTION,
+            "Next-Router-State-Tree": STATUS_STATE,
+        }
+    else:
+        upload_headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Origin": "https://bgeraser.com",
+            "Referer": "https://bgeraser.com/",
+        }
+        download_headers = {
+            "User-Agent": upload_headers["User-Agent"],
+            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+            "Accept-Language": upload_headers["Accept-Language"],
+            "Accept-Encoding": upload_headers["Accept-Encoding"],
+            "Referer": upload_headers["Referer"],
+        }
+        status_headers = {
+            "User-Agent": upload_headers["User-Agent"],
+            "Accept": "text/x-component",
+            "Accept-Language": upload_headers["Accept-Language"],
+            "Accept-Encoding": upload_headers["Accept-Encoding"],
+            "Origin": upload_headers["Origin"],
+            "Referer": upload_headers["Referer"],
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Next-Action": STATUS_ACTION,
+            "Next-Router-State-Tree": STATUS_STATE,
+        }
     return upload_headers, status_headers, download_headers
 
 
@@ -132,7 +146,12 @@ def _upload_image(
             if _IMPERSONATE and CurlMime is not None:
                 # curl_cffi requires a CurlMime object for multipart uploads
                 mp = CurlMime()
-                mp.addpart(name="file", filename=name, content_type="image/jpeg", data=image_bytes)
+                mp.addpart(
+                    name="file",
+                    filename=name,
+                    content_type="image/jpeg",
+                    data=image_bytes,
+                )
                 mp.addpart(name="type", data=b"4")
                 mp.addpart(name="mattValue", data=b"0")
                 resp = session.post(
@@ -300,7 +319,11 @@ class BulkBackgroundRemoverBgEraserNode:
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
-        session = requests.Session(impersonate=_IMPERSONATE) if _IMPERSONATE else requests.Session()
+        session = (
+            requests.Session(impersonate=_IMPERSONATE)
+            if _IMPERSONATE
+            else requests.Session()
+        )
         upload_headers, status_headers, download_headers = build_headers()
 
         pending: dict[str, tuple[list[int], str]] = {}
