@@ -128,10 +128,21 @@ def _upload_image(
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
-            resp = session.post(
-                UPLOAD_URL, headers=headers, files=files, data=data, timeout=30
-            )
+            if _IMPERSONATE:
+                # curl_cffi uses `multipart` instead of `files`
+                multipart = {
+                    "file": (name, image_bytes, "image/jpeg"),
+                    "type": "4",
+                    "mattValue": "0",
+                }
+                resp = session.post(
+                    UPLOAD_URL, headers=headers, multipart=multipart, timeout=30
+                )
+            else:
+                files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
+                resp = session.post(
+                    UPLOAD_URL, headers=headers, files=files, data=data, timeout=30
+                )
             resp.raise_for_status()
         except _HTTPError as exc:
             last_exc = exc
