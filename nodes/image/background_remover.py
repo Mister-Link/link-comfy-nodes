@@ -13,15 +13,21 @@ from PIL import Image
 
 try:
     from curl_cffi import requests
+    from curl_cffi.requests import RequestsError as _HTTPError
+    _RequestException = _HTTPError
     _IMPERSONATE: str | None = "firefox"
 except ImportError:
     import subprocess, sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi", "-q"])
     try:
         from curl_cffi import requests  # type: ignore[no-redef]
+        from curl_cffi.requests import RequestsError as _HTTPError  # type: ignore[no-redef]
+        _RequestException = _HTTPError
         _IMPERSONATE = "firefox"
     except ImportError:
         import requests  # type: ignore[no-redef]
+        _HTTPError = requests.HTTPError  # type: ignore[attr-defined]
+        _RequestException = requests.RequestException  # type: ignore[attr-defined]
         _IMPERSONATE = None
 
 
@@ -127,7 +133,7 @@ def _upload_image(
                 UPLOAD_URL, headers=headers, files=files, data=data, timeout=30
             )
             resp.raise_for_status()
-        except requests.HTTPError as exc:
+        except _HTTPError as exc:
             last_exc = exc
             if attempt == max_attempts - 1:
                 raise
@@ -175,7 +181,7 @@ def _poll_and_download(
                 timeout=request_timeout,
             )
             status.raise_for_status()
-        except requests.RequestException as exc:
+        except _RequestException as exc:
             print(f"BgEraser: status check failed ({exc}); retrying...")
             time.sleep(check_interval)
             continue
@@ -232,7 +238,7 @@ def _poll_and_download(
                     )
                     download.raise_for_status()
                     img = Image.open(io.BytesIO(download.content)).convert("RGBA")
-                except requests.RequestException as exc:
+                except _RequestException as exc:
                     failures = failure_counts.get(code, 0) + 1
                     failure_counts[code] = failures
                     if failures >= 2:
