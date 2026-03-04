@@ -8,9 +8,21 @@ from pathlib import Path
 from typing import Protocol
 
 import numpy as np
-import requests
 import torch
 from PIL import Image
+
+try:
+    from curl_cffi import requests
+    _IMPERSONATE: str | None = "firefox"
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi", "-q"])
+    try:
+        from curl_cffi import requests  # type: ignore[no-redef]
+        _IMPERSONATE = "firefox"
+    except ImportError:
+        import requests  # type: ignore[no-redef]
+        _IMPERSONATE = None
 
 
 class ProgressBarProtocol(Protocol):
@@ -271,7 +283,7 @@ class BulkBackgroundRemoverBgEraserNode:
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
-        session = requests.Session()
+        session = requests.Session(impersonate=_IMPERSONATE) if _IMPERSONATE else requests.Session()
         upload_headers, status_headers, download_headers = build_headers()
 
         pending: dict[str, tuple[list[int], str]] = {}

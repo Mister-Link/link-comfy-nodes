@@ -7,3 +7,4 @@ torchvision
 huggingface-hub
 pytorch_lightning
 requests
+curl_cffi
