@@ -20,7 +20,7 @@ from .preview import (
     PreviewWebmNode,
     SpritesheetPreviewNode,
 )
-from .latent import ChangeLatentDimensions
+from .latent import ChangeLatentDimensions, SnapToDivisible
 from .sampling import KSamplerAdvancedDual
 from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
 from .text import AdvancedStringConcat, PreviewAsMarkdown
@@ -33,17 +33,15 @@ from .video import (
 )
 from .wan import (
     NativeWanPoseStrength,
-    VaceControlStrength,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
-    WanVaceStrengthPatch,
-    WanVaceToVideoControlStrength,
 )
 
 __all__ = [
     "AddImageToBatchNode",
     "AdvancedStringConcat",
     "ChangeLatentDimensions",
+    "SnapToDivisible",
     "AutoCropperNode",
     "BatchImageSave",
     "BulkBackgroundRemoverBgEraserNode",
@@ -57,9 +55,6 @@ __all__ = [
     "KSamplerAdvancedDual",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
-    "VaceControlStrength",
-    "WanVaceStrengthPatch",
-    "WanVaceToVideoControlStrength",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
     "PreviewAsMarkdown",
