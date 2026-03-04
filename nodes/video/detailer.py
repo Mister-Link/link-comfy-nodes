@@ -260,7 +260,7 @@ class VideoDetailer:
         mask_lat_t = F.interpolate(
             mask_lat.unsqueeze(0).unsqueeze(0),
             size=(latent_frames, H_lat, W_lat),
-            mode="nearest",
+            mode="nearest-exact",
         )  # (1, 1, T, H_lat, W_lat)
         ref_noise_mask = torch.zeros(1, 1, ref_lat_T, H_lat, W_lat, device=device)
         noise_mask_5d = torch.cat([ref_noise_mask, mask_lat_t], dim=2)
@@ -329,6 +329,8 @@ class VideoDetailer:
         mask_4d = composite_mask.unsqueeze(-1)
 
         out_n = min(original_frames.shape[0], refined_frames.shape[0])
+        if original_frames.shape[0] != refined_frames.shape[0]:
+            print(f"[Video Detailer] WARNING: frame count mismatch — original={original_frames.shape[0]} refined={refined_frames.shape[0]}, compositing {out_n} frames")
         output = (
             (1 - mask_4d[:out_n]) * original_frames[:out_n]
             + mask_4d[:out_n] * refined_frames[:out_n]
