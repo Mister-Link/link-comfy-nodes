@@ -32,6 +32,7 @@ from .video import (
     VideoMaskEditor,
 )
 from .wan import (
+    LoadVACEModuleNode,
     NativeWanPoseStrength,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
@@ -53,6 +54,7 @@ __all__ = [
     "FastImagePreviewNode",
     "ImageRotatorNode",
     "KSamplerAdvancedDual",
+    "LoadVACEModuleNode",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
     "PixelationDimensionsNode",

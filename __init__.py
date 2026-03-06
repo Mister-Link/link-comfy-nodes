@@ -17,6 +17,7 @@ from .nodes import (
     FastImagePreviewNode,
     ImageRotatorNode,
     KSamplerAdvancedDual,
+    LoadVACEModuleNode,
     MatchColorPaletteNode,
     NativeWanPoseStrength,
     PixelationDimensionsNode,
@@ -39,6 +40,7 @@ from .nodes import (
 )
 
 NODE_CLASS_MAPPINGS = {
+    "Load VACE Module": LoadVACEModuleNode,
     "Add Image to Batch": AddImageToBatchNode,
     "Change Latent Dimensions": ChangeLatentDimensions,
     "Snap to Divisible": SnapToDivisible,
@@ -76,6 +78,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "Load VACE Module": "Load VACE Module",
     "Add Image to Batch": "Add Image to Batch",
     "Change Latent Dimensions": "Change Latent Dimensions",
     "Snap to Divisible": "Snap to Divisible",
