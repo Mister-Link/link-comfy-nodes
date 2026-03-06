@@ -62,11 +62,12 @@ class ReplaceAlpha:
 
         result_alpha = alpha_tensor.clone()
         result_frames = frames.clone()
-        # Only replace pixels where alpha is transparent AND mask covers the area
-        replace_regions = (alpha_tensor < 0.5) & (mask_tensor > 0.5)
+        replace_regions = mask_tensor > 0.5
         if replace_regions.any():
-            replace_regions_3d = replace_regions.unsqueeze(-1).expand_as(result_frames)
-            result_frames = torch.where(replace_regions_3d, color_rgb.expand_as(result_frames), result_frames)
+            alpha_3d = alpha_tensor.unsqueeze(-1)
+            blended = result_frames * alpha_3d + color_rgb * (1.0 - alpha_3d)
+            replace_regions_3d = replace_regions.unsqueeze(-1)
+            result_frames = torch.where(replace_regions_3d, blended, result_frames)
             result_alpha = torch.where(
                 replace_regions, torch.ones_like(result_alpha), result_alpha
             )
