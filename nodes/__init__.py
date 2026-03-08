@@ -25,6 +25,7 @@ from .sampling import KSamplerAdvancedDual
 from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
 from .text import AdvancedStringConcat, PreviewAsMarkdown
 from .video import (
+    BatchMaskCropper,
     ReplaceAlpha,
     SEGSFlatten,
     StabilizerTrimNode,
@@ -43,6 +44,7 @@ from .wan import (
 __all__ = [
     "AddImageToBatchNode",
     "AdvancedStringConcat",
+    "BatchMaskCropper",
     "ChangeLatentDimensions",
     "SnapToDivisible",
     "AutoCropperNode",
