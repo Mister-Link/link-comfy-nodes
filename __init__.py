@@ -6,6 +6,7 @@ from .nodes import (
     AdvancedStringConcat,
     AutoCropperNode,
     BatchImageSave,
+    BatchMaskCropper,
     BulkBackgroundRemoverBgEraserNode,
     ChangeLatentDimensions,
     SnapToDivisible,
