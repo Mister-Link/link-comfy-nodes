@@ -90,9 +90,9 @@ class VideoTileDetailer:
                 "reference_image": (
                     "IMAGE",
                     {
-                        "tooltip": "Cropped to each tile region and prepended as a "
-                        "protected temporal context frame. Guides tile refinement "
-                        "toward the reference without changing frame count."
+                        "tooltip": "Resized (not cropped) to each tile's dimensions and "
+                        "prepended as a protected temporal context frame. Every tile "
+                        "sees the full character for consistent identity and style."
                     },
                 ),
             },
@@ -277,8 +277,19 @@ class VideoTileDetailer:
             h_lat, w_lat = tile_lat.shape[3], tile_lat.shape[4]
 
             if ref is not None:
-                # Encode matching crop of the reference image as a temporal context frame
-                ref_tile = ref[y1:y2, x1:x2, :].contiguous()  # (th, tw, C)
+                # Resize the full reference image to tile dimensions so the model
+                # sees the whole character (not just a contextless crop of one region)
+                ref_tile = (
+                    F.interpolate(
+                        ref.unsqueeze(0).permute(0, 3, 1, 2),
+                        size=(th, tw),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .permute(0, 2, 3, 1)
+                    .squeeze(0)
+                    .contiguous()
+                )  # (th, tw, C)
                 ref_lat = vae.encode(ref_tile.unsqueeze(0)).to(device)  # (1, C, ref_T, h, w)
                 ref_T = ref_lat.shape[2]
 
