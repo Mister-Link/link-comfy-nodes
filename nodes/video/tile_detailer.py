@@ -13,7 +13,6 @@ import torch.nn.functional as F
 import comfy.model_management  # type: ignore[import-untyped]
 import comfy.samplers  # type: ignore[import-untyped]
 import nodes  # type: ignore[import-untyped]
-from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion  # type: ignore[import-untyped]
 
 
 class VideoTileDetailer:
@@ -115,7 +114,6 @@ class VideoTileDetailer:
         img_h, img_w = H_lat * 8, W_lat * 8
         vid_T = lat.shape[2]
 
-        ref_T = 0
         if reference_image is not None:
             ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
             if ref.shape[0] != img_h or ref.shape[1] != img_w:
@@ -129,30 +127,13 @@ class VideoTileDetailer:
                     .permute(0, 2, 3, 1)
                     .squeeze(0)
                 )
-            ref_lat = vae.encode(ref.unsqueeze(0)).to(device)  # (1, C, ref_T, H_lat, W_lat)
-            ref_T = ref_lat.shape[2]
+            ref_lat = vae.encode(ref.unsqueeze(0)).to(device)  # (1, C, T, H_lat, W_lat)
+            # Inject via WAN's native time_dim_concat — model handles it internally
+            positive = [(t, {**d, "time_dim_concat": ref_lat}) for (t, d) in positive]
+            negative = [(t, {**d, "time_dim_concat": ref_lat}) for (t, d) in negative]
+            print(f"[VideoTileDetailer] reference injected via time_dim_concat")
 
-            # Blend video latent toward reference based on denoise.
-            # At denoise=0 the video latent is unchanged; at denoise=1 the
-            # starting content is pure reference, so the sampler converges
-            # toward reference colors/style as denoise increases.
-            ref_lat_expanded = ref_lat.expand(-1, -1, vid_T, -1, -1)
-            lat = torch.lerp(lat, ref_lat_expanded, denoise)
-
-            # Prepend reference as frozen temporal anchor; noise_mask=0 keeps
-            # it unmodified so temporal attention uses it as a style guide.
-            combined = torch.cat([ref_lat, lat], dim=2)
-            ref_mask = torch.zeros(1, 1, ref_T, H_lat, W_lat, device=device)
-            vid_mask = torch.ones(1, 1, vid_T, H_lat, W_lat, device=device)
-            noise_mask = torch.cat([ref_mask, vid_mask], dim=2)
-            latent_in = {"samples": combined, "noise_mask": noise_mask}
-
-            if "denoise_mask_function" not in model.model_options:
-                model = DifferentialDiffusion.execute(model)[0]
-
-            print(f"[VideoTileDetailer] reference prepended: ref_T={ref_T}, vid_T={vid_T}, latent blended at {denoise:.2f}")
-        else:
-            latent_in = {"samples": lat}
+        latent_in = {"samples": lat}
 
         start_step = int(steps * (1.0 - denoise))
         print(f"[VideoTileDetailer] sampling {vid_T} latent frames, start_step={start_step}/{steps}")
@@ -173,8 +154,7 @@ class VideoTileDetailer:
             "disable",
         )[0]
 
-        # Strip reference temporal frames then decode
-        video_lat = sampled["samples"][:, :, ref_T:, :, :]
+        video_lat = sampled["samples"]
         decoded = vae.decode(video_lat)
         result = self._fix_decoded(decoded, img_h)
         print(f"[VideoTileDetailer] done → {result.shape}")
