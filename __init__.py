@@ -28,6 +28,7 @@ from .nodes import (
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
     SEGSFlatten,
+    VideoTileDetailer,
     SaveFolderAsZip,
     SaveImageSequenceZip,
     SpritesheetBuilderNode,
@@ -75,6 +76,7 @@ NODE_CLASS_MAPPINGS = {
     "Stabilizer Trim": StabilizerTrimNode,
     "Trim Conditioning": TrimConditioning,
     "Video Detailer": VideoDetailer,
+    "Video Tile Detailer": VideoTileDetailer,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
     "Preview (webm)": PreviewWebmNode,
 }
@@ -114,6 +116,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Stabilizer Trim": "Stabilizer Trim",
     "Trim Conditioning": "Trim Conditioning",
     "Video Detailer": "Video Detailer",
+    "Video Tile Detailer": "Video Tile Detailer",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
     "Preview (webm)": "Preview (webm)",
 }

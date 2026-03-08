@@ -31,6 +31,7 @@ from .video import (
     TrimConditioning,
     VideoDetailer,
     VideoMaskEditor,
+    VideoTileDetailer,
 )
 from .wan import (
     LoadVACEModuleNode,
@@ -66,6 +67,7 @@ __all__ = [
     "ReplaceAlpha",
     "ResizeImageAndMaskBySideNode",
     "SEGSFlatten",
+    "VideoTileDetailer",
     "SaveFolderAsZip",
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
