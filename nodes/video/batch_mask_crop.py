@@ -1,8 +1,7 @@
 """Batch mask cropper that preserves mask movement across frames.
 
-Instead of independently cropping each frame to its mask bounds (which makes
-moving objects appear static), this tracks mask position and crops with a
-consistent window that follows the movement trajectory.
+Crops to a consistent window that contains all mask motion across the entire
+batch, so moving objects actually move through the frame instead of jumping in place.
 """
 
 from __future__ import annotations
@@ -12,10 +11,10 @@ import torch
 
 
 class BatchMaskCropper:
-    """Crop a batch of frames following mask movement.
+    """Crop a batch of frames to contain all mask movement.
 
-    Tracks mask position across frames and applies consistent crop that
-    preserves left-to-right, top-to-bottom, etc. motion.
+    Calculates bounding box containing all mask positions across all frames,
+    then crops consistently to that region so motion is preserved.
     """
 
     @classmethod
@@ -24,7 +23,8 @@ class BatchMaskCropper:
             "required": {
                 "images": ("IMAGE",),
                 "masks": ("MASK",),
-                "crop_size": ("INT", {"default": 512, "min": 64, "max": 2048}),
+                "crop_width": ("INT", {"default": 512, "min": 64, "max": 2048}),
+                "crop_height": ("INT", {"default": 512, "min": 64, "max": 2048}),
                 "pad_left": ("INT", {"default": 0, "min": 0, "max": 512}),
                 "pad_top": ("INT", {"default": 0, "min": 0, "max": 512}),
                 "pad_right": ("INT", {"default": 0, "min": 0, "max": 512}),
@@ -33,16 +33,14 @@ class BatchMaskCropper:
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "Pad with original image edges where possible instead of black",
+                        "tooltip": "Pad with original image edges instead of black",
                     },
                 ),
-                "smooth": (
-                    "FLOAT",
+                "smooth_trajectory": (
+                    "BOOLEAN",
                     {
-                        "default": 0.5,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "tooltip": "Trajectory smoothing (0=no smooth, 1=max)",
+                        "default": False,
+                        "tooltip": "Smooth mask center across frames (off preserves raw motion)",
                     },
                 ),
             },
@@ -52,32 +50,34 @@ class BatchMaskCropper:
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Crops a batch of frames following mask movement. Tracks mask position "
-        "across frames and applies consistent crop window that preserves motion "
-        "trajectory (e.g., circle moving left-to-right stays moving left-to-right). "
-        "Supports directional padding with optional extension from source image."
+        "Crops batch of frames to contain all mask movement. Instead of following "
+        "the mask (which makes motion appear static), calculates the bounding box of "
+        "all mask positions across all frames and crops to that region. Moving objects "
+        "actually move through the frame. Supports directional padding with optional "
+        "edge extension from source."
     )
 
     def execute(
         self,
         images: torch.Tensor,
         masks: torch.Tensor,
-        crop_size: int,
+        crop_width: int,
+        crop_height: int,
         pad_left: int = 0,
         pad_top: int = 0,
         pad_right: int = 0,
         pad_bottom: int = 0,
         extend_from_source: bool = True,
-        smooth: float = 0.5,
+        smooth_trajectory: bool = False,
     ):
         """
         Args:
             images: (T, H, W, 3) batch of frames
             masks: (T, H, W) or (1, H, W) batch of masks
-            crop_size: target crop window size
+            crop_width/height: target crop dimensions
             pad_left/top/right/bottom: directional padding
             extend_from_source: use original image edges for padding
-            smooth: trajectory smoothing factor
+            smooth_trajectory: smooth mask centers (default: off, preserves raw motion)
         """
         T, H, W = images.shape[0], images.shape[1], images.shape[2]
 
@@ -88,73 +88,62 @@ class BatchMaskCropper:
         # Convert masks to numpy for processing
         masks_np = masks.cpu().numpy()  # (T, H, W)
 
-        # Track mask centroid and bounds for each frame
-        centers = []
-        bounds = []
+        # Track mask bounds for each frame
+        all_bounds = []
 
         for t in range(T):
             mask = masks_np[t]
-
-            # Get non-zero mask coordinates
             coords = np.argwhere(mask > 0.5)  # (N, 2) in [y, x] format
 
             if len(coords) == 0:
-                # No mask in this frame, use previous or center
-                if centers:
-                    centers.append(centers[-1])
-                    bounds.append(bounds[-1])
-                else:
-                    centers.append(np.array([H / 2, W / 2]))
-                    bounds.append(np.array([0, 0, H, W]))
+                # No mask in this frame, use image center
+                all_bounds.append(np.array([H // 2, W // 2, H // 2, W // 2]))
             else:
-                # Centroid
-                center_y, center_x = coords.mean(axis=0)
-                centers.append(np.array([center_y, center_x]))
-
-                # Bounds
                 y_min, x_min = coords.min(axis=0)
                 y_max, x_max = coords.max(axis=0)
-                bounds.append(np.array([y_min, x_min, y_max, x_max]))
+                all_bounds.append(np.array([y_min, x_min, y_max, x_max]))
 
-        centers = np.array(centers)  # (T, 2)
-        bounds = np.array(bounds)  # (T, 4)
+        all_bounds = np.array(all_bounds)  # (T, 4)
 
-        # Smooth trajectory
-        if smooth > 0.01:
-            centers = self._smooth_trajectory(centers, smooth)
+        # Calculate global bounding box containing ALL mask positions
+        global_y_min = all_bounds[:, 0].min()
+        global_x_min = all_bounds[:, 1].min()
+        global_y_max = all_bounds[:, 2].max()
+        global_x_max = all_bounds[:, 3].max()
 
-        # Compute crop window that accommodates all positions
-        bound_centers_y = (bounds[:, 0] + bounds[:, 2]) / 2
-        bound_centers_x = (bounds[:, 1] + bounds[:, 3]) / 2
-        bound_sizes_h = bounds[:, 2] - bounds[:, 0] + pad_top + pad_bottom
-        bound_sizes_w = bounds[:, 3] - bounds[:, 1] + pad_left + pad_right
+        # Add padding
+        global_y_min = max(0, int(global_y_min) - pad_top)
+        global_x_min = max(0, int(global_x_min) - pad_left)
+        global_y_max = min(H, int(global_y_max) + pad_bottom)
+        global_x_max = min(W, int(global_x_max) + pad_right)
 
-        # Crop centers follow the mask centers
-        crop_centers_y = bound_centers_y
-        crop_centers_x = bound_centers_x
+        # Calculate center of global bounds
+        center_y = (global_y_min + global_y_max) / 2
+        center_x = (global_x_min + global_x_max) / 2
 
-        # Ensure crop window size fits
-        crop_h = max(crop_size, int(bound_sizes_h.max()) + pad_top + pad_bottom)
-        crop_w = max(crop_size, int(bound_sizes_w.max()) + pad_left + pad_right)
+        # Smooth if requested
+        if smooth_trajectory:
+            centers = np.array(
+                [[(all_bounds[t, 0] + all_bounds[t, 2]) / 2, (all_bounds[t, 1] + all_bounds[t, 3]) / 2]
+                 for t in range(T)]
+            )
+            centers = self._smooth_trajectory(centers)
+            # Recalculate global bounds from smoothed centers
+            center_y = centers[:, 0].mean()
+            center_x = centers[:, 1].mean()
 
-        # Clamp to nearest valid size (square)
-        max_crop = min(H, W)
-        crop_size_final = min(max(crop_h, crop_w), max_crop)
-
-        # Crop each frame following the trajectory
+        # Crop each frame from the global bounds or center
         cropped_images = []
         cropped_masks = []
 
         for t in range(T):
-            cy = int(np.clip(crop_centers_y[t], crop_size_final // 2, H - crop_size_final // 2))
-            cx = int(np.clip(crop_centers_x[t], crop_size_final // 2, W - crop_size_final // 2))
+            # Use global bounds for all frames (so motion is preserved)
+            y1 = int(center_y - crop_height // 2)
+            y2 = y1 + crop_height
+            x1 = int(center_x - crop_width // 2)
+            x2 = x1 + crop_width
 
-            y1 = cy - crop_size_final // 2
-            y2 = y1 + crop_size_final
-            x1 = cx - crop_size_final // 2
-            x2 = x1 + crop_size_final
-
-            # Clamp bounds and track how much padding is needed
+            # Clamp to image bounds
             y1_clipped = max(0, y1)
             y2_clipped = min(H, y2)
             x1_clipped = max(0, x1)
@@ -173,7 +162,8 @@ class BatchMaskCropper:
                     y2,
                     x1,
                     x2,
-                    crop_size_final,
+                    crop_height,
+                    crop_width,
                 )
                 mask_padded = self._pad_with_source(
                     masks[t:t+1].unsqueeze(-1),
@@ -182,11 +172,12 @@ class BatchMaskCropper:
                     y2,
                     x1,
                     x2,
-                    crop_size_final,
+                    crop_height,
+                    crop_width,
                 ).squeeze(-1)
             else:
-                img_padded = self._pad_to_size(img_crop, crop_size_final)
-                mask_padded = self._pad_to_size(mask_crop, crop_size_final)
+                img_padded = self._pad_to_size(img_crop, crop_height, crop_width)
+                mask_padded = self._pad_to_size(mask_crop, crop_height, crop_width)
 
             cropped_images.append(img_padded)
             cropped_masks.append(mask_padded)
@@ -194,18 +185,21 @@ class BatchMaskCropper:
         result_images = torch.cat(cropped_images, dim=0)
         result_masks = torch.cat(cropped_masks, dim=0)
 
-        print(f"[BatchMaskCropper] cropped {T} frames to {crop_size_final}x{crop_size_final}")
+        print(
+            f"[BatchMaskCropper] cropped {T} frames to {crop_width}x{crop_height} "
+            f"(motion bounds: y[{global_y_min}:{global_y_max}] x[{global_x_min}:{global_x_max}])"
+        )
 
         return (result_images, result_masks)
 
     @staticmethod
-    def _smooth_trajectory(trajectory: np.ndarray, factor: float) -> np.ndarray:
+    def _smooth_trajectory(centers: np.ndarray) -> np.ndarray:
         """Smooth trajectory with exponential moving average."""
-        smoothed = np.copy(trajectory)
-        alpha = 1.0 - factor
+        smoothed = np.copy(centers)
+        alpha = 0.3
 
-        for t in range(1, len(trajectory)):
-            smoothed[t] = alpha * trajectory[t] + (1 - alpha) * smoothed[t - 1]
+        for t in range(1, len(centers)):
+            smoothed[t] = alpha * centers[t] + (1 - alpha) * smoothed[t - 1]
 
         return smoothed
 
@@ -217,7 +211,8 @@ class BatchMaskCropper:
         y2: int,
         x1: int,
         x2: int,
-        target_size: int,
+        target_height: int,
+        target_width: int,
     ) -> torch.Tensor:
         """Pad crop with edges from source image where possible."""
         H, W = source.shape[1], source.shape[2]
@@ -232,7 +227,7 @@ class BatchMaskCropper:
         if pad_top_needed == 0 and pad_bottom_needed == 0 and pad_left_needed == 0 and pad_right_needed == 0:
             return torch.nn.functional.interpolate(
                 crop.permute(0, 3, 1, 2),
-                size=(target_size, target_size),
+                size=(target_height, target_width),
                 mode="nearest",
             ).permute(0, 2, 3, 1)
 
@@ -258,20 +253,20 @@ class BatchMaskCropper:
         # Resize to target
         return torch.nn.functional.interpolate(
             crop.permute(0, 3, 1, 2),
-            size=(target_size, target_size),
+            size=(target_height, target_width),
             mode="nearest",
         ).permute(0, 2, 3, 1)
 
     @staticmethod
-    def _pad_to_size(tensor: torch.Tensor, target_size: int) -> torch.Tensor:
+    def _pad_to_size(tensor: torch.Tensor, target_height: int, target_width: int) -> torch.Tensor:
         """Pad tensor to target size with black/zero padding, centered."""
         h, w = tensor.shape[1], tensor.shape[2]
 
-        if h == target_size and w == target_size:
+        if h == target_height and w == target_width:
             return tensor
 
-        pad_h = max(0, target_size - h)
-        pad_w = max(0, target_size - w)
+        pad_h = max(0, target_height - h)
+        pad_w = max(0, target_width - w)
 
         pad_top = pad_h // 2
         pad_bottom = pad_h - pad_top
