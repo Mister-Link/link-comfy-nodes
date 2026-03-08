@@ -110,7 +110,7 @@ class VideoTileDetailer:
     ):
         device = comfy.model_management.get_torch_device()
 
-        lat = latent["samples"]  # (1, C, T, H_lat, W_lat)
+        lat = latent["samples"].to(device)  # (1, C, T, H_lat, W_lat)
         H_lat, W_lat = lat.shape[3], lat.shape[4]
         img_h, img_w = H_lat * 8, W_lat * 8
         vid_T = lat.shape[2]
