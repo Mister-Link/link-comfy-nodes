@@ -151,39 +151,21 @@ class VideoTileDetailer:
         return w
 
     @staticmethod
-    def _crop_conditioning(
-        cond_list: list,
-        lat_y1: int,
-        lat_x1: int,
-        lat_y2: int,
-        lat_x2: int,
-    ) -> list:
-        """Crop VACE-related conditioning tensors to the tile's latent spatial region.
+    def _strip_tile_conditioning(cond_list: list) -> list:
+        """Strip VACE and phantom conditioning for per-tile sampling.
 
-        Crops the last two dimensions (H_lat, W_lat) of:
-        - vace_frames  (list of tensors: ..., H, W)
-        - vace_mask    (list of tensors: ..., H, W)
-        - time_dim_concat  (tensor: ..., H, W)
+        Spatially-cropped vace_frames cause ghosting (different reference
+        characters per tile). time_dim_concat phantom frames cause temporal
+        count mismatches. Stripping both lets the model refine tiles using
+        only text conditioning + the initial tile latent structure.
         """
-        cropped = []
+        stripped = []
         for (t, d) in cond_list:
             d = d.copy()
-
-            if "vace_frames" in d:
-                d["vace_frames"] = [
-                    f[..., lat_y1:lat_y2, lat_x1:lat_x2] for f in d["vace_frames"]
-                ]
-
-            if "vace_mask" in d:
-                d["vace_mask"] = [
-                    m[..., lat_y1:lat_y2, lat_x1:lat_x2] for m in d["vace_mask"]
-                ]
-
-            if "time_dim_concat" in d and isinstance(d["time_dim_concat"], torch.Tensor):
-                d["time_dim_concat"] = d["time_dim_concat"][..., lat_y1:lat_y2, lat_x1:lat_x2]
-
-            cropped.append((t, d))
-        return cropped
+            for key in ("vace_frames", "vace_mask", "vace_strength", "time_dim_concat"):
+                d.pop(key, None)
+            stripped.append((t, d))
+        return stripped
 
     # ------------------------------------------------------------------ main
 
@@ -201,6 +183,7 @@ class VideoTileDetailer:
         tile_height,
         tile_overlap,
         feather,
+        reference_image=None,  # kept for workflow compatibility, not used
     ):
         model, _clip, vae, positive, negative = basic_pipe
         device = comfy.model_management.get_torch_device()
@@ -211,7 +194,29 @@ class VideoTileDetailer:
 
         # Decode all frames to pixel space
         decoded = vae.decode(lat)
-        frames = self._fix_decoded(decoded, img_h).to(device)  # (N, H, W, C)
+        frames = self._fix_decoded(decoded, img_h).to(device)  # (N_total, H, W, C)
+        N_total = frames.shape[0]
+
+        # Phantom frames (WanVacePhantomSimpleV2) are stored in the latent, so
+        # vae.decode gives more frames than the actual video. Strip them by
+        # inferring phantom latent frames from time_dim_concat in conditioning.
+        T_total = lat.shape[2]
+        T_phantom_lat = 0
+        for (_t, d) in positive:
+            tdc = d.get("time_dim_concat")
+            if isinstance(tdc, torch.Tensor):
+                T_phantom_lat = tdc.shape[2]
+                break
+
+        T_video_lat = T_total - T_phantom_lat
+        if T_phantom_lat > 0 and T_total > 1 and N_total > 1:
+            temporal_ratio = round((N_total - 1) / (T_total - 1))
+            N_video = (T_video_lat - 1) * temporal_ratio + 1
+            frames = frames[:N_video]
+            print(
+                f"[VideoTileDetailer] phantom: {T_phantom_lat} latent frames stripped, "
+                f"keeping {N_video}/{N_total} pixel frames"
+            )
         N = frames.shape[0]
         print(f"[VideoTileDetailer] {N} frames {img_w}×{img_h}")
 
@@ -232,20 +237,18 @@ class VideoTileDetailer:
             th, tw = y2 - y1, x2 - x1
             print(f"[VideoTileDetailer] tile {idx+1}/{len(tiles)} ({x1},{y1})→({x2},{y2})")
 
-            # Latent tile coordinates (VAE spatial stride = 8)
-            lat_y1, lat_x1 = y1 // 8, x1 // 8
-            lat_y2, lat_x2 = y2 // 8, x2 // 8
-
             # Crop tile frames (all N video frames, tile spatial region)
             tile_frames = frames[:, y1:y2, x1:x2, :].contiguous()  # (N, th, tw, C)
 
             # Encode all video tile frames — temporal count stays the same as original
             tile_lat = vae.encode(tile_frames).to(device)  # (1, C, T, h_lat, w_lat)
 
-            # Crop VACE conditioning spatially to the tile region.
-            # Temporal counts are unchanged so phantom/reference frame math stays valid.
-            pos_tile = self._crop_conditioning(positive, lat_y1, lat_x1, lat_y2, lat_x2)
-            neg_tile = self._crop_conditioning(negative, lat_y1, lat_x1, lat_y2, lat_x2)
+            # Strip VACE/phantom conditioning for tile sampling.
+            # Spatially-cropped phantom reference frames cause ghosting (different
+            # characters per tile); stripping them lets the model refine using
+            # text + initial tile latent only.
+            pos_tile = self._strip_tile_conditioning(positive)
+            neg_tile = self._strip_tile_conditioning(negative)
 
             latent_in = {"samples": tile_lat}
 
