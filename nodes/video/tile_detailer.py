@@ -114,6 +114,7 @@ class VideoTileDetailer:
         img_h, img_w = H_lat * 8, W_lat * 8
         vid_T = lat.shape[2]
 
+        ref_lat_T = 0
         if reference_image is not None:
             ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
             if ref.shape[0] != img_h or ref.shape[1] != img_w:
@@ -127,11 +128,11 @@ class VideoTileDetailer:
                     .permute(0, 2, 3, 1)
                     .squeeze(0)
                 )
-            ref_lat = vae.encode(ref.unsqueeze(0)).to(device)  # (1, C, T, H_lat, W_lat)
-            # Inject via WAN's native time_dim_concat — model handles it internally
-            positive = [(t, {**d, "time_dim_concat": ref_lat}) for (t, d) in positive]
-            negative = [(t, {**d, "time_dim_concat": ref_lat}) for (t, d) in negative]
-            print(f"[VideoTileDetailer] reference injected via time_dim_concat")
+            ref_lat = vae.encode(ref.unsqueeze(0)).to(device)  # (1, C, 1, H_lat, W_lat)
+            ref_lat_T = ref_lat.shape[2]
+            # Prepend reference frame to latent — temporal attention anchors across all frames
+            lat = torch.cat([ref_lat, lat], dim=2)  # (1, C, 1+T, H_lat, W_lat)
+            print(f"[VideoTileDetailer] reference prepended ({ref_lat_T} frame(s)), total {lat.shape[2]} frames")
 
         latent_in = {"samples": lat}
 
@@ -155,6 +156,10 @@ class VideoTileDetailer:
         )[0]
 
         video_lat = sampled["samples"]
+        # Exclude reference frame from output
+        if ref_lat_T > 0:
+            video_lat = video_lat[:, :, ref_lat_T:, :, :]
+            print(f"[VideoTileDetailer] trimmed reference, output {video_lat.shape[2]} frames")
         decoded = vae.decode(video_lat)
         result = self._fix_decoded(decoded, img_h)
         print(f"[VideoTileDetailer] done → {result.shape}")
