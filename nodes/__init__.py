@@ -26,6 +26,7 @@ from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
 from .text import AdvancedStringConcat, PreviewAsMarkdown
 from .video import (
     ReplaceAlpha,
+    SEGSFlatten,
     StabilizerTrimNode,
     TrimConditioning,
     VideoDetailer,
@@ -64,6 +65,7 @@ __all__ = [
     "PreviewWebmNode",
     "ReplaceAlpha",
     "ResizeImageAndMaskBySideNode",
+    "SEGSFlatten",
     "SaveFolderAsZip",
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
