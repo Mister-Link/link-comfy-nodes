@@ -1,5 +1,5 @@
-"""Tiled video detailer — processes video frames tile by tile with reference-guided
-consistency, then blends tiles back using feathered seam weights."""
+"""Tiled video detailer — processes video frames tile by tile with VACE conditioning
+spatially cropped per tile, then blends tiles back using feathered seam weights."""
 
 from __future__ import annotations
 
@@ -9,17 +9,19 @@ import torch.nn.functional as F
 import comfy.model_management
 import comfy.samplers
 import nodes
-from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 
 class VideoTileDetailer:
     """Tile-based video detailer.
 
     Decodes all frames, then for each tile region across the whole video clip:
-    - crops the reference image to that region for spatially-aware context
-    - encodes tile frames + reference tile together
-    - denoises with the reference temporal frame protected (noise_mask=0)
+    - encodes tile frames (all T frames, same temporal count as original latent)
+    - crops VACE conditioning tensors spatially to the tile region so temporal
+      frame counts stay consistent (avoids 'reference_frames cannot be negative')
+    - denoises with partial noise controlled by the denoise parameter
     - decodes and accumulates with cosine feather weights for seamless blending
+
+    Works with WanVacePhantomSimpleV2 and other VACE conditioning setups.
     """
 
     @classmethod
@@ -50,7 +52,7 @@ class VideoTileDetailer:
                         "min": 64,
                         "max": 2048,
                         "step": 8,
-                        "tooltip": "Tile width in pixels. Should be a multiple of 8.",
+                        "tooltip": "Tile width in pixels. Must be a multiple of 8.",
                     },
                 ),
                 "tile_height": (
@@ -60,7 +62,7 @@ class VideoTileDetailer:
                         "min": 64,
                         "max": 2048,
                         "step": 8,
-                        "tooltip": "Tile height in pixels. Should be a multiple of 8.",
+                        "tooltip": "Tile height in pixels. Must be a multiple of 8.",
                     },
                 ),
                 "tile_overlap": (
@@ -84,23 +86,15 @@ class VideoTileDetailer:
                     },
                 ),
             },
-            "optional": {
-                "reference_image": (
-                    "IMAGE",
-                    {
-                        "tooltip": "Reference frame cropped to each tile region for "
-                        "spatially-aware consistency. Falls back to first video frame."
-                    },
-                ),
-            },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Tile-based video detailer. Processes each spatial tile across all video frames "
-        "with a reference image for consistency, then blends tiles back seamlessly."
+        "Tile-based video detailer. Spatially crops VACE conditioning per tile so "
+        "temporal frame counts stay consistent with WanVace/Phantom workflows. "
+        "Blends tiles back with cosine feathering."
     )
 
     # ------------------------------------------------------------------ helpers
@@ -149,12 +143,47 @@ class VideoTileDetailer:
         w = torch.ones(tile_h, tile_w, device=device)
         f = min(feather, tile_h // 2, tile_w // 2)
         if f > 0:
-            ramp = (1 - torch.cos(torch.linspace(0, torch.pi, f + 2)[1:-1])) / 2
+            ramp = (1 - torch.cos(torch.linspace(0, torch.pi, f + 2, device=device)[1:-1])) / 2
             w[:f, :] *= ramp[:, None]
             w[-f:, :] *= ramp.flip(0)[:, None]
             w[:, :f] *= ramp[None, :]
             w[:, -f:] *= ramp.flip(0)[None, :]
         return w
+
+    @staticmethod
+    def _crop_conditioning(
+        cond_list: list,
+        lat_y1: int,
+        lat_x1: int,
+        lat_y2: int,
+        lat_x2: int,
+    ) -> list:
+        """Crop VACE-related conditioning tensors to the tile's latent spatial region.
+
+        Crops the last two dimensions (H_lat, W_lat) of:
+        - vace_frames  (list of tensors: ..., H, W)
+        - vace_mask    (list of tensors: ..., H, W)
+        - time_dim_concat  (tensor: ..., H, W)
+        """
+        cropped = []
+        for (t, d) in cond_list:
+            d = d.copy()
+
+            if "vace_frames" in d:
+                d["vace_frames"] = [
+                    f[..., lat_y1:lat_y2, lat_x1:lat_x2] for f in d["vace_frames"]
+                ]
+
+            if "vace_mask" in d:
+                d["vace_mask"] = [
+                    m[..., lat_y1:lat_y2, lat_x1:lat_x2] for m in d["vace_mask"]
+                ]
+
+            if "time_dim_concat" in d and isinstance(d["time_dim_concat"], torch.Tensor):
+                d["time_dim_concat"] = d["time_dim_concat"][..., lat_y1:lat_y2, lat_x1:lat_x2]
+
+            cropped.append((t, d))
+        return cropped
 
     # ------------------------------------------------------------------ main
 
@@ -172,7 +201,6 @@ class VideoTileDetailer:
         tile_height,
         tile_overlap,
         feather,
-        reference_image=None,
     ):
         model, _clip, vae, positive, negative = basic_pipe
         device = comfy.model_management.get_torch_device()
@@ -187,34 +215,13 @@ class VideoTileDetailer:
         N = frames.shape[0]
         print(f"[VideoTileDetailer] {N} frames {img_w}×{img_h}")
 
-        # Prepare full-res reference (cropped per-tile later)
-        if reference_image is not None:
-            ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
-            if ref.shape[0] != img_h or ref.shape[1] != img_w:
-                ref = (
-                    F.interpolate(
-                        ref.unsqueeze(0).permute(0, 3, 1, 2),
-                        size=(img_h, img_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    .permute(0, 2, 3, 1)
-                    .squeeze(0)
-                )
-        else:
-            ref = frames[0]  # (H, W, C)
-
-        # DifferentialDiffusion so noise_mask drives per-position denoise depth
-        if "denoise_mask_function" not in model.model_options:
-            model = DifferentialDiffusion.execute(model)[0]
-
         tiles = self._get_tiles(img_h, img_w, tile_height, tile_width, tile_overlap)
         print(
             f"[VideoTileDetailer] {len(tiles)} tiles "
             f"({tile_width}×{tile_height}, overlap={tile_overlap})"
         )
 
-        # start_step derived from denoise: 0 denoise → start at end, 1 → start at 0
+        # start_step derived from denoise: denoise=1.0 → start_step=0, denoise=0 → start_step=steps
         start_step = int(steps * (1.0 - denoise))
 
         # Accumulation buffers in pixel space
@@ -225,51 +232,41 @@ class VideoTileDetailer:
             th, tw = y2 - y1, x2 - x1
             print(f"[VideoTileDetailer] tile {idx+1}/{len(tiles)} ({x1},{y1})→({x2},{y2})")
 
-            # Crop tile from all video frames and the reference
+            # Latent tile coordinates (VAE spatial stride = 8)
+            lat_y1, lat_x1 = y1 // 8, x1 // 8
+            lat_y2, lat_x2 = y2 // 8, x2 // 8
+
+            # Crop tile frames (all N video frames, tile spatial region)
             tile_frames = frames[:, y1:y2, x1:x2, :].contiguous()  # (N, th, tw, C)
-            ref_tile = ref[y1:y2, x1:x2, :].contiguous()           # (th, tw, C)
 
-            # Encode reference tile (single temporal frame)
-            ref_lat = vae.encode(ref_tile.unsqueeze(0)).to(device)  # (1, C, ref_T, h, w)
-            ref_T = ref_lat.shape[2]
+            # Encode all video tile frames — temporal count stays the same as original
+            tile_lat = vae.encode(tile_frames).to(device)  # (1, C, T, h_lat, w_lat)
 
-            # Encode all video frames for this tile
-            tile_lat = vae.encode(tile_frames).to(device)  # (1, C, vid_T, h, w)
-            vid_T = tile_lat.shape[2]
-            h_lat = tile_lat.shape[3]
-            w_lat = tile_lat.shape[4]
+            # Crop VACE conditioning spatially to the tile region.
+            # Temporal counts are unchanged so phantom/reference frame math stays valid.
+            pos_tile = self._crop_conditioning(positive, lat_y1, lat_x1, lat_y2, lat_x2)
+            neg_tile = self._crop_conditioning(negative, lat_y1, lat_x1, lat_y2, lat_x2)
 
-            # Concatenate ref + video along temporal axis
-            combined = torch.cat([ref_lat, tile_lat], dim=2)  # (1, C, ref_T+vid_T, h, w)
-
-            # Noise mask: 0 = protected (reference), 1 = denoise (video)
-            ref_mask = torch.zeros(1, 1, ref_T, h_lat, w_lat, device=device)
-            vid_mask = torch.ones(1, 1, vid_T, h_lat, w_lat, device=device)
-            noise_mask = torch.cat([ref_mask, vid_mask], dim=2)
-
-            latent_in = {"samples": combined, "noise_mask": noise_mask}
+            latent_in = {"samples": tile_lat}
 
             sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
                 model,
-                "enable",   # add_noise
+                "enable",     # add_noise
                 seed,
                 steps,
                 cfg,
                 sampler_name,
                 scheduler,
-                positive,
-                negative,
+                pos_tile,
+                neg_tile,
                 latent_in,
                 start_step,
-                steps,      # end_step
-                "disable",  # return_with_leftover_noise
+                steps,        # end_step
+                "disable",    # return_with_leftover_noise
             )[0]
 
-            # Strip reference temporal frames from sampler output
-            video_lat = sampled["samples"][:, :, ref_T:, :, :]
-
             # Decode tile
-            tile_decoded = vae.decode(video_lat)
+            tile_decoded = vae.decode(sampled["samples"])
             refined = self._fix_decoded(tile_decoded, th).to(device)  # (N, th, tw, C)
 
             out_n = min(N, refined.shape[0])
