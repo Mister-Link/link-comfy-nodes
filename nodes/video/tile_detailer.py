@@ -8,10 +8,12 @@ needs to be stripped or cropped.  Simply decode → tile → sample → accumula
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
-import comfy.model_management
-import comfy.samplers
-import nodes
+import comfy.model_management  # type: ignore[import-untyped]
+import comfy.samplers  # type: ignore[import-untyped]
+import nodes  # type: ignore[import-untyped]
+from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion  # type: ignore[import-untyped]
 
 
 class VideoTileDetailer:
@@ -19,12 +21,12 @@ class VideoTileDetailer:
 
     Wire in the model and conditioning from BEFORE any WanVace node so the
     conditioning is clean text-only.  The node decodes the input latent, tiles
-    each frame spatially, denoises every tile with a partial KSampler pass,
-    then accumulates with cosine feather weights for seamless blending.
+    each frame spatially, denoises every tile, then accumulates with cosine
+    feather weights for seamless blending.
 
-    If your upstream workflow uses WanVacePhantomSimpleV2, set
-    phantom_latent_frames to match that node so the phantom frames are excluded
-    from the output.
+    Optional reference_image: resized to each tile's dimensions and prepended
+    as a protected temporal context frame so the model has identity/style
+    context for every tile.
     """
 
     @classmethod
@@ -98,17 +100,13 @@ class VideoTileDetailer:
                 ),
             },
             "optional": {
-                "phantom_latent_frames": (
-                    "INT",
+                "reference_image": (
+                    "IMAGE",
                     {
-                        "default": 0,
-                        "min": 0,
-                        "max": 64,
                         "tooltip": (
-                            "Number of phantom latent frames appended by "
-                            "WanVacePhantomSimpleV2. These are stripped from the "
-                            "latent before tiling so the output contains only the "
-                            "real video frames."
+                            "Resized to each tile's dimensions and prepended as a "
+                            "protected temporal context frame so every tile sees the "
+                            "full character for consistent identity and style."
                         ),
                     },
                 ),
@@ -121,8 +119,8 @@ class VideoTileDetailer:
     DESCRIPTION = (
         "Tile-based video detailer. Connect model and conditioning from BEFORE "
         "any WanVace node so the conditioning is plain text with no VACE keys. "
-        "Set phantom_latent_frames if WanVacePhantomSimpleV2 was used upstream. "
-        "Tiles are blended back with cosine feathering. Keep denoise low (0.1-0.3)."
+        "Optional reference_image is resized to each tile and prepended as a "
+        "protected temporal context frame. Tiles are blended with cosine feathering."
     )
 
     # ------------------------------------------------------------------ helpers
@@ -197,7 +195,7 @@ class VideoTileDetailer:
         tile_height,
         tile_overlap,
         feather,
-        phantom_latent_frames=0,
+        reference_image=None,
     ):
         device = comfy.model_management.get_torch_device()
 
@@ -205,19 +203,30 @@ class VideoTileDetailer:
         H_lat, W_lat = lat.shape[3], lat.shape[4]
         img_h, img_w = H_lat * 8, W_lat * 8
 
-        # Strip phantom latent frames before decoding
-        if phantom_latent_frames > 0:
-            lat = lat[:, :, :-phantom_latent_frames, :, :]
-            print(
-                f"[VideoTileDetailer] stripped {phantom_latent_frames} phantom latent frames, "
-                f"T={lat.shape[2]}"
-            )
-
         # Decode all frames to pixel space
         decoded = vae.decode(lat)
         frames = self._fix_decoded(decoded, img_h).to(device)  # (N, H, W, C)
         N = frames.shape[0]
         print(f"[VideoTileDetailer] {N} frames {img_w}×{img_h}")
+
+        # Prepare full-res reference image; apply DifferentialDiffusion once
+        ref = None
+        if reference_image is not None:
+            ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
+            if ref.shape[0] != img_h or ref.shape[1] != img_w:
+                ref = (
+                    F.interpolate(
+                        ref.unsqueeze(0).permute(0, 3, 1, 2),
+                        size=(img_h, img_w),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .permute(0, 2, 3, 1)
+                    .squeeze(0)
+                )
+            if "denoise_mask_function" not in model.model_options:
+                model = DifferentialDiffusion.execute(model)[0]
+            print(f"[VideoTileDetailer] reference image: {ref.shape}")
 
         tiles = self._get_tiles(img_h, img_w, tile_height, tile_width, tile_overlap)
         print(
@@ -225,10 +234,8 @@ class VideoTileDetailer:
             f"({tile_width}×{tile_height}, overlap={tile_overlap})"
         )
 
-        # start_step: denoise=1.0 → 0 (full regen), denoise=0 → steps (no change)
         start_step = int(steps * (1.0 - denoise))
 
-        # Accumulation buffers in pixel space
         out_acc = torch.zeros(N, img_h, img_w, frames.shape[-1], device=device)
         out_wgt = torch.zeros(N, img_h, img_w, 1, device=device)
 
@@ -238,8 +245,36 @@ class VideoTileDetailer:
 
             tile_frames = frames[:, y1:y2, x1:x2, :].contiguous()  # (N, th, tw, C)
             tile_lat = vae.encode(tile_frames).to(device)
+            vid_T = tile_lat.shape[2]
+            h_lat, w_lat = tile_lat.shape[3], tile_lat.shape[4]
 
-            sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
+            if ref is not None:
+                # Resize full reference to tile dims so model sees whole character
+                ref_tile = (
+                    F.interpolate(
+                        ref.unsqueeze(0).permute(0, 3, 1, 2),
+                        size=(th, tw),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .permute(0, 2, 3, 1)
+                    .squeeze(0)
+                    .contiguous()
+                )  # (th, tw, C)
+                ref_lat = vae.encode(ref_tile.unsqueeze(0)).to(device)
+                ref_T = ref_lat.shape[2]
+
+                # Prepend reference temporally; noise_mask=0 protects it
+                combined = torch.cat([ref_lat, tile_lat], dim=2)
+                ref_mask = torch.zeros(1, 1, ref_T, h_lat, w_lat, device=device)
+                vid_mask = torch.ones(1, 1, vid_T, h_lat, w_lat, device=device)
+                noise_mask = torch.cat([ref_mask, vid_mask], dim=2)
+                latent_in = {"samples": combined, "noise_mask": noise_mask}
+            else:
+                ref_T = 0
+                latent_in = {"samples": tile_lat}
+
+            sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(  # type: ignore[attr-defined]
                 model,
                 "enable",     # add_noise
                 seed,
@@ -249,13 +284,14 @@ class VideoTileDetailer:
                 scheduler,
                 positive,
                 negative,
-                {"samples": tile_lat},
+                latent_in,
                 start_step,
                 steps,        # end_step
                 "disable",    # return_with_leftover_noise
             )[0]
 
-            tile_decoded = vae.decode(sampled["samples"])
+            video_lat = sampled["samples"][:, :, ref_T:, :, :]
+            tile_decoded = vae.decode(video_lat)
             refined = self._fix_decoded(tile_decoded, th).to(device)  # (N, th, tw, C)
 
             out_n = min(N, refined.shape[0])
