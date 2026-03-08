@@ -1,5 +1,6 @@
 """Fix 5D SEGS tensors for Impact Pack compatibility (e.g. after video detailer)."""
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -33,7 +34,10 @@ class SEGSFlatten:
             # 1. Flatten 5D (B, F, H, W, C) → 4D (B*F, H, W, C)
             if img is not None and img.ndim == 5:
                 b, f, h, w, c = img.shape
-                img = img.reshape(b * f, h, w, c)
+                if isinstance(img, np.ndarray):
+                    img = img.reshape(b * f, h, w, c)
+                else:
+                    img = img.reshape(b * f, h, w, c)
 
             # 2. Resize image spatial dims to match mask if they differ
             if img is not None and mask is not None:
@@ -43,12 +47,18 @@ class SEGSFlatten:
                 img_w = img.shape[2]
 
                 if img_h != mask_h or img_w != mask_w:
+                    # Convert numpy → torch if needed, resize, convert back
+                    was_numpy = isinstance(img, np.ndarray)
+                    original_dtype = img.dtype
+                    t = torch.from_numpy(img) if was_numpy else img
                     # NHWC → NCHW for interpolate, then back
-                    img_nchw = img.permute(0, 3, 1, 2).float()
-                    img_nchw = F.interpolate(
-                        img_nchw, size=(mask_h, mask_w), mode="bilinear", align_corners=False
-                    )
-                    img = img_nchw.permute(0, 2, 3, 1).to(seg.cropped_image.dtype)
+                    t = t.float().permute(0, 3, 1, 2)
+                    t = F.interpolate(t, size=(mask_h, mask_w), mode="bilinear", align_corners=False)
+                    t = t.permute(0, 2, 3, 1)
+                    if was_numpy:
+                        img = t.numpy().astype(original_dtype)
+                    else:
+                        img = t.to(original_dtype)
 
             fixed.append(
                 SEG(
