@@ -1,16 +1,13 @@
 """Tiled video detailer — processes video frames tile by tile, then blends tiles
 back using feathered seam weights.
 
-Key design: VACE conditioning is spatially cropped to each tile region so the
-model retains style and character guidance. Phantom reference frames
-(time_dim_concat) are stripped to prevent frame-count mismatches with the
-patched WanVaceAdvanced forward.
+Accepts model and conditioning BEFORE any VACE node, so no VACE conditioning
+needs to be stripped or cropped.  Simply decode → tile → sample → accumulate.
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 import comfy.model_management
 import comfy.samplers
@@ -20,14 +17,14 @@ import nodes
 class VideoTileDetailer:
     """Tile-based video detailer.
 
-    Decodes all frames, then for each tile region:
-    - Crops VACE conditioning (vace_frames, vace_mask) spatially to the tile
-      and trims temporally to exclude phantom frames.  This preserves style /
-      character guidance without frame-count mismatches.
-    - Strips time_dim_concat (phantom reference frames) from conditioning so
-      the patched WanVaceAdvanced forward is not triggered.
-    - Denoises with partial noise controlled by denoise.
-    - Decodes and accumulates with cosine feather weights for seamless blending.
+    Wire in the model and conditioning from BEFORE any WanVace node so the
+    conditioning is clean text-only.  The node decodes the input latent, tiles
+    each frame spatially, denoises every tile with a partial KSampler pass,
+    then accumulates with cosine feather weights for seamless blending.
+
+    If your upstream workflow uses WanVacePhantomSimpleV2, set
+    phantom_latent_frames to match that node so the phantom frames are excluded
+    from the output.
     """
 
     @classmethod
@@ -35,7 +32,10 @@ class VideoTileDetailer:
         return {
             "required": {
                 "latent": ("LATENT",),
-                "basic_pipe": ("BASIC_PIPE",),
+                "model": ("MODEL",),
+                "vae": ("VAE",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 7.0, "min": 0.0, "max": 100.0}),
@@ -51,7 +51,7 @@ class VideoTileDetailer:
                         "tooltip": (
                             "How much to re-denoise each tile. "
                             "0 = no change, 1 = full re-generation. "
-                            "Keep low (0.1-0.3) to add detail while preserving "
+                            "Keep low (0.1-0.3) to add detail without changing "
                             "the original character appearance."
                         ),
                     },
@@ -97,16 +97,32 @@ class VideoTileDetailer:
                     },
                 ),
             },
+            "optional": {
+                "phantom_latent_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 64,
+                        "tooltip": (
+                            "Number of phantom latent frames appended by "
+                            "WanVacePhantomSimpleV2. These are stripped from the "
+                            "latent before tiling so the output contains only the "
+                            "real video frames."
+                        ),
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
     FUNCTION = "execute"
     CATEGORY = "link/video"
     DESCRIPTION = (
-        "Tile-based video detailer. VACE conditioning is spatially cropped to "
-        "each tile region so character and style guidance is preserved. Phantom "
-        "reference frames are stripped to avoid frame-count errors. Tiles are "
-        "blended back with cosine feathering. Keep denoise low (0.1-0.3)."
+        "Tile-based video detailer. Connect model and conditioning from BEFORE "
+        "any WanVace node so the conditioning is plain text with no VACE keys. "
+        "Set phantom_latent_frames if WanVacePhantomSimpleV2 was used upstream. "
+        "Tiles are blended back with cosine feathering. Keep denoise low (0.1-0.3)."
     )
 
     # ------------------------------------------------------------------ helpers
@@ -162,61 +178,15 @@ class VideoTileDetailer:
             w[:, -f:] *= ramp.flip(0)[None, :]
         return w
 
-    @staticmethod
-    def _crop_tile_conditioning(
-        cond_list: list,
-        y1: int,
-        x1: int,
-        y2: int,
-        x2: int,
-        T_keep: int,
-    ) -> list:
-        """Spatially crop VACE conditioning to the tile region.
-
-        Strips time_dim_concat (WanVacePhantomSimpleV2 phantom reference frames)
-        so the patched WanVaceAdvanced forward is not triggered.
-
-        Crops vace_frames / vace_mask tensors to the tile's spatial region
-        (latent coords = pixel // 8) and trims temporally to T_keep frames so
-        control_frames matches the tile latent's temporal depth.
-        """
-        ly1, lx1, ly2, lx2 = y1 // 8, x1 // 8, y2 // 8, x2 // 8
-
-        result = []
-        for (t, d) in cond_list:
-            d = d.copy()
-
-            # Remove phantom conditioning — prevents reference_frames < 0 error
-            d.pop("time_dim_concat", None)
-
-            if "vace_frames" in d:
-                vf = d["vace_frames"]
-                if isinstance(vf, (list, tuple)):
-                    # Each element: (..., T, H_lat, W_lat)
-                    d["vace_frames"] = [
-                        v[..., :T_keep, ly1:ly2, lx1:lx2] for v in vf
-                    ]
-                elif isinstance(vf, torch.Tensor):
-                    d["vace_frames"] = vf[..., :T_keep, ly1:ly2, lx1:lx2]
-
-            if "vace_mask" in d:
-                vm = d["vace_mask"]
-                if isinstance(vm, (list, tuple)):
-                    d["vace_mask"] = [
-                        v[..., :T_keep, ly1:ly2, lx1:lx2] for v in vm
-                    ]
-                elif isinstance(vm, torch.Tensor):
-                    d["vace_mask"] = vm[..., :T_keep, ly1:ly2, lx1:lx2]
-
-            result.append((t, d))
-        return result
-
     # ------------------------------------------------------------------ main
 
     def execute(
         self,
         latent,
-        basic_pipe,
+        model,
+        vae,
+        positive,
+        negative,
         seed,
         steps,
         cfg,
@@ -227,39 +197,27 @@ class VideoTileDetailer:
         tile_height,
         tile_overlap,
         feather,
+        phantom_latent_frames=0,
     ):
-        model, _clip, vae, positive, negative = basic_pipe
         device = comfy.model_management.get_torch_device()
 
         lat = latent["samples"]  # (1, C, T, H_lat, W_lat)
         H_lat, W_lat = lat.shape[3], lat.shape[4]
         img_h, img_w = H_lat * 8, W_lat * 8
 
+        # Strip phantom latent frames before decoding
+        if phantom_latent_frames > 0:
+            lat = lat[:, :, :-phantom_latent_frames, :, :]
+            print(
+                f"[VideoTileDetailer] stripped {phantom_latent_frames} phantom latent frames, "
+                f"T={lat.shape[2]}"
+            )
+
         # Decode all frames to pixel space
         decoded = vae.decode(lat)
-        frames = self._fix_decoded(decoded, img_h).to(device)  # (N_total, H, W, C)
-        N_total = frames.shape[0]
-
-        # Detect phantom latent frames from time_dim_concat in conditioning
-        T_total = lat.shape[2]
-        T_phantom_lat = 0
-        for (_t, d) in positive:
-            tdc = d.get("time_dim_concat")
-            if isinstance(tdc, torch.Tensor):
-                T_phantom_lat = tdc.shape[2]
-                break
-
-        T_video_lat = T_total - T_phantom_lat
-        if T_phantom_lat > 0 and T_total > 1 and N_total > 1:
-            temporal_ratio = round((N_total - 1) / (T_total - 1))
-            N_video = (T_video_lat - 1) * temporal_ratio + 1
-            frames = frames[:N_video]
-            print(
-                f"[VideoTileDetailer] phantom: {T_phantom_lat} latent frames stripped, "
-                f"keeping {N_video}/{N_total} pixel frames"
-            )
+        frames = self._fix_decoded(decoded, img_h).to(device)  # (N, H, W, C)
         N = frames.shape[0]
-        print(f"[VideoTileDetailer] {N} frames {img_w}×{img_h}, T_video_lat={T_video_lat}")
+        print(f"[VideoTileDetailer] {N} frames {img_w}×{img_h}")
 
         tiles = self._get_tiles(img_h, img_w, tile_height, tile_width, tile_overlap)
         print(
@@ -278,15 +236,8 @@ class VideoTileDetailer:
             th, tw = y2 - y1, x2 - x1
             print(f"[VideoTileDetailer] tile {idx+1}/{len(tiles)} ({x1},{y1})→({x2},{y2})")
 
-            # Crop tile frames (all N video frames, tile spatial region)
             tile_frames = frames[:, y1:y2, x1:x2, :].contiguous()  # (N, th, tw, C)
-
-            # Encode video tile frames
-            tile_lat = vae.encode(tile_frames).to(device)  # (1, C, T_video_lat, h_lat, w_lat)
-
-            # Spatially crop VACE conditioning to tile region; strip phantom frames
-            pos_tile = self._crop_tile_conditioning(positive, y1, x1, y2, x2, T_video_lat)
-            neg_tile = self._crop_tile_conditioning(negative, y1, x1, y2, x2, T_video_lat)
+            tile_lat = vae.encode(tile_frames).to(device)
 
             sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
                 model,
@@ -296,8 +247,8 @@ class VideoTileDetailer:
                 cfg,
                 sampler_name,
                 scheduler,
-                pos_tile,
-                neg_tile,
+                positive,
+                negative,
                 {"samples": tile_lat},
                 start_step,
                 steps,        # end_step
@@ -308,10 +259,8 @@ class VideoTileDetailer:
             refined = self._fix_decoded(tile_decoded, th).to(device)  # (N, th, tw, C)
 
             out_n = min(N, refined.shape[0])
-
-            # Feathered blend weight
-            weight = self._feather_weight(th, tw, feather, device)  # (th, tw)
-            w4d = weight.unsqueeze(0).unsqueeze(-1)                  # (1, th, tw, 1)
+            weight = self._feather_weight(th, tw, feather, device)   # (th, tw)
+            w4d = weight.unsqueeze(0).unsqueeze(-1)                   # (1, th, tw, 1)
 
             out_acc[:out_n, y1:y2, x1:x2, :] += refined[:out_n] * w4d
             out_wgt[:out_n, y1:y2, x1:x2, :] += w4d
