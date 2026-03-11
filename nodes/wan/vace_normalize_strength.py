@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 
 class VaceNormalizeStrength:
     """Normalize the control portion of expanded VACE strengths to a fixed baseline.
@@ -18,7 +20,7 @@ class VaceNormalizeStrength:
 
     WAN's 9-frame clip corresponds to 3 latent control frames, so the rule is:
 
-        control_scale = 3 / actual_control_latent_frames
+        control_scale = sqrt(3 / actual_control_latent_frames)
 
     Reference strengths are left unchanged.
     """
@@ -67,7 +69,7 @@ class VaceNormalizeStrength:
         if not ctrl_part:
             return batch_strengths, debug_info
 
-        scale = cls.BASELINE_CONTROL_LATENTS / float(len(ctrl_part))
+        scale = math.sqrt(cls.BASELINE_CONTROL_LATENTS / float(len(ctrl_part)))
         debug_info["scale"] = scale
         return ref_part + [value * scale for value in ctrl_part], debug_info
 
