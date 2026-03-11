@@ -39,6 +39,7 @@ from .video import (
 from .wan import (
     LoadVACEModuleNode,
     NativeWanPoseStrength,
+    VaceNormalizeStrength,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "LoadVACEModuleNode",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
+    "VaceNormalizeStrength",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
     "PreviewAsMarkdown",
