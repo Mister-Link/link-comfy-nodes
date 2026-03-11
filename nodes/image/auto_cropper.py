@@ -33,6 +33,7 @@ class AutoCropperNode:
                 "method": (
                     [
                         "bbox",
+                        "non_black",
                         "anime",
                         "bg_sub",
                     ],
@@ -111,6 +112,16 @@ class AutoCropperNode:
         mask = (
             np.any(rgb_channels > int(sensitivity * 255), axis=2).astype(np.uint8) * 255
         )
+        return mask
+
+    def _detect_non_black(self, frame_np, sensitivity):
+        rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
+
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+        threshold = 0.01 + (sensitivity * 0.24)
+
+        max_channel = np.max(rgb, axis=2)
+        mask = (max_channel > threshold).astype(np.uint8) * 255
         return mask
 
     def _detect_background_subtraction(self, frame_np, sensitivity):
@@ -215,6 +226,8 @@ class AutoCropperNode:
             method = "bg_sub"
         elif method in ("bbox_detection", "alpha_channel", "contour_detection"):
             method = "bbox"
+        elif method in ("pose", "openpose", "nonblack"):
+            method = "non_black"
 
         if method == "anime":
             model, device = self._get_model()
@@ -254,6 +267,8 @@ class AutoCropperNode:
                 mask = self._detect_background_subtraction(frame, sensitivity)
             elif method == "bbox":
                 mask = self._detect_bbox(frame, sensitivity)
+            elif method == "non_black":
+                mask = self._detect_non_black(frame, sensitivity)
             else:
                 raise ValueError(f"Unknown method: {method}")
 

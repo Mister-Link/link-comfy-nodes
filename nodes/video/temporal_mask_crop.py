@@ -24,6 +24,7 @@ class TemporalMaskCropper:
                     [
                         "mask",
                         "bbox",
+                        "non_black",
                         "anime",
                         "bg_sub",
                     ],
@@ -46,6 +47,7 @@ class TemporalMaskCropper:
         "Crops all frames to one temporally stable bounding box across the batch. "
         "method=mask uses the input mask and sensitivity as the mask threshold. "
         "Other methods mirror Auto Cropper detection modes and use sensitivity for detection. "
+        "For OpenPose/control frames on black backgrounds, method=non_black is usually the best fit. "
         "use_image_padding=True extends the crop window into surrounding image content "
         "(clamped at edges). use_image_padding=False fills padding with black."
     )
@@ -57,6 +59,8 @@ class TemporalMaskCropper:
             return "bg_sub"
         if method in ("bbox_detection", "alpha_channel", "contour_detection"):
             return "bbox"
+        if method in ("pose", "openpose", "nonblack"):
+            return "non_black"
         return method
 
     def _prepare_masks(self, masks: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -106,6 +110,8 @@ class TemporalMaskCropper:
                 )
             elif method == "bbox":
                 detection_mask = detector._detect_bbox(frame, sensitivity)
+            elif method == "non_black":
+                detection_mask = detector._detect_non_black(frame, sensitivity)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
@@ -217,7 +223,12 @@ class TemporalMaskCropper:
                 "[TemporalMaskCropper] no crop content found, returning full frames "
                 f"(method={method}, sensitivity={sensitivity})"
             )
-            return (images, masks if mask_count == frame_count else masks.expand(frame_count, height, width))
+            return (
+                images,
+                masks
+                if mask_count == frame_count
+                else masks.expand(frame_count, height, width),
+            )
 
         cropped_images, cropped_masks, crop_w, crop_h = self._crop_to_bbox(
             images=images,
