@@ -5,6 +5,7 @@ A collection of custom nodes for [ComfyUI](https://github.com/comfyanonymous/Com
 ## Nodes
 
 **Video & Animation**
+- **Average Mask Region Size** — average the white mask bounding-box size across frames
 - **Video Mask Editor** — interactive mask painting over video frames with preview caching
 - **Video Detailer** — reference-guided video denoising with VACE conditioning
 - **Stabilizer Trim** — trim stabilized video edges

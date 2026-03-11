@@ -5,11 +5,11 @@ from .nodes import (
     AddImageToBatchNode,
     AdvancedStringConcat,
     AutoCropperNode,
+    AverageMaskRegionSizeNode,
     BatchImageSave,
     BatchMaskCropper,
     BulkBackgroundRemoverBgEraserNode,
     ChangeLatentDimensions,
-    SnapToDivisible,
     ColorParserNode,
     ConvertToPixelArt,
     CropByBBoxNode,
@@ -28,10 +28,10 @@ from .nodes import (
     PreviewWebmNode,
     ReplaceAlpha,
     ResizeImageAndMaskBySideNode,
-    SEGSFlatten,
-    VideoTileDetailer,
     SaveFolderAsZip,
     SaveImageSequenceZip,
+    SEGSFlatten,
+    SnapToDivisible,
     SpritesheetBuilderNode,
     SpritesheetPreviewNode,
     StabilizerTrimNode,
@@ -39,12 +39,14 @@ from .nodes import (
     TrimConditioning,
     VideoDetailer,
     VideoMaskEditor,
+    VideoTileDetailer,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
 
 NODE_CLASS_MAPPINGS = {
     "Load VACE Module": LoadVACEModuleNode,
+    "Average Mask Region Size": AverageMaskRegionSizeNode,
     "Add Image to Batch": AddImageToBatchNode,
     "Batch Mask Cropper": BatchMaskCropper,
     "Change Latent Dimensions": ChangeLatentDimensions,
@@ -87,6 +89,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Load VACE Module": "Load VACE Module",
+    "Average Mask Region Size": "Average Mask Region Size",
     "Add Image to Batch": "Add Image to Batch",
     "Batch Mask Cropper": "Batch Mask Cropper (Motion-Preserving)",
     "Change Latent Dimensions": "Change Latent Dimensions",
