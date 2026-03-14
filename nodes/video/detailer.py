@@ -354,20 +354,15 @@ class VideoDetailer:
         vace_frames: torch.Tensor,
         vace_mask: torch.Tensor,
     ) -> list:
-        # Preserve vace_strength already embedded in the conditioning
-        strength = None
-        for _, meta in conditioning:
-            if "vace_strength" in meta:
-                strength = meta["vace_strength"]
-                break
-        base = VideoDetailer._conditioning_without_vace(conditioning)
-        values: dict = {
-            "vace_frames": [vace_frames],
-            "vace_mask": [vace_mask],
-        }
-        if strength is not None:
-            values["vace_strength"] = strength
-        return node_helpers.conditioning_set_values(base, values, append=True)
+        # Append detailer's inpainting VACE stream to the existing conditioning.
+        # append=True concatenates the lists, so any upstream VACE (e.g. pose
+        # control from WanVaceToVideoControlStrength) is preserved alongside the
+        # detailer's own inpainting context stream.
+        return node_helpers.conditioning_set_values(
+            conditioning,
+            {"vace_frames": [vace_frames], "vace_mask": [vace_mask]},
+            append=True,
+        )
 
     @staticmethod
     def _pick_target_size(
