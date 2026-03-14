@@ -11,6 +11,8 @@ from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 
 
 class VideoDetailer:
+    _MASK_EPSILON = 1e-6
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -114,12 +116,12 @@ class VideoDetailer:
 
     @staticmethod
     def _build_vace_conditioning(
-        ref_frame,      # (H, W, 3)
-        video_frames,   # (N, H, W, 3)
-        mask,           # (N, H, W)  [0=keep, 1=inpaint]
+        ref_frame,  # (H, W, 3)
+        video_frames,  # (N, H, W, 3)
+        mask,  # (N, H, W)  [0=keep, 1=inpaint]
         vae,
         latent_frames,  # T — video latent temporal frames
-        ref_lat_T,      # reference latent temporal frames (usually 1)
+        ref_lat_T,  # reference latent temporal frames (usually 1)
         img_height,
         img_width,
         device,
@@ -203,25 +205,52 @@ class VideoDetailer:
 
         # Decode video frames (needed for compositing and VACE conditioning)
         original_decoded = vae.decode(latent_samples)
-        original_frames = self._fix_decoded_shape(original_decoded, img_height).to(device)
+        original_frames = self._fix_decoded_shape(original_decoded, img_height).to(
+            device
+        )
         num_pixel_frames = original_frames.shape[0]
-        print(f"[Video Detailer] decoded {num_pixel_frames} frames {original_frames.shape}")
+        print(
+            f"[Video Detailer] decoded {num_pixel_frames} frames {original_frames.shape}"
+        )
 
         # Build inpainting mask
         if mask_opt is None:
             mask = torch.ones(
-                (num_pixel_frames, img_height, img_width), dtype=torch.float32, device=device
+                (num_pixel_frames, img_height, img_width),
+                dtype=torch.float32,
+                device=device,
             )
         else:
-            mask = mask_opt.clone().to(device)
+            mask = mask_opt.clone().to(device=device, dtype=torch.float32)
             if mask.ndim == 2:
                 mask = mask.unsqueeze(0).expand(num_pixel_frames, -1, -1).contiguous()
-            elif mask.shape[0] != num_pixel_frames:
+            elif mask.ndim != 3:
+                raise ValueError(
+                    f"mask_opt must be 2D or 3D, got shape {tuple(mask.shape)}"
+                )
+            elif mask.shape[0] == 1:
                 mask = mask[0:1].expand(num_pixel_frames, -1, -1).contiguous()
+            elif mask.shape[0] != num_pixel_frames:
+                raise ValueError(
+                    "mask_opt frame count must be 1 or match the decoded frame count; "
+                    f"got mask batch {mask.shape[0]} for {num_pixel_frames} frames"
+                )
+
+        mask = mask.clamp_(0.0, 1.0)
+        mask_frame_max = mask.flatten(1).amax(dim=1)
+        passthrough_frames = mask_frame_max <= self._MASK_EPSILON
+        if passthrough_frames.any():
+            mask[passthrough_frames] = 0.0
+            print(
+                "[Video Detailer] passthrough frames="
+                f"{int(passthrough_frames.sum().item())}/{mask.shape[0]}"
+            )
 
         # Get reference frame
         if reference_image is not None:
-            ref = (reference_image[0] if reference_image.ndim == 4 else reference_image).to(device)
+            ref = (
+                reference_image[0] if reference_image.ndim == 4 else reference_image
+            ).to(device)
             if ref.shape[0] != img_height or ref.shape[1] != img_width:
                 ref = (
                     F.interpolate(
@@ -239,7 +268,9 @@ class VideoDetailer:
             print("[Video Detailer] using first frame as reference")
 
         # Encode reference as a single temporal latent
-        ref_latent = vae.encode(ref.unsqueeze(0)).to(device)  # (1, C, ref_T, H_lat, W_lat)
+        ref_latent = vae.encode(ref.unsqueeze(0)).to(
+            device
+        )  # (1, C, ref_T, H_lat, W_lat)
         ref_lat_T = ref_latent.shape[2]
         print(f"[Video Detailer] ref_latent {ref_latent.shape}")
 
@@ -277,10 +308,19 @@ class VideoDetailer:
         )
         if has_vace:
             vace_strength = positive[0][1]["vace_strength"][0]
-            print(f"[Video Detailer] VACE strength={vace_strength}, building temporal context")
+            print(
+                f"[Video Detailer] VACE strength={vace_strength}, building temporal context"
+            )
             vace_frames_list, vace_mask_list = self._build_vace_conditioning(
-                ref, original_frames, mask, vae,
-                latent_frames, ref_lat_T, img_height, img_width, device,
+                ref,
+                original_frames,
+                mask,
+                vae,
+                latent_frames,
+                ref_lat_T,
+                img_height,
+                img_width,
+                device,
             )
             vace_values = {
                 "vace_frames": vace_frames_list,
@@ -330,12 +370,17 @@ class VideoDetailer:
 
         out_n = min(original_frames.shape[0], refined_frames.shape[0])
         if original_frames.shape[0] != refined_frames.shape[0]:
-            print(f"[Video Detailer] WARNING: frame count mismatch — original={original_frames.shape[0]} refined={refined_frames.shape[0]}, compositing {out_n} frames")
-        output = (
-            (1 - mask_4d[:out_n]) * original_frames[:out_n]
-            + mask_4d[:out_n] * refined_frames[:out_n]
-        )
+            print(
+                f"[Video Detailer] WARNING: frame count mismatch — original={original_frames.shape[0]} refined={refined_frames.shape[0]}, compositing {out_n} frames"
+            )
+        output = (1 - mask_4d[:out_n]) * original_frames[:out_n] + mask_4d[
+            :out_n
+        ] * refined_frames[:out_n]
+        if passthrough_frames[:out_n].any():
+            output[passthrough_frames[:out_n]] = original_frames[:out_n][
+                passthrough_frames[:out_n]
+            ]
         print(f"[Video Detailer] output {output.shape}")
 
-        output_mask = mask[0] if mask.ndim == 3 else mask
+        output_mask = mask
         return (output, output_mask)
