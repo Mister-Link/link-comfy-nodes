@@ -18,7 +18,10 @@ class VideoDetailer:
         return {
             "required": {
                 "image_frames": ("IMAGE",),
-                "basic_pipe": ("BASIC_PIPE",),
+                "model": ("MODEL",),
+                "vae": ("VAE",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 100.0}),
@@ -388,7 +391,10 @@ class VideoDetailer:
     def execute(
         self,
         image_frames,
-        basic_pipe,
+        model,
+        vae,
+        positive,
+        negative,
         seed,
         steps,
         cfg,
@@ -404,10 +410,9 @@ class VideoDetailer:
         mask_opt=None,
         reference_image=None,
     ):
-        model, _clip, vae, positive, negative = basic_pipe
         if isinstance(model, str) and model == "DUMMY":
             raise ValueError(
-                "Video Detailer requires a real Wan/VACE model in basic_pipe."
+                "Video Detailer requires a real Wan/VACE model."
             )
 
         device = comfy.model_management.get_torch_device()
