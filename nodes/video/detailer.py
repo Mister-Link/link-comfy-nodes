@@ -691,16 +691,26 @@ class VideoDetailer:
                 # Upstream (e.g. WanVacePhantomSimpleV2) already encoded pose/control
                 # frames into the conditioning. Use it as-is; inpainting is driven by
                 # noise_mask alone. No need to build or replace VACE here.
+                #
+                # ref_latent_length MUST match trim_latent from the upstream VACE node
+                # exactly (= the number of zero-mask reference frames it prepended).
+                # Using the fallback-encoded first frame would make combined_latent
+                # larger than the upstream VACE, causing negative reference_frames in
+                # the model's WanVacePhantomSimpleV2 patch.
                 ref_latent_length = (
-                    reference_latent.shape[2] if reference_latent is not None else 0
+                    upstream_reference_latent.shape[2]
+                    if upstream_reference_latent is not None
+                    else 0
                 )
                 if ref_latent_length > 0:
+                    ref_for_concat = upstream_reference_latent[
+                        :, : chunk_latent.shape[1]
+                    ].to(device=device, dtype=torch.float32)
+                    ref_for_concat = self._resize_reference_latent(
+                        ref_for_concat, latent_height, latent_width
+                    )
                     combined_latent = torch.cat(
-                        (
-                            reference_latent[:, : chunk_latent.shape[1]].to(device),
-                            chunk_latent,
-                        ),
-                        dim=2,
+                        (ref_for_concat, chunk_latent), dim=2
                     )
                 else:
                     combined_latent = chunk_latent
