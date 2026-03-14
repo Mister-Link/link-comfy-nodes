@@ -27,14 +27,22 @@ class VideoDetailer:
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 100.0}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "denoise": (
-                    "FLOAT",
+                "start_step": (
+                    "INT",
                     {
-                        "default": 0.35,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": "How strongly each chunk is re-denoised.",
+                        "default": 5,
+                        "min": 0,
+                        "max": 10000,
+                        "tooltip": "Step index to begin sampling from (0 = full noise, steps = no change).",
+                    },
+                ),
+                "end_step": (
+                    "INT",
+                    {
+                        "default": 10,
+                        "min": 1,
+                        "max": 10000,
+                        "tooltip": "Step index to stop sampling at. Usually equals steps.",
                     },
                 ),
                 "chunk_size": (
@@ -432,7 +440,8 @@ class VideoDetailer:
         cfg,
         sampler_name,
         scheduler,
-        denoise,
+        start_step,
+        end_step,
         chunk_size,
         chunk_overlap,
         guide_size,
@@ -485,7 +494,8 @@ class VideoDetailer:
             (frame_count, 1, 1, 1), dtype=torch.float32, device=device
         )
         windows = self._make_temporal_chunks(frame_count, chunk_size, chunk_overlap)
-        start_step = min(steps, int(round(steps * (1.0 - denoise))))
+        start_step = min(start_step, steps)
+        end_step = min(end_step, steps)
 
         # Trim windows to only those that overlap the masked frame range.
         active_per_frame = composite_mask.amax(dim=(-2, -1)) > 1e-6
@@ -583,7 +593,7 @@ class VideoDetailer:
                 negative_chunk,
                 {"samples": combined_latent, "noise_mask": noise_mask},
                 start_step,
-                steps,
+                end_step,
                 "disable",
             )[0]
 
