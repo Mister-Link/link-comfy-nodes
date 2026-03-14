@@ -121,36 +121,12 @@ class VideoDetailer:
     CATEGORY = "link/video"
 
     @classmethod
-    def IS_CHANGED(cls, image_frames, seed, steps, cfg, sampler_name, scheduler,
+    def IS_CHANGED(cls, seed, steps, cfg, sampler_name, scheduler,
                    start_step, end_step, chunk_size, chunk_overlap, guide_size,
-                   max_size, feather, noise_mask_feather,
-                   mask_opt=None, reference_image=None, **kwargs):
-        import hashlib
-
-        def _tensor_sig(t: torch.Tensor) -> bytes:
-            """Hash tensor content via stride-sampled values — avoids OOM on large tensors."""
-            flat = t.cpu().float().flatten()
-            stride = max(1, flat.numel() // 4096)
-            return (
-                str(flat.shape).encode()
-                + str(t.dtype).encode()
-                + flat[::stride].numpy().tobytes()
-            )
-
-        m = hashlib.sha256()
-        m.update(_tensor_sig(image_frames))
-        m.update(str(seed).encode())
-        m.update(str(steps).encode())
-        m.update(str(cfg).encode())
-        m.update(str(sampler_name).encode())
-        m.update(str(scheduler).encode())
-        m.update(str((start_step, end_step, chunk_size, chunk_overlap,
-                      guide_size, max_size, feather, noise_mask_feather)).encode())
-        if mask_opt is not None:
-            m.update(_tensor_sig(mask_opt))
-        if reference_image is not None:
-            m.update(_tensor_sig(reference_image))
-        return m.hexdigest()
+                   max_size, feather, noise_mask_feather, **kwargs):
+        return (seed, steps, cfg, sampler_name, scheduler,
+                start_step, end_step, chunk_size, chunk_overlap,
+                guide_size, max_size, feather, noise_mask_feather)
     DESCRIPTION = (
         "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
         "overlapping temporal chunks, uses the source video as control guidance, "
