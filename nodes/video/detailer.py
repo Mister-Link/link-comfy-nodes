@@ -346,7 +346,9 @@ class VideoDetailer:
         upscaled = ImageUpscaleWithModel().upscale(upscale_model, images)[0]
         upscaled = upscaled.to(device=images.device, dtype=torch.float32)
         if upscaled.shape[1] != target_height or upscaled.shape[2] != target_width:
-            upscaled = VideoDetailer._resize_images(upscaled, target_height, target_width)
+            upscaled = VideoDetailer._resize_images(
+                upscaled, target_height, target_width
+            )
         return upscaled
 
     @staticmethod
@@ -366,7 +368,10 @@ class VideoDetailer:
             for key in ("vace_frames", "vace_mask"):
                 for entry in meta.get(key, []):
                     if isinstance(entry, torch.Tensor) and entry.ndim == 5:
-                        if entry.shape[-2] != latent_height or entry.shape[-1] != latent_width:
+                        if (
+                            entry.shape[-2] != latent_height
+                            or entry.shape[-1] != latent_width
+                        ):
                             needs_resize = True
                             break
                 if needs_resize:
@@ -388,12 +393,16 @@ class VideoDetailer:
                     if isinstance(vf, torch.Tensor) and vf.ndim == 5:
                         b, c, t, h, w = vf.shape
                         if h != latent_height or w != latent_width:
-                            vf = F.interpolate(
-                                vf.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
-                                size=(latent_height, latent_width),
-                                mode="bilinear",
-                                align_corners=False,
-                            ).reshape(b, t, c, latent_height, latent_width).permute(0, 2, 1, 3, 4)
+                            vf = (
+                                F.interpolate(
+                                    vf.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
+                                    size=(latent_height, latent_width),
+                                    mode="bilinear",
+                                    align_corners=False,
+                                )
+                                .reshape(b, t, c, latent_height, latent_width)
+                                .permute(0, 2, 1, 3, 4)
+                            )
                     new_list.append(vf)
                 new_meta["vace_frames"] = new_list
             if "vace_mask" in meta:
@@ -402,11 +411,15 @@ class VideoDetailer:
                     if isinstance(vm, torch.Tensor) and vm.ndim == 5:
                         b, c, t, h, w = vm.shape
                         if h != latent_height or w != latent_width:
-                            vm = F.interpolate(
-                                vm.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
-                                size=(latent_height, latent_width),
-                                mode="nearest",
-                            ).reshape(b, t, c, latent_height, latent_width).permute(0, 2, 1, 3, 4)
+                            vm = (
+                                F.interpolate(
+                                    vm.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
+                                    size=(latent_height, latent_width),
+                                    mode="nearest",
+                                )
+                                .reshape(b, t, c, latent_height, latent_width)
+                                .permute(0, 2, 1, 3, 4)
+                            )
                     new_list.append(vm)
                 new_meta["vace_mask"] = new_list
             result.append((tensor, new_meta))
@@ -481,10 +494,14 @@ class VideoDetailer:
         mask_blocks = mask_blocks.permute(2, 4, 0, 1, 3, 5).reshape(
             stride_h * stride_w, chunk_length, latent_height, latent_width
         )
-        vace_mask = F.adaptive_max_pool3d(
-            mask_blocks.unsqueeze(0),
-            output_size=(latent_length, latent_height, latent_width),
-        ).squeeze(0).unsqueeze(0)
+        vace_mask = (
+            F.adaptive_max_pool3d(
+                mask_blocks.unsqueeze(0),
+                output_size=(latent_length, latent_height, latent_width),
+            )
+            .squeeze(0)
+            .unsqueeze(0)
+        )
 
         return control_latent, vace_mask
 
@@ -624,7 +641,7 @@ class VideoDetailer:
         noise_mask_target = self._gaussian_blur_mask(
             mask_target, noise_mask_feather
         ).clamp_(0.0, 1.0)
-        composite_mask = self._gaussian_blur_mask(mask_target, feather).clamp_(0.0, 1.0)
+        composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
 
         if (
             noise_mask_feather > 0
@@ -636,7 +653,7 @@ class VideoDetailer:
         end_step = min(end_step, steps)
 
         if composite_mask.amax() < 1e-6:
-            return (frames_target.cpu(), mask_target.cpu())
+            return (frames.cpu(), mask.cpu())
 
         all_latent = vae.encode(frames_target[:, :, :, :3]).to(device)
         latent_height = all_latent.shape[-2]
@@ -649,9 +666,9 @@ class VideoDetailer:
                 else 0
             )
             if ref_latent_length > 0:
-                ref_for_concat = upstream_reference_latent[
-                    :, : all_latent.shape[1]
-                ].to(device=device, dtype=torch.float32)
+                ref_for_concat = upstream_reference_latent[:, : all_latent.shape[1]].to(
+                    device=device, dtype=torch.float32
+                )
                 ref_for_concat = self._resize_reference_latent(
                     ref_for_concat, latent_height, latent_width
                 )
@@ -695,8 +712,12 @@ class VideoDetailer:
                 )
 
             combined_latent = all_latent
-            positive_cond = self._set_vace_conditioning(positive, control_latent, vace_mask)
-            negative_cond = self._set_vace_conditioning(negative, control_latent, vace_mask)
+            positive_cond = self._set_vace_conditioning(
+                positive, control_latent, vace_mask
+            )
+            negative_cond = self._set_vace_conditioning(
+                negative, control_latent, vace_mask
+            )
 
         noise_mask = self._build_noise_mask(
             noise_mask_target,
@@ -705,12 +726,24 @@ class VideoDetailer:
             latent_height,
             latent_width,
         )
-        positive_cond = self._slice_conditioning_for_chunk(positive_cond, 0, frame_count)
-        negative_cond = self._slice_conditioning_for_chunk(negative_cond, 0, frame_count)
-        positive_cond = self._resize_phantom_in_conditioning(positive_cond, latent_height, latent_width)
-        negative_cond = self._resize_phantom_in_conditioning(negative_cond, latent_height, latent_width)
-        positive_cond = self._resize_vace_in_conditioning(positive_cond, latent_height, latent_width)
-        negative_cond = self._resize_vace_in_conditioning(negative_cond, latent_height, latent_width)
+        positive_cond = self._slice_conditioning_for_chunk(
+            positive_cond, 0, frame_count
+        )
+        negative_cond = self._slice_conditioning_for_chunk(
+            negative_cond, 0, frame_count
+        )
+        positive_cond = self._resize_phantom_in_conditioning(
+            positive_cond, latent_height, latent_width
+        )
+        negative_cond = self._resize_phantom_in_conditioning(
+            negative_cond, latent_height, latent_width
+        )
+        positive_cond = self._resize_vace_in_conditioning(
+            positive_cond, latent_height, latent_width
+        )
+        negative_cond = self._resize_vace_in_conditioning(
+            negative_cond, latent_height, latent_width
+        )
 
         sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
             model,
@@ -733,10 +766,11 @@ class VideoDetailer:
         if refined.ndim == 5:
             refined = refined.squeeze(0)
         refined = refined.clamp_(0.0, 1.0)
-        if refined.shape[1] != target_height or refined.shape[2] != target_width:
-            refined = self._resize_images(refined, target_height, target_width)
+
+        if refined.shape[1] != height or refined.shape[2] != width:
+            refined = self._resize_images(refined, height, width, mode="bicubic")
 
         composite_mask_4d = composite_mask.unsqueeze(-1)
-        output = (1.0 - composite_mask_4d) * frames_target + composite_mask_4d * refined
+        output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
         self._cleanup()
-        return (output.clamp(0.0, 1.0).cpu(), mask_target.cpu())
+        return (output.clamp(0.0, 1.0).cpu(), mask.cpu())
