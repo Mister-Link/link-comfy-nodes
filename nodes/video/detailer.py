@@ -28,22 +28,14 @@ class VideoDetailer:
                 "cfg": ("FLOAT", {"default": 6.0, "min": 0.0, "max": 100.0}),
                 "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
                 "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "start_step": (
-                    "INT",
+                "denoise": (
+                    "FLOAT",
                     {
-                        "default": 5,
-                        "min": 0,
-                        "max": 10000,
-                        "tooltip": "Step index to begin sampling from (0 = full noise, steps = no change).",
-                    },
-                ),
-                "end_step": (
-                    "INT",
-                    {
-                        "default": 10,
-                        "min": 1,
-                        "max": 10000,
-                        "tooltip": "Step index to stop sampling at. Usually equals steps.",
+                        "default": 0.2,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "How much to re-denoise. 0 = no change, 1 = full re-generation.",
                     },
                 ),
                 "guide_size": (
@@ -437,7 +429,11 @@ class VideoDetailer:
         # detailer's own inpainting context stream.
         return node_helpers.conditioning_set_values(
             conditioning,
-            {"vace_frames": [vace_frames], "vace_mask": [vace_mask]},
+            {
+                "vace_frames": [vace_frames],
+                "vace_mask": [vace_mask],
+                "vace_strength": [1.0],
+            },
             append=True,
         )
 
@@ -604,8 +600,7 @@ class VideoDetailer:
         cfg,
         sampler_name,
         scheduler,
-        start_step,
-        end_step,
+        denoise,
         guide_size,
         max_size,
         feather,
@@ -649,8 +644,8 @@ class VideoDetailer:
         ):
             model = DifferentialDiffusion.execute(model)[0]
 
-        start_step = min(start_step, steps)
-        end_step = min(end_step, steps)
+        start_step = int(steps * (1.0 - denoise))
+        end_step = steps
 
         if composite_mask.amax() < 1e-6:
             return (frames.cpu(), mask.cpu())
