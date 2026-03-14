@@ -342,10 +342,9 @@ class VideoDetailer:
         mask_blocks = mask_blocks.permute(2, 4, 0, 1, 3, 5).reshape(
             stride_h * stride_w, chunk_length, latent_height, latent_width
         )
-        vace_mask = F.interpolate(
+        vace_mask = F.adaptive_max_pool3d(
             mask_blocks.unsqueeze(0),
-            size=(latent_length, latent_height, latent_width),
-            mode="nearest-exact",
+            output_size=(latent_length, latent_height, latent_width),
         ).squeeze(0)
         ref_mask = torch.zeros_like(vace_mask[:, :reference_latent_length])
         vace_mask = torch.cat((ref_mask, vace_mask), dim=1).unsqueeze(0)
@@ -366,10 +365,9 @@ class VideoDetailer:
             mode="bilinear",
             align_corners=False,
         ).squeeze(1)
-        latent_mask = F.interpolate(
+        latent_mask = F.adaptive_max_pool3d(
             latent_mask.unsqueeze(0).unsqueeze(0),
-            size=(latent_frames, latent_height, latent_width),
-            mode="nearest-exact",
+            output_size=(latent_frames, latent_height, latent_width),
         )
         ref_mask = torch.zeros(
             1,
