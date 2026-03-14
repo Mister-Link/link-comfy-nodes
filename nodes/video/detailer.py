@@ -606,29 +606,25 @@ class VideoDetailer:
             raise ValueError("image_frames is empty.")
 
         mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
-        composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
         upstream_reference_latent = self._extract_upstream_reference_latent(positive)
         has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
 
+        target_width, target_height = self._pick_target_size(
+            height, width, guide_size, max_size
+        )
         if upscale_model is not None:
-            target_width, target_height = self._pick_target_size(
-                height, width, guide_size, max_size
-            )
             frames_target = self._upscale_frames_with_model(
                 upscale_model, frames, target_height, target_width
             )
         else:
-            # Without an upscale model, bilinear upscaling degrades the VACE
-            # control signal and the starting latent below input quality. Sample
-            # at original resolution so VACE sees the original sharp frames.
-            target_width, target_height = width, height
-            frames_target = frames
+            frames_target = self._resize_images(frames, target_height, target_width)
         mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
             0.0, 1.0
         )
         noise_mask_target = self._gaussian_blur_mask(
             mask_target, noise_mask_feather
         ).clamp_(0.0, 1.0)
+        composite_mask = self._gaussian_blur_mask(mask_target, feather).clamp_(0.0, 1.0)
 
         if (
             noise_mask_feather > 0
@@ -640,7 +636,7 @@ class VideoDetailer:
         end_step = min(end_step, steps)
 
         if composite_mask.amax() < 1e-6:
-            return (frames.cpu(), mask.cpu())
+            return (frames_target.cpu(), mask_target.cpu())
 
         all_latent = vae.encode(frames_target[:, :, :, :3]).to(device)
         latent_height = all_latent.shape[-2]
@@ -737,10 +733,10 @@ class VideoDetailer:
         if refined.ndim == 5:
             refined = refined.squeeze(0)
         refined = refined.clamp_(0.0, 1.0)
-        if refined.shape[1] != height or refined.shape[2] != width:
-            refined = self._resize_images(refined, height, width)
+        if refined.shape[1] != target_height or refined.shape[2] != target_width:
+            refined = self._resize_images(refined, target_height, target_width)
 
         composite_mask_4d = composite_mask.unsqueeze(-1)
-        output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
+        output = (1.0 - composite_mask_4d) * frames_target + composite_mask_4d * refined
         self._cleanup()
-        return (output.clamp(0.0, 1.0).cpu(), mask.cpu())
+        return (output.clamp(0.0, 1.0).cpu(), mask_target.cpu())
