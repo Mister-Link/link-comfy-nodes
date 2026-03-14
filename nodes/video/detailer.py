@@ -46,26 +46,6 @@ class VideoDetailer:
                         "tooltip": "Step index to stop sampling at. Usually equals steps.",
                     },
                 ),
-                "chunk_size": (
-                    "INT",
-                    {
-                        "default": 25,
-                        "min": 1,
-                        "max": 4096,
-                        "step": 1,
-                        "tooltip": "Frames processed together for temporal coherence.",
-                    },
-                ),
-                "chunk_overlap": (
-                    "INT",
-                    {
-                        "default": 8,
-                        "min": 0,
-                        "max": 1024,
-                        "step": 1,
-                        "tooltip": "Frames shared between neighboring chunks.",
-                    },
-                ),
                 "guide_size": (
                     "INT",
                     {
@@ -469,46 +449,6 @@ class VideoDetailer:
         return new_width, new_height
 
     @staticmethod
-    def _make_temporal_chunks(
-        frame_count: int, chunk_size: int, overlap: int
-    ) -> list[tuple[int, int]]:
-        if frame_count <= 0:
-            return []
-
-        chunk_size = max(1, chunk_size)
-        overlap = max(0, min(overlap, chunk_size - 1))
-
-        windows: list[tuple[int, int]] = []
-        start = 0
-        while start < frame_count:
-            end = min(frame_count, start + chunk_size)
-            windows.append((start, end))
-            if end >= frame_count:
-                break
-            start = end - overlap
-        return windows
-
-    @staticmethod
-    def _chunk_weights(
-        length: int,
-        overlap: int,
-        is_first: bool,
-        is_last: bool,
-        device: torch.device,
-    ) -> torch.Tensor:
-        weights = torch.ones(length, dtype=torch.float32, device=device)
-        usable_overlap = min(overlap, max(0, length - 1))
-        if usable_overlap <= 0:
-            return weights
-
-        fade = torch.linspace(0.0, 1.0, usable_overlap + 2, device=device)[1:-1]
-        if not is_first:
-            weights[:usable_overlap] = fade
-        if not is_last:
-            weights[-usable_overlap:] = torch.flip(fade, dims=[0])
-        return weights
-
-    @staticmethod
     def _build_vace_inputs(
         chunk_frames: torch.Tensor,
         chunk_masks: torch.Tensor,
@@ -649,8 +589,6 @@ class VideoDetailer:
         scheduler,
         start_step,
         end_step,
-        chunk_size,
-        chunk_overlap,
         guide_size,
         max_size,
         feather,
@@ -698,193 +636,111 @@ class VideoDetailer:
         ):
             model = DifferentialDiffusion.execute(model)[0]
 
-        output_sum = torch.zeros_like(frames)
-        weight_sum = torch.zeros(
-            (frame_count, 1, 1, 1), dtype=torch.float32, device=device
-        )
-        windows = self._make_temporal_chunks(frame_count, chunk_size, chunk_overlap)
         start_step = min(start_step, steps)
         end_step = min(end_step, steps)
 
-        # Trim windows to only those that overlap the masked frame range.
-        active_per_frame = composite_mask.amax(dim=(-2, -1)) > 1e-6
-        if not active_per_frame.any():
+        if composite_mask.amax() < 1e-6:
             return (frames.cpu(), mask.cpu())
-        first_active = int(active_per_frame.nonzero(as_tuple=False)[0, 0])
-        last_active = int(active_per_frame.nonzero(as_tuple=False)[-1, 0])
-        windows = [(s, e) for s, e in windows if e > first_active and s <= last_active]
 
-        for index, (start, end) in enumerate(windows):
-            weights = self._chunk_weights(
-                end - start,
-                chunk_overlap,
-                is_first=index == 0,
-                is_last=index == (len(windows) - 1),
-                device=device,
-            ).view(-1, 1, 1, 1)
+        all_latent = vae.encode(frames_target[:, :, :, :3]).to(device)
+        latent_height = all_latent.shape[-2]
+        latent_width = all_latent.shape[-1]
 
-            if composite_mask[start:end].max() < 1e-6:
-                output_sum[start:end] += frames[start:end] * weights
-                weight_sum[start:end] += weights
-                continue
-
-            chunk_frames = frames_target[start:end]
-            chunk_masks = mask_target[start:end]
-            chunk_noise_mask = noise_mask_target[start:end]
-            chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
-
-            latent_height = chunk_latent.shape[-2]
-            latent_width = chunk_latent.shape[-1]
-
-            if has_upstream_vace:
-                # Upstream (e.g. WanVacePhantomSimpleV2) already encoded pose/control
-                # frames into the conditioning. Use it as-is; inpainting is driven by
-                # noise_mask alone.
-                #
-                # ref_latent_length MUST match trim_latent from the upstream VACE node
-                # exactly (= the number of zero-mask reference frames it prepended).
-                ref_latent_length = (
-                    upstream_reference_latent.shape[2]
-                    if upstream_reference_latent is not None
-                    else 0
+        if has_upstream_vace:
+            ref_latent_length = (
+                upstream_reference_latent.shape[2]
+                if upstream_reference_latent is not None
+                else 0
+            )
+            if ref_latent_length > 0:
+                ref_for_concat = upstream_reference_latent[
+                    :, : all_latent.shape[1]
+                ].to(device=device, dtype=torch.float32)
+                ref_for_concat = self._resize_reference_latent(
+                    ref_for_concat, latent_height, latent_width
                 )
-                if ref_latent_length > 0:
-                    ref_for_concat = upstream_reference_latent[
-                        :, : chunk_latent.shape[1]
-                    ].to(device=device, dtype=torch.float32)
-                    ref_for_concat = self._resize_reference_latent(
-                        ref_for_concat, latent_height, latent_width
-                    )
-                    combined_latent = torch.cat(
-                        (ref_for_concat, chunk_latent), dim=2
-                    )
-                else:
-                    combined_latent = chunk_latent
-                positive_chunk = positive
-                negative_chunk = negative
+                combined_latent = torch.cat((ref_for_concat, all_latent), dim=2)
             else:
-                # No upstream VACE — build inpainting VACE from the chunk frames.
-                control_latent, vace_mask = self._build_vace_inputs(
-                    chunk_frames, chunk_masks, vae
-                )
-                control_latent = control_latent.to(device)
-                vace_mask = vace_mask.to(device)
-                ref_latent_length = 0
+                combined_latent = all_latent
+            positive_cond = positive
+            negative_cond = negative
+        else:
+            control_latent, vace_mask = self._build_vace_inputs(
+                frames_target, mask_target, vae
+            )
+            control_latent = control_latent.to(device)
+            vace_mask = vace_mask.to(device)
+            ref_latent_length = 0
 
-                phantom = self._extract_phantom_latent(positive)
-                if phantom is not None:
-                    phantom = phantom.to(device=device, dtype=torch.float32)
-                    if (
-                        phantom.shape[-2] != latent_height
-                        or phantom.shape[-1] != latent_width
-                    ):
-                        b, c, t, h, w = phantom.shape
-                        phantom = F.interpolate(
-                            phantom.view(b * c * t, 1, h, w),
-                            size=(latent_height, latent_width),
-                            mode="bilinear",
-                            align_corners=False,
-                        ).view(b, c, t, latent_height, latent_width)
-                    control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
-                        control_latent=control_latent,
-                        vace_mask=vace_mask,
-                        phantom_latent_frames=phantom.shape[2],
-                        latent_height=latent_height,
-                        latent_width=latent_width,
-                        target_height=target_height,
-                        target_width=target_width,
-                        vae=vae,
-                        device=device,
-                    )
-
-                combined_latent = chunk_latent
-                positive_chunk = self._set_vace_conditioning(
-                    positive, control_latent, vace_mask
-                )
-                negative_chunk = self._set_vace_conditioning(
-                    negative, control_latent, vace_mask
+            phantom = self._extract_phantom_latent(positive)
+            if phantom is not None:
+                phantom = phantom.to(device=device, dtype=torch.float32)
+                if (
+                    phantom.shape[-2] != latent_height
+                    or phantom.shape[-1] != latent_width
+                ):
+                    b, c, t, h, w = phantom.shape
+                    phantom = F.interpolate(
+                        phantom.view(b * c * t, 1, h, w),
+                        size=(latent_height, latent_width),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).view(b, c, t, latent_height, latent_width)
+                control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
+                    control_latent=control_latent,
+                    vace_mask=vace_mask,
+                    phantom_latent_frames=phantom.shape[2],
+                    latent_height=latent_height,
+                    latent_width=latent_width,
+                    target_height=target_height,
+                    target_width=target_width,
+                    vae=vae,
+                    device=device,
                 )
 
-            noise_mask = self._build_noise_mask(
-                chunk_noise_mask,
-                chunk_latent.shape[2],
-                ref_latent_length,
-                latent_height,
-                latent_width,
-            )
-            positive_chunk = self._slice_conditioning_for_chunk(
-                positive_chunk, start, end
-            )
-            negative_chunk = self._slice_conditioning_for_chunk(
-                negative_chunk, start, end
-            )
-            positive_chunk = self._resize_phantom_in_conditioning(
-                positive_chunk, latent_height, latent_width
-            )
-            negative_chunk = self._resize_phantom_in_conditioning(
-                negative_chunk, latent_height, latent_width
-            )
-            positive_chunk = self._resize_vace_in_conditioning(
-                positive_chunk, latent_height, latent_width
-            )
-            negative_chunk = self._resize_vace_in_conditioning(
-                negative_chunk, latent_height, latent_width
-            )
+            combined_latent = all_latent
+            positive_cond = self._set_vace_conditioning(positive, control_latent, vace_mask)
+            negative_cond = self._set_vace_conditioning(negative, control_latent, vace_mask)
 
-            sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
-                model,
-                "enable",
-                seed + start,
-                steps,
-                cfg,
-                sampler_name,
-                scheduler,
-                positive_chunk,
-                negative_chunk,
-                {"samples": combined_latent, "noise_mask": noise_mask},
-                start_step,
-                end_step,
-                "disable",
-            )[0]
+        noise_mask = self._build_noise_mask(
+            noise_mask_target,
+            all_latent.shape[2],
+            ref_latent_length,
+            latent_height,
+            latent_width,
+        )
+        positive_cond = self._slice_conditioning_for_chunk(positive_cond, 0, frame_count)
+        negative_cond = self._slice_conditioning_for_chunk(negative_cond, 0, frame_count)
+        positive_cond = self._resize_phantom_in_conditioning(positive_cond, latent_height, latent_width)
+        negative_cond = self._resize_phantom_in_conditioning(negative_cond, latent_height, latent_width)
+        positive_cond = self._resize_vace_in_conditioning(positive_cond, latent_height, latent_width)
+        negative_cond = self._resize_vace_in_conditioning(negative_cond, latent_height, latent_width)
 
-            refined_latent = sampled["samples"][:, :, ref_latent_length:, :, :]
-            refined_chunk = vae.decode(refined_latent).to(
-                device=device, dtype=torch.float32
-            )
-            # Video VAE decodes to (B, T, H, W, C); drop the batch dim
-            if refined_chunk.ndim == 5:
-                refined_chunk = refined_chunk.squeeze(0)
-            refined_chunk = refined_chunk.clamp_(0.0, 1.0)
-            if refined_chunk.shape[1] != height or refined_chunk.shape[2] != width:
-                refined_chunk = self._resize_images(refined_chunk, height, width)
+        sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
+            model,
+            "enable",
+            seed,
+            steps,
+            cfg,
+            sampler_name,
+            scheduler,
+            positive_cond,
+            negative_cond,
+            {"samples": combined_latent, "noise_mask": noise_mask},
+            start_step,
+            end_step,
+            "disable",
+        )[0]
 
-            chunk_original = frames[start:end]
-            chunk_composite_mask = composite_mask[start:end].unsqueeze(-1)
-            chunk_output = (
-                1.0 - chunk_composite_mask
-            ) * chunk_original + chunk_composite_mask * refined_chunk
+        refined_latent = sampled["samples"][:, :, ref_latent_length:, :, :]
+        refined = vae.decode(refined_latent).to(device=device, dtype=torch.float32)
+        if refined.ndim == 5:
+            refined = refined.squeeze(0)
+        refined = refined.clamp_(0.0, 1.0)
+        if refined.shape[1] != height or refined.shape[2] != width:
+            refined = self._resize_images(refined, height, width)
 
-            output_sum[start:end] += chunk_output * weights
-            weight_sum[start:end] += weights
-
-            del (
-                chunk_frames,
-                chunk_masks,
-                chunk_noise_mask,
-                chunk_latent,
-                combined_latent,
-                noise_mask,
-                sampled,
-                refined_latent,
-                refined_chunk,
-                chunk_output,
-                positive_chunk,
-                negative_chunk,
-            )
-            self._cleanup()
-
-        output = output_sum / weight_sum.clamp_min(1e-6)
-        uncovered = weight_sum.view(frame_count) < 1e-6
-        if uncovered.any():
-            output[uncovered] = frames[uncovered]
+        composite_mask_4d = composite_mask.unsqueeze(-1)
+        output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
+        self._cleanup()
         return (output.clamp(0.0, 1.0).cpu(), mask.cpu())
