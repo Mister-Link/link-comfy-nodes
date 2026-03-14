@@ -221,6 +221,37 @@ class VideoDetailer:
         return mask.clamp_(0.0, 1.0)
 
     @staticmethod
+    def _slice_controlnet_hint(control, start_frame: int, end_frame: int):
+        """Recursively clone a ControlNet and slice its hint to [start_frame, end_frame)."""
+        c = control.copy()
+        if c.cond_hint_original is not None:
+            hint = c.cond_hint_original
+            if hint.shape[0] > 1:
+                c.cond_hint_original = hint[start_frame : min(end_frame, hint.shape[0])]
+        if control.previous_controlnet is not None:
+            c.previous_controlnet = VideoDetailer._slice_controlnet_hint(
+                control.previous_controlnet, start_frame, end_frame
+            )
+        return c
+
+    @staticmethod
+    def _slice_conditioning_for_chunk(
+        conditioning: list, start_frame: int, end_frame: int
+    ) -> list:
+        """Slice ControlNet hints in conditioning to cover only [start_frame, end_frame)."""
+        result = []
+        for tensor, meta in conditioning:
+            if "control" not in meta:
+                result.append((tensor, meta))
+                continue
+            new_meta = dict(meta)
+            new_meta["control"] = VideoDetailer._slice_controlnet_hint(
+                meta["control"], start_frame, end_frame
+            )
+            result.append((tensor, new_meta))
+        return result
+
+    @staticmethod
     def _conditioning_without_vace(conditioning: list) -> list:
         cleaned: list = []
         for tensor, meta in conditioning:
@@ -710,6 +741,12 @@ class VideoDetailer:
             )
             negative_chunk = self._set_vace_conditioning(
                 negative, control_latent, vace_mask
+            )
+            positive_chunk = self._slice_conditioning_for_chunk(
+                positive_chunk, start, end
+            )
+            negative_chunk = self._slice_conditioning_for_chunk(
+                negative_chunk, start, end
             )
             positive_chunk = self._resize_phantom_in_conditioning(
                 positive_chunk, latent_height, latent_width
