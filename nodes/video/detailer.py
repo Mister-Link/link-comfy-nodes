@@ -127,13 +127,6 @@ class VideoDetailer:
     FUNCTION = "execute"
     CATEGORY = "link/video"
 
-    @classmethod
-    def IS_CHANGED(cls, seed, steps, cfg, sampler_name, scheduler,
-                   start_step, end_step, chunk_size, chunk_overlap, guide_size,
-                   max_size, feather, noise_mask_feather, **kwargs):
-        return (seed, steps, cfg, sampler_name, scheduler,
-                start_step, end_step, chunk_size, chunk_overlap,
-                guide_size, max_size, feather, noise_mask_feather)
     DESCRIPTION = (
         "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
         "overlapping temporal chunks using the source video as control guidance."
@@ -679,15 +672,19 @@ class VideoDetailer:
         upstream_reference_latent = self._extract_upstream_reference_latent(positive)
         has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
 
-        target_width, target_height = self._pick_target_size(
-            height, width, guide_size, max_size
-        )
-        if upscale_model is not None and (target_height > height or target_width > width):
+        if upscale_model is not None:
+            target_width, target_height = self._pick_target_size(
+                height, width, guide_size, max_size
+            )
             frames_target = self._upscale_frames_with_model(
                 upscale_model, frames, target_height, target_width
             )
         else:
-            frames_target = self._resize_images(frames, target_height, target_width)
+            # Without an upscale model, bilinear upscaling degrades the VACE
+            # control signal and the starting latent below input quality. Sample
+            # at original resolution so VACE sees the original sharp frames.
+            target_width, target_height = width, height
+            frames_target = frames
         mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
             0.0, 1.0
         )
