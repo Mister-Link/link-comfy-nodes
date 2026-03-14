@@ -108,10 +108,6 @@ class VideoDetailer:
             },
             "optional": {
                 "mask_opt": ("MASK",),
-                "reference_image": (
-                    "IMAGE",
-                    {"tooltip": "Identity/style anchor applied to every chunk."},
-                ),
             },
         }
 
@@ -129,8 +125,7 @@ class VideoDetailer:
                 guide_size, max_size, feather, noise_mask_feather)
     DESCRIPTION = (
         "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
-        "overlapping temporal chunks, uses the source video as control guidance, "
-        "and keeps identity stable with a reference frame."
+        "overlapping temporal chunks using the source video as control guidance."
     )
 
     @staticmethod
@@ -436,19 +431,10 @@ class VideoDetailer:
     def _build_vace_inputs(
         chunk_frames: torch.Tensor,
         chunk_masks: torch.Tensor,
-        reference_latent: torch.Tensor | None,
         vae,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         chunk_length, height, width, _ = chunk_frames.shape
         latent_length = ((chunk_length - 1) // 4) + 1
-
-        if reference_latent is not None:
-            reference_latent = reference_latent.to(
-                device=chunk_frames.device, dtype=torch.float32
-            )
-            reference_latent_length = reference_latent.shape[2]
-        else:
-            reference_latent_length = 0
 
         control_video = chunk_frames - 0.5
         mask = chunk_masks.unsqueeze(-1)
@@ -458,9 +444,6 @@ class VideoDetailer:
         inactive_latent = vae.encode(inactive[:, :, :, :3])
         reactive_latent = vae.encode(reactive[:, :, :, :3])
         control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
-        if reference_latent_length > 0:
-            control_latent = control_latent.to(device=reference_latent.device, dtype=reference_latent.dtype)
-            control_latent = torch.cat((reference_latent, control_latent), dim=2)
 
         latent_height = inactive_latent.shape[-2]
         latent_width = inactive_latent.shape[-1]
@@ -480,13 +463,9 @@ class VideoDetailer:
         vace_mask = F.adaptive_max_pool3d(
             mask_blocks.unsqueeze(0),
             output_size=(latent_length, latent_height, latent_width),
-        ).squeeze(0)
-        if reference_latent_length > 0:
-            ref_mask = torch.zeros_like(vace_mask[:, :reference_latent_length])
-            vace_mask = torch.cat((ref_mask, vace_mask), dim=1)
-        vace_mask = vace_mask.unsqueeze(0)
+        ).squeeze(0).unsqueeze(0)
 
-        return control_latent, vace_mask, reference_latent_length
+        return control_latent, vace_mask
 
     @staticmethod
     def _extend_vace_for_upstream_phantom(
@@ -596,7 +575,6 @@ class VideoDetailer:
         feather,
         noise_mask_feather,
         mask_opt=None,
-        reference_image=None,
     ):
         if isinstance(model, str) and model == "DUMMY":
             raise ValueError("Video Detailer requires a real Wan/VACE model.")
@@ -610,24 +588,20 @@ class VideoDetailer:
         mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
         composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
         upstream_reference_latent = self._extract_upstream_reference_latent(positive)
-        source_reference = None
-        if upstream_reference_latent is None and reference_image is not None:
-            source_reference = reference_image[:1].to(
-                device=device, dtype=torch.float32
-            )
-            source_reference = self._resize_images(source_reference, height, width)
-        elif upstream_reference_latent is None:
-            source_reference = frames[:1]
+        has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
 
         target_width, target_height = self._pick_target_size(
             height, width, guide_size, max_size
         )
+        if has_upstream_vace:
+            # Upstream VACE context was encoded at the original resolution.
+            # Upscaling combined_latent would give more tokens than the VACE
+            # context, causing a shape mismatch inside vace_blocks.
+            target_width = min(target_width, width)
+            target_height = min(target_height, height)
+            target_width = max(16, (target_width // 16) * 16)
+            target_height = max(16, (target_height // 16) * 16)
         frames_target = self._resize_images(frames, target_height, target_width)
-        reference_target = None
-        if source_reference is not None:
-            reference_target = self._resize_images(
-                source_reference, target_height, target_width
-            )
         mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
             0.0, 1.0
         )
@@ -657,8 +631,6 @@ class VideoDetailer:
         last_active = int(active_per_frame.nonzero(as_tuple=False)[-1, 0])
         windows = [(s, e) for s, e in windows if e > first_active and s <= last_active]
 
-        has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
-
         for index, (start, end) in enumerate(windows):
             weights = self._chunk_weights(
                 end - start,
@@ -678,33 +650,16 @@ class VideoDetailer:
             chunk_noise_mask = noise_mask_target[start:end]
             chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
 
-            reference_latent = upstream_reference_latent
-            if reference_latent is None and reference_target is not None:
-                reference_latent = vae.encode(reference_target[:, :, :, :3])
-                reference_latent = torch.cat(
-                    [reference_latent, torch.zeros_like(reference_latent)], dim=1
-                )
-            elif reference_latent is not None:
-                reference_latent = reference_latent.to(
-                    device=device, dtype=torch.float32
-                )
-                reference_latent = self._resize_reference_latent(
-                    reference_latent, chunk_latent.shape[-2], chunk_latent.shape[-1]
-                )
-
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
 
             if has_upstream_vace:
                 # Upstream (e.g. WanVacePhantomSimpleV2) already encoded pose/control
                 # frames into the conditioning. Use it as-is; inpainting is driven by
-                # noise_mask alone. No need to build or replace VACE here.
+                # noise_mask alone.
                 #
                 # ref_latent_length MUST match trim_latent from the upstream VACE node
                 # exactly (= the number of zero-mask reference frames it prepended).
-                # Using the fallback-encoded first frame would make combined_latent
-                # larger than the upstream VACE, causing negative reference_frames in
-                # the model's WanVacePhantomSimpleV2 patch.
                 ref_latent_length = (
                     upstream_reference_latent.shape[2]
                     if upstream_reference_latent is not None
@@ -725,13 +680,13 @@ class VideoDetailer:
                 positive_chunk = positive
                 negative_chunk = negative
             else:
-                # No upstream VACE — build inpainting VACE from the chunk frames and
-                # reference image as a fallback.
-                control_latent, vace_mask, ref_latent_length = self._build_vace_inputs(
-                    chunk_frames, chunk_masks, reference_latent, vae
+                # No upstream VACE — build inpainting VACE from the chunk frames.
+                control_latent, vace_mask = self._build_vace_inputs(
+                    chunk_frames, chunk_masks, vae
                 )
                 control_latent = control_latent.to(device)
                 vace_mask = vace_mask.to(device)
+                ref_latent_length = 0
 
                 phantom = self._extract_phantom_latent(positive)
                 if phantom is not None:
@@ -759,13 +714,7 @@ class VideoDetailer:
                         device=device,
                     )
 
-                combined_latent = torch.cat(
-                    (
-                        control_latent[:, : chunk_latent.shape[1], :ref_latent_length],
-                        chunk_latent,
-                    ),
-                    dim=2,
-                )
+                combined_latent = chunk_latent
                 positive_chunk = self._set_vace_conditioning(
                     positive, control_latent, vace_mask
                 )
