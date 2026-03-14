@@ -468,6 +468,8 @@ class VideoDetailer:
             control_latent, vace_mask, ref_latent_length = self._build_vace_inputs(
                 chunk_frames, chunk_masks, reference_target, vae
             )
+            control_latent = control_latent.to(device)
+            vace_mask = vace_mask.to(device)
             chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
