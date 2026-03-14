@@ -456,6 +456,19 @@ class VideoDetailer:
         start_step = min(steps, int(round(steps * (1.0 - denoise))))
 
         for index, (start, end) in enumerate(windows):
+            weights = self._chunk_weights(
+                end - start,
+                chunk_overlap,
+                is_first=index == 0,
+                is_last=index == (len(windows) - 1),
+                device=device,
+            ).view(-1, 1, 1, 1)
+
+            if composite_mask[start:end].max() < 1e-6:
+                output_sum[start:end] += frames[start:end] * weights
+                weight_sum[start:end] += weights
+                continue
+
             chunk_frames = frames_target[start:end]
             chunk_masks = mask_target[start:end]
             chunk_noise_mask = noise_mask_target[start:end]
@@ -523,13 +536,6 @@ class VideoDetailer:
                 1.0 - chunk_composite_mask
             ) * chunk_original + chunk_composite_mask * refined_chunk
 
-            weights = self._chunk_weights(
-                end - start,
-                chunk_overlap,
-                is_first=index == 0,
-                is_last=index == (len(windows) - 1),
-                device=device,
-            ).view(-1, 1, 1, 1)
             output_sum[start:end] += chunk_output * weights
             weight_sum[start:end] += weights
 
@@ -546,7 +552,6 @@ class VideoDetailer:
                 refined_latent,
                 refined_chunk,
                 chunk_output,
-                weights,
                 positive_chunk,
                 negative_chunk,
             )
