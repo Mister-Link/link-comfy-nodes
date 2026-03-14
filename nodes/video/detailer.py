@@ -224,6 +224,14 @@ class VideoDetailer:
         return cleaned
 
     @staticmethod
+    def _extract_phantom_latent(conditioning: list) -> torch.Tensor | None:
+        for _, meta in conditioning:
+            t = meta.get("time_dim_concat")
+            if isinstance(t, torch.Tensor):
+                return t
+        return None
+
+    @staticmethod
     def _set_vace_conditioning(
         conditioning: list,
         vace_frames: torch.Tensor,
@@ -455,6 +463,14 @@ class VideoDetailer:
         windows = self._make_temporal_chunks(frame_count, chunk_size, chunk_overlap)
         start_step = min(steps, int(round(steps * (1.0 - denoise))))
 
+        # Trim windows to only those that overlap the masked frame range.
+        active_per_frame = composite_mask.amax(dim=(-2, -1)) > 1e-6
+        if not active_per_frame.any():
+            return (frames.cpu(), mask.cpu())
+        first_active = int(active_per_frame.nonzero(as_tuple=False)[0, 0])
+        last_active = int(active_per_frame.nonzero(as_tuple=False)[-1, 0])
+        windows = [(s, e) for s, e in windows if e > first_active and s <= last_active]
+
         for index, (start, end) in enumerate(windows):
             weights = self._chunk_weights(
                 end - start,
@@ -481,6 +497,28 @@ class VideoDetailer:
             chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
+
+            # Extend vace_context with phantom frame slots from upstream conditioning
+            # so patches.py reference_frames = total - control - phantom >= 0.
+            phantom = self._extract_phantom_latent(positive)
+            if phantom is not None:
+                phantom = phantom.to(device=device, dtype=torch.float32)
+                if phantom.shape[-2] != latent_height or phantom.shape[-1] != latent_width:
+                    b, c, t, h, w = phantom.shape
+                    phantom = F.interpolate(
+                        phantom.view(b * c * t, 1, h, w),
+                        size=(latent_height, latent_width),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).view(b, c, t, latent_height, latent_width)
+                phantom_vace = torch.cat([phantom, torch.zeros_like(phantom)], dim=1)
+                control_latent = torch.cat([control_latent, phantom_vace], dim=2)
+                phantom_mask = torch.zeros(
+                    vace_mask.shape[0], vace_mask.shape[1], phantom.shape[2],
+                    latent_height, latent_width, device=device, dtype=vace_mask.dtype,
+                )
+                vace_mask = torch.cat([vace_mask, phantom_mask], dim=2)
+
             combined_latent = torch.cat(
                 (
                     control_latent[:, : chunk_latent.shape[1], :ref_latent_length],
@@ -558,4 +596,7 @@ class VideoDetailer:
             self._cleanup()
 
         output = output_sum / weight_sum.clamp_min(1e-6)
+        uncovered = weight_sum.view(frame_count) < 1e-6
+        if uncovered.any():
+            output[uncovered] = frames[uncovered]
         return (output.clamp(0.0, 1.0).cpu(), mask.cpu())
