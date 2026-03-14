@@ -395,6 +395,59 @@ class VideoDetailer:
         return control_latent, vace_mask, reference_latent_length
 
     @staticmethod
+    def _extend_vace_for_upstream_phantom(
+        control_latent: torch.Tensor,
+        vace_mask: torch.Tensor,
+        phantom_latent_frames: int,
+        latent_height: int,
+        latent_width: int,
+        target_height: int,
+        target_width: int,
+        vae,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if phantom_latent_frames <= 0:
+            return control_latent, vace_mask
+
+        # Match WanVaceAdvanced's native phantom handling: the phantom embed itself
+        # stays in time_dim_concat, while vace_context only gets neutral control slots.
+        phantom_frame_count = phantom_latent_frames * 4
+        inactive_pixels = torch.full(
+            (phantom_frame_count, target_height, target_width, 3),
+            0.5,
+            dtype=torch.float32,
+            device=device,
+        )
+        reactive_pixels = torch.zeros_like(inactive_pixels)
+
+        inactive_latent = vae.encode(inactive_pixels[:, :, :, :3]).to(device)
+        reactive_latent = vae.encode(reactive_pixels[:, :, :, :3]).to(device)
+        phantom_control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
+
+        if (
+            phantom_control_latent.shape[-2] != latent_height
+            or phantom_control_latent.shape[-1] != latent_width
+        ):
+            raise ValueError(
+                "Upstream phantom padding produced mismatched latent dimensions."
+            )
+
+        phantom_mask = torch.ones(
+            vace_mask.shape[0],
+            vace_mask.shape[1],
+            phantom_latent_frames,
+            latent_height,
+            latent_width,
+            device=device,
+            dtype=vace_mask.dtype,
+        )
+
+        return (
+            torch.cat([control_latent, phantom_control_latent], dim=2),
+            torch.cat([vace_mask, phantom_mask], dim=2),
+        )
+
+    @staticmethod
     def _build_noise_mask(
         mask_chunk: torch.Tensor,
         latent_frames: int,
@@ -452,9 +505,7 @@ class VideoDetailer:
         reference_image=None,
     ):
         if isinstance(model, str) and model == "DUMMY":
-            raise ValueError(
-                "Video Detailer requires a real Wan/VACE model."
-            )
+            raise ValueError("Video Detailer requires a real Wan/VACE model.")
 
         device = comfy.model_management.get_torch_device()
         frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
@@ -532,12 +583,13 @@ class VideoDetailer:
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
 
-            # Extend vace_context with phantom frame slots from upstream conditioning
-            # so patches.py reference_frames = total - control - phantom >= 0.
             phantom = self._extract_phantom_latent(positive)
             if phantom is not None:
                 phantom = phantom.to(device=device, dtype=torch.float32)
-                if phantom.shape[-2] != latent_height or phantom.shape[-1] != latent_width:
+                if (
+                    phantom.shape[-2] != latent_height
+                    or phantom.shape[-1] != latent_width
+                ):
                     b, c, t, h, w = phantom.shape
                     phantom = F.interpolate(
                         phantom.view(b * c * t, 1, h, w),
@@ -545,13 +597,17 @@ class VideoDetailer:
                         mode="bilinear",
                         align_corners=False,
                     ).view(b, c, t, latent_height, latent_width)
-                phantom_vace = torch.cat([phantom, torch.zeros_like(phantom)], dim=1)
-                control_latent = torch.cat([control_latent, phantom_vace], dim=2)
-                phantom_mask = torch.zeros(
-                    vace_mask.shape[0], vace_mask.shape[1], phantom.shape[2],
-                    latent_height, latent_width, device=device, dtype=vace_mask.dtype,
+                control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
+                    control_latent=control_latent,
+                    vace_mask=vace_mask,
+                    phantom_latent_frames=phantom.shape[2],
+                    latent_height=latent_height,
+                    latent_width=latent_width,
+                    target_height=target_height,
+                    target_width=target_width,
+                    vae=vae,
+                    device=device,
                 )
-                vace_mask = torch.cat([vace_mask, phantom_mask], dim=2)
 
             combined_latent = torch.cat(
                 (
