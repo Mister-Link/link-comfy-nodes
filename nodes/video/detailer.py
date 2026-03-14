@@ -425,6 +425,7 @@ class VideoDetailer:
         reactive_latent = vae.encode(reactive[:, :, :, :3])
         control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
         if reference_latent_length > 0:
+            control_latent = control_latent.to(device=reference_latent.device, dtype=reference_latent.dtype)
             control_latent = torch.cat((reference_latent, control_latent), dim=2)
 
         latent_height = inactive_latent.shape[-2]
