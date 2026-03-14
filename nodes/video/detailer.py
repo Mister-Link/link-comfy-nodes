@@ -10,6 +10,7 @@ import comfy.samplers
 import node_helpers
 import nodes
 from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
+from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
 
 
 class VideoDetailer:
@@ -108,6 +109,16 @@ class VideoDetailer:
             },
             "optional": {
                 "mask_opt": ("MASK",),
+                "upscale_model": (
+                    "UPSCALE_MODEL",
+                    {
+                        "tooltip": (
+                            "Optional upscale model (e.g. ESRGAN) applied to frames "
+                            "before encoding. Produces higher-quality detail than "
+                            "bilinear upscaling. Frames are downscaled back after sampling."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -352,6 +363,83 @@ class VideoDetailer:
         ).view(b, c, t, latent_height, latent_width)
 
     @staticmethod
+    def _upscale_frames_with_model(
+        upscale_model,
+        images: torch.Tensor,
+        target_height: int,
+        target_width: int,
+    ) -> torch.Tensor:
+        """Upscale frames through an upscale model then resize to exact target dims."""
+        upscaled = ImageUpscaleWithModel().upscale(upscale_model, images)[0]
+        upscaled = upscaled.to(device=images.device, dtype=torch.float32)
+        if upscaled.shape[1] != target_height or upscaled.shape[2] != target_width:
+            upscaled = VideoDetailer._resize_images(upscaled, target_height, target_width)
+        return upscaled
+
+    @staticmethod
+    def _resize_vace_in_conditioning(
+        conditioning: list,
+        latent_height: int,
+        latent_width: int,
+    ) -> list:
+        """Resize vace_frames and vace_mask latents to match a new spatial resolution.
+
+        Safe to call when latents are already the right size — returns conditioning
+        unchanged in that case. Must be called per-chunk so latent_height/latent_width
+        match what the sampler will receive.
+        """
+        needs_resize = False
+        for _, meta in conditioning:
+            for key in ("vace_frames", "vace_mask"):
+                for entry in meta.get(key, []):
+                    if isinstance(entry, torch.Tensor) and entry.ndim == 5:
+                        if entry.shape[-2] != latent_height or entry.shape[-1] != latent_width:
+                            needs_resize = True
+                            break
+                if needs_resize:
+                    break
+            if needs_resize:
+                break
+        if not needs_resize:
+            return conditioning
+
+        result = []
+        for tensor, meta in conditioning:
+            if "vace_frames" not in meta and "vace_mask" not in meta:
+                result.append((tensor, meta))
+                continue
+            new_meta = dict(meta)
+            if "vace_frames" in meta:
+                new_list = []
+                for vf in meta["vace_frames"]:
+                    if isinstance(vf, torch.Tensor) and vf.ndim == 5:
+                        b, c, t, h, w = vf.shape
+                        if h != latent_height or w != latent_width:
+                            vf = F.interpolate(
+                                vf.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
+                                size=(latent_height, latent_width),
+                                mode="bilinear",
+                                align_corners=False,
+                            ).reshape(b, t, c, latent_height, latent_width).permute(0, 2, 1, 3, 4)
+                    new_list.append(vf)
+                new_meta["vace_frames"] = new_list
+            if "vace_mask" in meta:
+                new_list = []
+                for vm in meta["vace_mask"]:
+                    if isinstance(vm, torch.Tensor) and vm.ndim == 5:
+                        b, c, t, h, w = vm.shape
+                        if h != latent_height or w != latent_width:
+                            vm = F.interpolate(
+                                vm.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w),
+                                size=(latent_height, latent_width),
+                                mode="nearest",
+                            ).reshape(b, t, c, latent_height, latent_width).permute(0, 2, 1, 3, 4)
+                    new_list.append(vm)
+                new_meta["vace_mask"] = new_list
+            result.append((tensor, new_meta))
+        return result
+
+    @staticmethod
     def _set_vace_conditioning(
         conditioning: list,
         vace_frames: torch.Tensor,
@@ -575,6 +663,7 @@ class VideoDetailer:
         feather,
         noise_mask_feather,
         mask_opt=None,
+        upscale_model=None,
     ):
         if isinstance(model, str) and model == "DUMMY":
             raise ValueError("Video Detailer requires a real Wan/VACE model.")
@@ -593,15 +682,12 @@ class VideoDetailer:
         target_width, target_height = self._pick_target_size(
             height, width, guide_size, max_size
         )
-        if has_upstream_vace:
-            # Upstream VACE context was encoded at the original resolution.
-            # Upscaling combined_latent would give more tokens than the VACE
-            # context, causing a shape mismatch inside vace_blocks.
-            target_width = min(target_width, width)
-            target_height = min(target_height, height)
-            target_width = max(16, (target_width // 16) * 16)
-            target_height = max(16, (target_height // 16) * 16)
-        frames_target = self._resize_images(frames, target_height, target_width)
+        if upscale_model is not None and (target_height > height or target_width > width):
+            frames_target = self._upscale_frames_with_model(
+                upscale_model, frames, target_height, target_width
+            )
+        else:
+            frames_target = self._resize_images(frames, target_height, target_width)
         mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
             0.0, 1.0
         )
@@ -739,6 +825,12 @@ class VideoDetailer:
                 positive_chunk, latent_height, latent_width
             )
             negative_chunk = self._resize_phantom_in_conditioning(
+                negative_chunk, latent_height, latent_width
+            )
+            positive_chunk = self._resize_vace_in_conditioning(
+                positive_chunk, latent_height, latent_width
+            )
+            negative_chunk = self._resize_vace_in_conditioning(
                 negative_chunk, latent_height, latent_width
             )
 
