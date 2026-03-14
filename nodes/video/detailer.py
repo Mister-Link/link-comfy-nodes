@@ -232,6 +232,30 @@ class VideoDetailer:
         return None
 
     @staticmethod
+    def _resize_phantom_in_conditioning(
+        conditioning: list, latent_height: int, latent_width: int
+    ) -> list:
+        result = []
+        for tensor, meta in conditioning:
+            t = meta.get("time_dim_concat")
+            if isinstance(t, torch.Tensor) and (
+                t.shape[-2] != latent_height or t.shape[-1] != latent_width
+            ):
+                b, c, frames, h, w = t.shape
+                resized = F.interpolate(
+                    t.view(b * c * frames, 1, h, w),
+                    size=(latent_height, latent_width),
+                    mode="bilinear",
+                    align_corners=False,
+                ).view(b, c, frames, latent_height, latent_width)
+                new_meta = dict(meta)
+                new_meta["time_dim_concat"] = resized
+                result.append((tensor, new_meta))
+            else:
+                result.append((tensor, meta))
+        return result
+
+    @staticmethod
     def _set_vace_conditioning(
         conditioning: list,
         vace_frames: torch.Tensor,
@@ -539,6 +563,12 @@ class VideoDetailer:
             )
             negative_chunk = self._set_vace_conditioning(
                 negative, control_latent, vace_mask
+            )
+            positive_chunk = self._resize_phantom_in_conditioning(
+                positive_chunk, latent_height, latent_width
+            )
+            negative_chunk = self._resize_phantom_in_conditioning(
+                negative_chunk, latent_height, latent_width
             )
 
             sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
