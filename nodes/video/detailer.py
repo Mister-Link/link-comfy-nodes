@@ -240,6 +240,40 @@ class VideoDetailer:
         return None
 
     @staticmethod
+    def _extract_upstream_reference_latent(
+        conditioning: list,
+    ) -> torch.Tensor | None:
+        for _, meta in conditioning:
+            vace_frames = meta.get("vace_frames")
+            vace_masks = meta.get("vace_mask")
+            if not isinstance(vace_frames, list) or not isinstance(vace_masks, list):
+                continue
+            if not vace_frames or not vace_masks:
+                continue
+
+            frames = vace_frames[0]
+            mask = vace_masks[0]
+            if not isinstance(frames, torch.Tensor) or not isinstance(
+                mask, torch.Tensor
+            ):
+                continue
+            if frames.ndim != 5 or mask.ndim != 5:
+                continue
+
+            total_frames = min(frames.shape[2], mask.shape[2])
+            reference_frames = 0
+            for index in range(total_frames):
+                if mask[:, :, index].abs().max() < 1e-6:
+                    reference_frames += 1
+                else:
+                    break
+
+            if reference_frames > 0:
+                return frames[:, :, :reference_frames].clone()
+
+        return None
+
+    @staticmethod
     def _resize_phantom_in_conditioning(
         conditioning: list, latent_height: int, latent_width: int
     ) -> list:
@@ -262,6 +296,26 @@ class VideoDetailer:
             else:
                 result.append((tensor, meta))
         return result
+
+    @staticmethod
+    def _resize_reference_latent(
+        reference_latent: torch.Tensor,
+        latent_height: int,
+        latent_width: int,
+    ) -> torch.Tensor:
+        if (
+            reference_latent.shape[-2] == latent_height
+            and reference_latent.shape[-1] == latent_width
+        ):
+            return reference_latent
+
+        b, c, t, h, w = reference_latent.shape
+        return F.interpolate(
+            reference_latent.view(b * c * t, 1, h, w),
+            size=(latent_height, latent_width),
+            mode="bilinear",
+            align_corners=False,
+        ).view(b, c, t, latent_height, latent_width)
 
     @staticmethod
     def _set_vace_conditioning(
@@ -348,17 +402,19 @@ class VideoDetailer:
     def _build_vace_inputs(
         chunk_frames: torch.Tensor,
         chunk_masks: torch.Tensor,
-        reference_frame: torch.Tensor,
+        reference_latent: torch.Tensor | None,
         vae,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         chunk_length, height, width, _ = chunk_frames.shape
         latent_length = ((chunk_length - 1) // 4) + 1
 
-        reference_latent = vae.encode(reference_frame[:, :, :, :3])
-        reference_latent = torch.cat(
-            [reference_latent, torch.zeros_like(reference_latent)], dim=1
-        )
-        reference_latent_length = reference_latent.shape[2]
+        if reference_latent is not None:
+            reference_latent = reference_latent.to(
+                device=chunk_frames.device, dtype=torch.float32
+            )
+            reference_latent_length = reference_latent.shape[2]
+        else:
+            reference_latent_length = 0
 
         control_video = chunk_frames - 0.5
         mask = chunk_masks.unsqueeze(-1)
@@ -368,7 +424,8 @@ class VideoDetailer:
         inactive_latent = vae.encode(inactive[:, :, :, :3])
         reactive_latent = vae.encode(reactive[:, :, :, :3])
         control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
-        control_latent = torch.cat((reference_latent, control_latent), dim=2)
+        if reference_latent_length > 0:
+            control_latent = torch.cat((reference_latent, control_latent), dim=2)
 
         latent_height = inactive_latent.shape[-2]
         latent_width = inactive_latent.shape[-1]
@@ -389,8 +446,10 @@ class VideoDetailer:
             mask_blocks.unsqueeze(0),
             output_size=(latent_length, latent_height, latent_width),
         ).squeeze(0)
-        ref_mask = torch.zeros_like(vace_mask[:, :reference_latent_length])
-        vace_mask = torch.cat((ref_mask, vace_mask), dim=1).unsqueeze(0)
+        if reference_latent_length > 0:
+            ref_mask = torch.zeros_like(vace_mask[:, :reference_latent_length])
+            vace_mask = torch.cat((ref_mask, vace_mask), dim=1)
+        vace_mask = vace_mask.unsqueeze(0)
 
         return control_latent, vace_mask, reference_latent_length
 
@@ -515,18 +574,25 @@ class VideoDetailer:
 
         mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
         composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
-        source_reference = (
-            reference_image[:1] if reference_image is not None else frames[:1]
-        ).to(device=device, dtype=torch.float32)
-        source_reference = self._resize_images(source_reference, height, width)
+        upstream_reference_latent = self._extract_upstream_reference_latent(positive)
+        source_reference = None
+        if upstream_reference_latent is None and reference_image is not None:
+            source_reference = reference_image[:1].to(
+                device=device, dtype=torch.float32
+            )
+            source_reference = self._resize_images(source_reference, height, width)
+        elif upstream_reference_latent is None:
+            source_reference = frames[:1]
 
         target_width, target_height = self._pick_target_size(
             height, width, guide_size, max_size
         )
         frames_target = self._resize_images(frames, target_height, target_width)
-        reference_target = self._resize_images(
-            source_reference, target_height, target_width
-        )
+        reference_target = None
+        if source_reference is not None:
+            reference_target = self._resize_images(
+                source_reference, target_height, target_width
+            )
         mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
             0.0, 1.0
         )
@@ -573,13 +639,27 @@ class VideoDetailer:
             chunk_frames = frames_target[start:end]
             chunk_masks = mask_target[start:end]
             chunk_noise_mask = noise_mask_target[start:end]
+            chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
+
+            reference_latent = upstream_reference_latent
+            if reference_latent is None and reference_target is not None:
+                reference_latent = vae.encode(reference_target[:, :, :, :3])
+                reference_latent = torch.cat(
+                    [reference_latent, torch.zeros_like(reference_latent)], dim=1
+                )
+            elif reference_latent is not None:
+                reference_latent = reference_latent.to(
+                    device=device, dtype=torch.float32
+                )
+                reference_latent = self._resize_reference_latent(
+                    reference_latent, chunk_latent.shape[-2], chunk_latent.shape[-1]
+                )
 
             control_latent, vace_mask, ref_latent_length = self._build_vace_inputs(
-                chunk_frames, chunk_masks, reference_target, vae
+                chunk_frames, chunk_masks, reference_latent, vae
             )
             control_latent = control_latent.to(device)
             vace_mask = vace_mask.to(device)
-            chunk_latent = vae.encode(chunk_frames[:, :, :, :3]).to(device)
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
 
