@@ -126,9 +126,19 @@ class VideoDetailer:
                    max_size, feather, noise_mask_feather,
                    mask_opt=None, reference_image=None, **kwargs):
         import hashlib
+
+        def _tensor_sig(t: torch.Tensor) -> bytes:
+            """Hash tensor content via stride-sampled values — avoids OOM on large tensors."""
+            flat = t.cpu().float().flatten()
+            stride = max(1, flat.numel() // 4096)
+            return (
+                str(flat.shape).encode()
+                + str(t.dtype).encode()
+                + flat[::stride].numpy().tobytes()
+            )
+
         m = hashlib.sha256()
-        # Hash the pixel content of the frames (not object identity).
-        m.update(image_frames.cpu().numpy().tobytes())
+        m.update(_tensor_sig(image_frames))
         m.update(str(seed).encode())
         m.update(str(steps).encode())
         m.update(str(cfg).encode())
@@ -137,9 +147,9 @@ class VideoDetailer:
         m.update(str((start_step, end_step, chunk_size, chunk_overlap,
                       guide_size, max_size, feather, noise_mask_feather)).encode())
         if mask_opt is not None:
-            m.update(mask_opt.cpu().numpy().tobytes())
+            m.update(_tensor_sig(mask_opt))
         if reference_image is not None:
-            m.update(reference_image.cpu().numpy().tobytes())
+            m.update(_tensor_sig(reference_image))
         return m.hexdigest()
     DESCRIPTION = (
         "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
