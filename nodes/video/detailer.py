@@ -119,6 +119,28 @@ class VideoDetailer:
     RETURN_NAMES = ("image", "mask")
     FUNCTION = "execute"
     CATEGORY = "link/video"
+
+    @classmethod
+    def IS_CHANGED(cls, image_frames, seed, steps, cfg, sampler_name, scheduler,
+                   start_step, end_step, chunk_size, chunk_overlap, guide_size,
+                   max_size, feather, noise_mask_feather,
+                   mask_opt=None, reference_image=None, **kwargs):
+        import hashlib
+        m = hashlib.sha256()
+        # Hash the pixel content of the frames (not object identity).
+        m.update(image_frames.cpu().numpy().tobytes())
+        m.update(str(seed).encode())
+        m.update(str(steps).encode())
+        m.update(str(cfg).encode())
+        m.update(str(sampler_name).encode())
+        m.update(str(scheduler).encode())
+        m.update(str((start_step, end_step, chunk_size, chunk_overlap,
+                      guide_size, max_size, feather, noise_mask_feather)).encode())
+        if mask_opt is not None:
+            m.update(mask_opt.cpu().numpy().tobytes())
+        if reference_image is not None:
+            m.update(reference_image.cpu().numpy().tobytes())
+        return m.hexdigest()
     DESCRIPTION = (
         "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
         "overlapping temporal chunks, uses the source video as control guidance, "
