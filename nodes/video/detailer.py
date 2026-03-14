@@ -34,16 +34,6 @@ class VideoDetailer:
                         "tooltip": "How strongly each chunk is re-denoised.",
                     },
                 ),
-                "control_strength": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 2.0,
-                        "step": 0.01,
-                        "tooltip": "Wan VACE guidance strength for the source video.",
-                    },
-                ),
                 "chunk_size": (
                     "INT",
                     {
@@ -235,18 +225,21 @@ class VideoDetailer:
         conditioning: list,
         vace_frames: torch.Tensor,
         vace_mask: torch.Tensor,
-        strength: float,
     ) -> list:
+        # Preserve vace_strength already embedded in the conditioning
+        strength = None
+        for _, meta in conditioning:
+            if "vace_strength" in meta:
+                strength = meta["vace_strength"]
+                break
         base = VideoDetailer._conditioning_without_vace(conditioning)
-        return node_helpers.conditioning_set_values(
-            base,
-            {
-                "vace_frames": [vace_frames],
-                "vace_mask": [vace_mask],
-                "vace_strength": [strength],
-            },
-            append=True,
-        )
+        values: dict = {
+            "vace_frames": [vace_frames],
+            "vace_mask": [vace_mask],
+        }
+        if strength is not None:
+            values["vace_strength"] = strength
+        return node_helpers.conditioning_set_values(base, values, append=True)
 
     @staticmethod
     def _pick_target_size(
@@ -404,7 +397,6 @@ class VideoDetailer:
         sampler_name,
         scheduler,
         denoise,
-        control_strength,
         chunk_size,
         chunk_overlap,
         guide_size,
@@ -489,10 +481,10 @@ class VideoDetailer:
             )
 
             positive_chunk = self._set_vace_conditioning(
-                positive, control_latent, vace_mask, control_strength
+                positive, control_latent, vace_mask
             )
             negative_chunk = self._set_vace_conditioning(
-                negative, control_latent, vace_mask, control_strength
+                negative, control_latent, vace_mask
             )
 
             sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
@@ -515,6 +507,9 @@ class VideoDetailer:
             refined_chunk = vae.decode(refined_latent).to(
                 device=device, dtype=torch.float32
             )
+            # Video VAE decodes to (B, T, H, W, C); drop the batch dim
+            if refined_chunk.ndim == 5:
+                refined_chunk = refined_chunk.squeeze(0)
             refined_chunk = refined_chunk.clamp_(0.0, 1.0)
             if refined_chunk.shape[1] != height or refined_chunk.shape[2] != width:
                 refined_chunk = self._resize_images(refined_chunk, height, width)
