@@ -649,6 +649,8 @@ class VideoDetailer:
         last_active = int(active_per_frame.nonzero(as_tuple=False)[-1, 0])
         windows = [(s, e) for s, e in windows if e > first_active and s <= last_active]
 
+        has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
+
         for index, (start, end) in enumerate(windows):
             weights = self._chunk_weights(
                 end - start,
@@ -682,60 +684,83 @@ class VideoDetailer:
                     reference_latent, chunk_latent.shape[-2], chunk_latent.shape[-1]
                 )
 
-            control_latent, vace_mask, ref_latent_length = self._build_vace_inputs(
-                chunk_frames, chunk_masks, reference_latent, vae
-            )
-            control_latent = control_latent.to(device)
-            vace_mask = vace_mask.to(device)
             latent_height = chunk_latent.shape[-2]
             latent_width = chunk_latent.shape[-1]
 
-            phantom = self._extract_phantom_latent(positive)
-            if phantom is not None:
-                phantom = phantom.to(device=device, dtype=torch.float32)
-                if (
-                    phantom.shape[-2] != latent_height
-                    or phantom.shape[-1] != latent_width
-                ):
-                    b, c, t, h, w = phantom.shape
-                    phantom = F.interpolate(
-                        phantom.view(b * c * t, 1, h, w),
-                        size=(latent_height, latent_width),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).view(b, c, t, latent_height, latent_width)
-                control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
-                    control_latent=control_latent,
-                    vace_mask=vace_mask,
-                    phantom_latent_frames=phantom.shape[2],
-                    latent_height=latent_height,
-                    latent_width=latent_width,
-                    target_height=target_height,
-                    target_width=target_width,
-                    vae=vae,
-                    device=device,
+            if has_upstream_vace:
+                # Upstream (e.g. WanVacePhantomSimpleV2) already encoded pose/control
+                # frames into the conditioning. Use it as-is; inpainting is driven by
+                # noise_mask alone. No need to build or replace VACE here.
+                ref_latent_length = (
+                    reference_latent.shape[2] if reference_latent is not None else 0
+                )
+                if ref_latent_length > 0:
+                    combined_latent = torch.cat(
+                        (
+                            reference_latent[:, : chunk_latent.shape[1]].to(device),
+                            chunk_latent,
+                        ),
+                        dim=2,
+                    )
+                else:
+                    combined_latent = chunk_latent
+                positive_chunk = positive
+                negative_chunk = negative
+            else:
+                # No upstream VACE — build inpainting VACE from the chunk frames and
+                # reference image as a fallback.
+                control_latent, vace_mask, ref_latent_length = self._build_vace_inputs(
+                    chunk_frames, chunk_masks, reference_latent, vae
+                )
+                control_latent = control_latent.to(device)
+                vace_mask = vace_mask.to(device)
+
+                phantom = self._extract_phantom_latent(positive)
+                if phantom is not None:
+                    phantom = phantom.to(device=device, dtype=torch.float32)
+                    if (
+                        phantom.shape[-2] != latent_height
+                        or phantom.shape[-1] != latent_width
+                    ):
+                        b, c, t, h, w = phantom.shape
+                        phantom = F.interpolate(
+                            phantom.view(b * c * t, 1, h, w),
+                            size=(latent_height, latent_width),
+                            mode="bilinear",
+                            align_corners=False,
+                        ).view(b, c, t, latent_height, latent_width)
+                    control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
+                        control_latent=control_latent,
+                        vace_mask=vace_mask,
+                        phantom_latent_frames=phantom.shape[2],
+                        latent_height=latent_height,
+                        latent_width=latent_width,
+                        target_height=target_height,
+                        target_width=target_width,
+                        vae=vae,
+                        device=device,
+                    )
+
+                combined_latent = torch.cat(
+                    (
+                        control_latent[:, : chunk_latent.shape[1], :ref_latent_length],
+                        chunk_latent,
+                    ),
+                    dim=2,
+                )
+                positive_chunk = self._set_vace_conditioning(
+                    positive, control_latent, vace_mask
+                )
+                negative_chunk = self._set_vace_conditioning(
+                    negative, control_latent, vace_mask
                 )
 
-            combined_latent = torch.cat(
-                (
-                    control_latent[:, : chunk_latent.shape[1], :ref_latent_length],
-                    chunk_latent,
-                ),
-                dim=2,
-            )
             noise_mask = self._build_noise_mask(
                 chunk_noise_mask,
                 chunk_latent.shape[2],
                 ref_latent_length,
                 latent_height,
                 latent_width,
-            )
-
-            positive_chunk = self._set_vace_conditioning(
-                positive, control_latent, vace_mask
-            )
-            negative_chunk = self._set_vace_conditioning(
-                negative, control_latent, vace_mask
             )
             positive_chunk = self._slice_conditioning_for_chunk(
                 positive_chunk, start, end
@@ -790,8 +815,6 @@ class VideoDetailer:
                 chunk_frames,
                 chunk_masks,
                 chunk_noise_mask,
-                control_latent,
-                vace_mask,
                 chunk_latent,
                 combined_latent,
                 noise_mask,
