@@ -607,6 +607,7 @@ class VideoDetailer:
         noise_mask_feather,
         mask_opt=None,
         upscale_model=None,
+        reference_image=None,
     ):
         if isinstance(model, str) and model == "DUMMY":
             raise ValueError("Video Detailer requires a real Wan/VACE model.")
