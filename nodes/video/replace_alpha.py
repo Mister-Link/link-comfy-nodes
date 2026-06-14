@@ -62,12 +62,18 @@ class ReplaceAlpha:
 
         result_alpha = alpha_tensor.clone()
         result_frames = frames.clone()
+        has_alpha_channel = result_frames.shape[-1] == 4
+        rgb_frames = result_frames[..., :3]
         replace_regions = mask_tensor > 0.5
         if replace_regions.any():
             alpha_3d = alpha_tensor.unsqueeze(-1)
-            blended = result_frames * alpha_3d + color_rgb * (1.0 - alpha_3d)
+            blended_rgb = rgb_frames * alpha_3d + color_rgb * (1.0 - alpha_3d)
             replace_regions_3d = replace_regions.unsqueeze(-1)
-            result_frames = torch.where(replace_regions_3d, blended, result_frames)
+            new_rgb = torch.where(replace_regions_3d, blended_rgb, rgb_frames)
+            if has_alpha_channel:
+                result_frames = torch.cat([new_rgb, result_frames[..., 3:]], dim=-1)
+            else:
+                result_frames = new_rgb
             result_alpha = torch.where(
                 replace_regions, torch.ones_like(result_alpha), result_alpha
             )
