@@ -597,6 +597,7 @@ class VideoDetailer:
         noise_mask_feather,
         mask_opt=None,
         upscale_model=None,
+        **_kwargs,
     ):
         device = comfy.model_management.get_torch_device()
         frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
