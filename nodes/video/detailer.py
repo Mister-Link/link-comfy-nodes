@@ -603,16 +603,26 @@ class VideoDetailer:
         frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
         frame_count, height, width, _ = frames.shape
         if frame_count == 0:
-            raise ValueError("image_frames is empty.")
+            raise ValueError("Video Detailer: image_frames is empty.")
+
+        if frame_count < 5:
+            raise ValueError(
+                f"Video Detailer: image_frames has {frame_count} frame(s); minimum is 5."
+            )
 
         if isinstance(model.model, comfy.model_base.WAN21) and (frame_count - 1) % 4 != 0:
             rem = (frame_count - 1) % 4
             lower = frame_count - rem
             upper = lower + 4
             raise ValueError(
-                f"Video Detailer received {frame_count} frames, which is not valid for "
-                f"this WAN model (frame count must satisfy 1 + n×4). "
-                f"Nearest valid counts: {lower} or {upper}."
+                f"Video Detailer: {frame_count} frames is not valid for this WAN model "
+                f"(must satisfy 1 + n×4). Nearest valid counts: {lower} or {upper}."
+            )
+
+        if mask_opt is not None and mask_opt.ndim == 3 and mask_opt.shape[0] not in (1, frame_count):
+            raise ValueError(
+                f"Video Detailer: mask has {mask_opt.shape[0]} frames but image_frames "
+                f"has {frame_count}. Mask must have 1 frame or match exactly."
             )
 
         mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
