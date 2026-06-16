@@ -236,7 +236,7 @@ export class WorkflowUI {
       
       if (dlInfo.status === "downloading") {
         const progress = parseFloat(dlInfo.progress) || 0;
-        btnText.textContent = `${progress.toFixed(1)}%`;
+        btnText.textContent = dlInfo.phase ? dlInfo.phase : `${progress.toFixed(1)}%`;
         if (progressFill) progressFill.style.width = `${progress}%`;
         btn.style.background = "#555";
         btn.disabled = true;
@@ -345,7 +345,7 @@ export class WorkflowUI {
 
     const { downloads } = this.queueState;
     const toDownload = this.currentModels.filter(m => {
-      if (!m.available || !m.url || m.exists) return false;
+      if (!m.available || (!m.url && !m.shards) || m.exists) return false;
       const isAlreadyQueued = Object.values(downloads || {}).some(
         d => d.filename === m.name && (d.status === "downloading" || d.status === "pending")
       );
@@ -363,7 +363,8 @@ export class WorkflowUI {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            url: model.url,
+            url: model.url || null,
+            shards: model.shards || null,
             path: model.type,
             filename: model.name,
             max_speed_mbps: maxDownloadSpeed || null
@@ -535,7 +536,7 @@ export class WorkflowUI {
     if (model.available) {
       btnText.textContent = "Download";
       btn.onclick = async () => {
-        if (!model.url) {
+        if (!model.url && !model.shards) {
           alert("No URL defined for this model.");
           return;
         }
@@ -550,7 +551,8 @@ export class WorkflowUI {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              url: model.url,
+              url: model.url || null,
+              shards: model.shards || null,
               path: model.type,
               filename: model.name,
               max_speed_mbps: maxDownloadSpeed || null

@@ -3,7 +3,9 @@ import json
 import os
 import pty
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +22,10 @@ active_downloads = {}
 download_queue = []
 current_download = None
 event_loop = None
+
+
+def models_base_dir():
+    return os.path.join(os.path.expanduser("~"), "models")
 
 
 class BandwidthThrottler:
@@ -155,15 +161,14 @@ class WorkflowAnalyzer:
 
             if matched:
                 model_path = matched.get("path") or matched.get("type", "unknown")
-                full_path = os.path.join(
-                    home, "ComfyUI", "models", model_path, model_name
-                )
+                full_path = os.path.join(models_base_dir(), model_path, model_name)
                 results.append(
                     {
                         "name": model_name,
                         "type": model_path,
                         "size": matched.get("size", "unknown"),
                         "url": matched.get("url", ""),
+                        "shards": matched.get("shards", None),
                         "available": True,
                         "exists": os.path.exists(full_path),
                     }
@@ -393,12 +398,96 @@ class Downloader:
         current_download = None
 
 
+class ShardedDownloader:
+    """Downloads sharded models one shard at a time, then merges into a single safetensors file."""
+
+    @staticmethod
+    def run_sharded_download(shards, target_dir, out_filename, download_id, max_speed_mbps, loop):
+        global current_download
+        tmp_dir = tempfile.mkdtemp(prefix="comfy_shards_")
+
+        try:
+            from safetensors import safe_open
+            from safetensors.torch import save_file
+
+            n = len(shards)
+            tensors = {}
+
+            for i, shard_url in enumerate(shards):
+                if download_id not in active_downloads:
+                    return
+
+                shard_name = shard_url.split("?")[0].split("/")[-1]
+                active_downloads[download_id]["phase"] = f"Shard {i + 1}/{n}"
+                active_downloads[download_id]["progress"] = f"{int(i / n * 85)}"
+
+                direct_url = Downloader.convert_hf_url(shard_url)
+                cmd = [
+                    "aria2c",
+                    "--enable-color=false",
+                    "--summary-interval=1",
+                    "--console-log-level=warn",
+                    "--show-console-readout=true",
+                    "--allow-overwrite=true",
+                    "--auto-file-renaming=false",
+                    "--continue=true",
+                    "--file-allocation=none",
+                    "-x", "16", "-s", "16", "-k", "1M",
+                    "-d", tmp_dir,
+                    "-o", shard_name,
+                    direct_url,
+                ]
+                if max_speed_mbps:
+                    cmd.extend(["--max-download-limit", f"{max_speed_mbps}M"])
+
+                process = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+                )
+                for line in iter(process.stdout.readline, ""):
+                    if download_id not in active_downloads:
+                        process.terminate()
+                        return
+                    pct = Downloader._parse_aria2c_progress(line)
+                    if pct is not None:
+                        overall = (i / n * 85) + (pct / n * 0.85)
+                        active_downloads[download_id]["progress"] = f"{overall:.0f}"
+
+                process.wait()
+
+                shard_path = os.path.join(tmp_dir, shard_name)
+                active_downloads[download_id]["phase"] = f"Loading shard {i + 1}/{n}"
+                with safe_open(shard_path, framework="pt", device="cpu") as f:
+                    for key in f.keys():
+                        tensors[key] = f.get_tensor(key)
+                os.remove(shard_path)
+
+            active_downloads[download_id]["phase"] = "Merging..."
+            active_downloads[download_id]["progress"] = "90"
+
+            os.makedirs(target_dir, exist_ok=True)
+            save_file(tensors, os.path.join(target_dir, out_filename))
+
+            active_downloads[download_id]["status"] = "completed"
+            active_downloads[download_id]["progress"] = "100"
+            active_downloads[download_id]["phase"] = "Done"
+
+        except Exception as e:
+            if download_id in active_downloads:
+                active_downloads[download_id]["status"] = "failed"
+                active_downloads[download_id]["error"] = str(e)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            current_download = None
+            if loop:
+                loop.call_soon_threadsafe(DownloadQueue.process_next_sync, loop)
+
+
 class DownloadQueue:
     """Manages download queue to prevent parallel downloads."""
 
     @staticmethod
     async def add_to_queue(
-        url, target_dir, download_id, filename, max_speed_mbps, loop
+        url, target_dir, download_id, filename, max_speed_mbps, loop, shards=None
     ):
         """Add download to queue."""
         global current_download
@@ -406,6 +495,7 @@ class DownloadQueue:
         download_queue.append(
             {
                 "url": url,
+                "shards": shards,
                 "target_dir": target_dir,
                 "download_id": download_id,
                 "filename": filename,
@@ -432,16 +522,28 @@ class DownloadQueue:
         active_downloads[dl["download_id"]]["status"] = "downloading"
         active_downloads[dl["download_id"]]["progress"] = "0"
 
-        loop.run_in_executor(
-            None,
-            Downloader.run_download,
-            dl["url"],
-            dl["target_dir"],
-            dl["download_id"],
-            dl["filename"],
-            dl["max_speed_mbps"],
-            loop,
-        )
+        if dl.get("shards"):
+            loop.run_in_executor(
+                None,
+                ShardedDownloader.run_sharded_download,
+                dl["shards"],
+                dl["target_dir"],
+                dl["filename"],
+                dl["download_id"],
+                dl["max_speed_mbps"],
+                loop,
+            )
+        else:
+            loop.run_in_executor(
+                None,
+                Downloader.run_download,
+                dl["url"],
+                dl["target_dir"],
+                dl["download_id"],
+                dl["filename"],
+                dl["max_speed_mbps"],
+                loop,
+            )
 
 
 # Routes
@@ -512,28 +614,33 @@ async def download_model(request):
     try:
         body = await request.json()
         url = body.get("url")
+        shards = body.get("shards")
         path = body.get("path")
         filename = body.get("filename")
         max_speed_mbps = body.get("max_speed_mbps")
 
-        if not url or not path:
+        if not url and not shards:
             return web.json_response(
-                {"ok": False, "error": "URL and path required"}, status=400
+                {"ok": False, "error": "URL or shards required"}, status=400
+            )
+        if not path:
+            return web.json_response(
+                {"ok": False, "error": "path required"}, status=400
             )
 
         download_id = f"{filename}_{id(asyncio.current_task())}"
-        home = os.path.expanduser("~")
-        target_dir = os.path.join(home, "ComfyUI", "models", path)
+        target_dir = os.path.join(models_base_dir(), path)
 
         active_downloads[download_id] = {
             "status": "pending",
             "progress": "0",
             "filename": filename,
+            "phase": "",
         }
 
         loop = asyncio.get_event_loop()
         await DownloadQueue.add_to_queue(
-            url, target_dir, download_id, filename, max_speed_mbps, loop
+            url, target_dir, download_id, filename, max_speed_mbps, loop, shards=shards
         )
 
         return web.json_response({"ok": True, "download_id": download_id})
@@ -558,6 +665,7 @@ async def download_status(request):
             "status": dl["status"],
             "progress": dl.get("progress", "0"),
             "filename": dl.get("filename", ""),
+            "phase": dl.get("phase", ""),
             "error": dl.get("error"),
         }
     )
@@ -567,7 +675,6 @@ async def download_status(request):
 async def queue_status(request):
     """Return current queue state and all active downloads."""
     downloads = {}
-    home = os.path.expanduser("~")
 
     for download_id, info in active_downloads.items():
         filename = info.get("filename", "")
@@ -590,7 +697,7 @@ async def queue_status(request):
                 )
                 if matched:
                     model_path = matched.get("path") or matched.get("type", "unknown")
-                    target_dir = os.path.join(home, "ComfyUI", "models", model_path)
+                    target_dir = os.path.join(models_base_dir(), model_path)
                     final_path = os.path.join(target_dir, filename)
 
                     if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
@@ -603,6 +710,7 @@ async def queue_status(request):
             "status": status,
             "progress": info.get("progress", "0"),
             "filename": filename,
+            "phase": info.get("phase", ""),
         }
 
     return web.json_response(
