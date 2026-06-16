@@ -100,8 +100,8 @@ class VideoDetailer:
     CATEGORY = "link/video"
 
     DESCRIPTION = (
-        "Wan/VACE video detailer for blurry or noisy frame batches. Refines in "
-        "overlapping temporal chunks using the source video as control guidance."
+        "Wan/VACE video detailer for blurry or noisy frame batches. Uses the source "
+        "video as VACE control guidance during inpainting-style refinement."
     )
 
     @staticmethod
@@ -229,17 +229,6 @@ class VideoDetailer:
             )
             result.append((tensor, new_meta))
         return result
-
-    @staticmethod
-    def _conditioning_without_vace(conditioning: list) -> list:
-        cleaned: list = []
-        for tensor, meta in conditioning:
-            new_meta = dict(meta)
-            new_meta.pop("vace_frames", None)
-            new_meta.pop("vace_mask", None)
-            new_meta.pop("vace_strength", None)
-            cleaned.append((tensor, new_meta))
-        return cleaned
 
     @staticmethod
     def _extract_phantom_latent(conditioning: list) -> torch.Tensor | None:
@@ -607,11 +596,7 @@ class VideoDetailer:
         noise_mask_feather,
         mask_opt=None,
         upscale_model=None,
-        reference_image=None,
     ):
-        if isinstance(model, str) and model == "DUMMY":
-            raise ValueError("Video Detailer requires a real Wan/VACE model.")
-
         device = comfy.model_management.get_torch_device()
         frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
         frame_count, height, width, _ = frames.shape
@@ -683,18 +668,6 @@ class VideoDetailer:
 
             phantom = self._extract_phantom_latent(positive)
             if phantom is not None:
-                phantom = phantom.to(device=device, dtype=torch.float32)
-                if (
-                    phantom.shape[-2] != latent_height
-                    or phantom.shape[-1] != latent_width
-                ):
-                    b, c, t, h, w = phantom.shape
-                    phantom = F.interpolate(
-                        phantom.view(b * c * t, 1, h, w),
-                        size=(latent_height, latent_width),
-                        mode="bilinear",
-                        align_corners=False,
-                    ).view(b, c, t, latent_height, latent_width)
                 control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
                     control_latent=control_latent,
                     vace_mask=vace_mask,
