@@ -5,6 +5,7 @@ import gc
 import torch
 import torch.nn.functional as F
 
+import comfy.model_base
 import comfy.model_management
 import comfy.samplers
 import node_helpers
@@ -602,6 +603,16 @@ class VideoDetailer:
         frame_count, height, width, _ = frames.shape
         if frame_count == 0:
             raise ValueError("image_frames is empty.")
+
+        if isinstance(model.model, comfy.model_base.WAN21) and (frame_count - 1) % 4 != 0:
+            rem = (frame_count - 1) % 4
+            lower = frame_count - rem
+            upper = lower + 4
+            raise ValueError(
+                f"Video Detailer received {frame_count} frames, which is not valid for "
+                f"this WAN model (frame count must satisfy 1 + n×4). "
+                f"Nearest valid counts: {lower} or {upper}."
+            )
 
         mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
         upstream_reference_latent = self._extract_upstream_reference_latent(positive)
