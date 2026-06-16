@@ -23,7 +23,7 @@ from .preview import (
 )
 from .sampling import KSamplerAdvancedDual
 from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
-from .text import AdvancedStringConcat, PreviewAsMarkdown
+from .text import AdvancedStringConcat, PreviewAsMarkdown, StringToListNode
 from .video import (
     AverageMaskRegionSizeNode,
     BatchMaskCropper,
@@ -67,6 +67,7 @@ __all__ = [
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
     "PreviewAsMarkdown",
+    "StringToListNode",
     "PreviewImageAlpha",
     "PreviewWebmNode",
     "ReplaceAlpha",

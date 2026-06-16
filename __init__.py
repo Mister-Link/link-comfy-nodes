@@ -4,6 +4,7 @@ from pathlib import Path
 from .nodes import (
     AddImageToBatchNode,
     AdvancedStringConcat,
+    StringToListNode,
     AutoCropperNode,
     AverageMaskRegionSizeNode,
     BatchImageSave,
@@ -74,6 +75,7 @@ NODE_CLASS_MAPPINGS = {
     "ConvertToPixelArt": ConvertToPixelArt,
     "BatchImageSave": BatchImageSave,
     "Concat": AdvancedStringConcat,
+    "String to List": StringToListNode,
     "Save Folder as ZIP": SaveFolderAsZip,
     "PreviewAsMarkdown": PreviewAsMarkdown,
     "Auto Cropper": AutoCropperNode,
@@ -117,6 +119,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ConvertToPixelArt": "Convert to Pixel Art",
     "BatchImageSave": "Batch Image Save",
     "Concat": "Concat",
+    "String to List": "String to List",
     "Save Folder as ZIP": "Save Folder as ZIP",
     "PreviewAsMarkdown": "Preview as Markdown",
     "Auto Cropper": "Auto Cropper",
