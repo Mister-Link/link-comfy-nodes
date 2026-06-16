@@ -228,17 +228,15 @@ class Downloader:
 
     @staticmethod
     def run_download(url, target_dir, download_id, filename, max_speed_mbps, loop):
-        """Execute download with hfdl for HuggingFace, aria2c otherwise."""
+        """Execute download using aria2c (converts HuggingFace blob URLs to resolve URLs)."""
         global current_download
         os.makedirs(target_dir, exist_ok=True)
 
         try:
-            if Downloader._is_huggingface_url(url):
-                Downloader._download_with_hfdl(url, target_dir, download_id, filename)
-            else:
-                Downloader._download_with_aria2c(
-                    url, target_dir, download_id, filename, max_speed_mbps
-                )
+            direct_url = Downloader.convert_hf_url(url)
+            Downloader._download_with_aria2c(
+                direct_url, target_dir, download_id, filename, max_speed_mbps
+            )
         except Exception as e:
             if download_id in active_downloads:
                 active_downloads[download_id]["status"] = "failed"
