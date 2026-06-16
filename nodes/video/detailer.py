@@ -766,6 +766,15 @@ class VideoDetailer:
         if refined.shape[1] != height or refined.shape[2] != width:
             refined = self._resize_images(refined, height, width, mode="bicubic")
 
+        # WAN's temporal VAE may decode fewer frames than were encoded (e.g. 55→53).
+        # Pad with original frames so the output frame count always matches the input.
+        n_refined = refined.shape[0]
+        n_frames = frames.shape[0]
+        if n_refined < n_frames:
+            refined = torch.cat([refined, frames[n_refined:]], dim=0)
+        elif n_refined > n_frames:
+            refined = refined[:n_frames]
+
         composite_mask_4d = composite_mask.unsqueeze(-1)
         output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
         self._cleanup()
