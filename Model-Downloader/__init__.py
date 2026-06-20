@@ -122,7 +122,9 @@ class WorkflowAnalyzer:
 
         def traverse(obj):
             if isinstance(obj, dict):
-                for v in obj.values():
+                for k, v in obj.items():
+                    if k == "properties":
+                        continue
                     traverse(v)
             elif isinstance(obj, list):
                 for v in obj:
