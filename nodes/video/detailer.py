@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import comfy.model_base
 import comfy.model_management
 import comfy.samplers
-import node_helpers
 import nodes
 from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
 from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
@@ -19,7 +18,6 @@ class VideoDetailer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image_frames": ("IMAGE",),
                 "model": ("MODEL",),
                 "vae": ("VAE",),
                 "positive": ("CONDITIONING",),
@@ -32,31 +30,15 @@ class VideoDetailer:
                 "denoise": (
                     "FLOAT",
                     {
-                        "default": 0.2,
+                        "default": 1.0,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.01,
-                        "tooltip": "How much to re-denoise. 0 = no change, 1 = full re-generation.",
-                    },
-                ),
-                "guide_size": (
-                    "INT",
-                    {
-                        "default": 1024,
-                        "min": 64,
-                        "max": 8192,
-                        "step": 8,
-                        "tooltip": "Target minimum side while detailing.",
-                    },
-                ),
-                "max_size": (
-                    "INT",
-                    {
-                        "default": 1536,
-                        "min": 64,
-                        "max": 8192,
-                        "step": 8,
-                        "tooltip": "Caps the target detailing resolution.",
+                        "tooltip": (
+                            "How much to regenerate masked frames. "
+                            "1.0 = full regeneration from scratch (use for missing/wrong frames). "
+                            "Lower values refine without changing structure."
+                        ),
                     },
                 ),
                 "feather": (
@@ -66,43 +48,89 @@ class VideoDetailer:
                         "min": 0,
                         "max": 200,
                         "step": 1,
-                        "tooltip": "Softens the final composite mask on output frames.",
+                        "tooltip": "Softens the composite mask when blending output back onto original frames.",
                     },
                 ),
                 "noise_mask_feather": (
                     "INT",
                     {
-                        "default": 20,
+                        "default": 0,
                         "min": 0,
                         "max": 200,
                         "step": 1,
-                        "tooltip": "Softens the latent inpaint mask before sampling.",
+                        "tooltip": (
+                            "Softens the noise mask spatially within each frame. "
+                            "0 = hard boundary (recommended for whole-frame temporal gaps). "
+                            "Higher values blend the noise level at mask edges (useful for spatial inpainting)."
+                        ),
                     },
                 ),
             },
             "optional": {
+                "image_frames": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "Video frames to encode and inpaint. When provided, frames are "
+                            "upscaled to guide_size before encoding for higher quality, then "
+                            "composited back at original resolution. Takes precedence over latent."
+                        ),
+                    },
+                ),
+                "latent": (
+                    "LATENT",
+                    {
+                        "tooltip": (
+                            "Pre-encoded latent to use directly, skipping the VAE encode step. "
+                            "Useful when chaining from WanVaceToVideo or another latent-output node. "
+                            "Ignored if image_frames is also connected."
+                        ),
+                    },
+                ),
                 "mask_opt": ("MASK",),
+                "guide_size": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 64,
+                        "max": 8192,
+                        "step": 8,
+                        "tooltip": "Target minimum side for encoding when image_frames is used. Ignored for latent input.",
+                    },
+                ),
+                "max_size": (
+                    "INT",
+                    {
+                        "default": 1536,
+                        "min": 64,
+                        "max": 8192,
+                        "step": 8,
+                        "tooltip": "Caps the encoding resolution when image_frames is used. Ignored for latent input.",
+                    },
+                ),
                 "upscale_model": (
                     "UPSCALE_MODEL",
                     {
                         "tooltip": (
-                            "Optional upscale model (e.g. ESRGAN) applied to frames "
-                            "before encoding. Produces higher-quality detail than "
-                            "bilinear upscaling. Frames are downscaled back after sampling."
+                            "Optional upscale model (e.g. ESRGAN) applied before encoding when "
+                            "image_frames is used. Frames are scaled back to original resolution after decoding."
                         ),
                     },
                 ),
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("image", "mask")
+    RETURN_TYPES = ("IMAGE", "MASK", "LATENT")
+    RETURN_NAMES = ("image", "mask", "latent")
     FUNCTION = "execute"
     CATEGORY = "link/video"
 
     DESCRIPTION = (
-        "Wan/VACE video detailer for blurry or noisy frame batches. Uses the source "
-        "video as VACE control guidance during inpainting-style refinement."
+        "Temporal gap filler for WAN T2V models. Encodes all frames together, "
+        "adds noise only to masked frames, and lets the model's temporal attention "
+        "predict what the masked frames should look like given the surrounding context. "
+        "Accepts either raw image_frames (with optional upscaling) or a pre-encoded "
+        "latent directly. Any conditioning set up upstream passes through unchanged."
     )
 
     @staticmethod
@@ -193,7 +221,7 @@ class VideoDetailer:
                 mask = mask.expand(frame_count, -1, -1).contiguous()
             elif mask.shape[0] != frame_count:
                 raise ValueError(
-                    "mask_opt frame count must be 1 or match image_frames."
+                    f"mask_opt has {mask.shape[0]} frames but video has {frame_count}."
                 )
         else:
             raise ValueError("mask_opt must be 2D or 3D.")
@@ -232,64 +260,35 @@ class VideoDetailer:
         return result
 
     @staticmethod
-    def _extract_phantom_latent(conditioning: list) -> torch.Tensor | None:
-        for _, meta in conditioning:
-            t = meta.get("time_dim_concat")
-            if isinstance(t, torch.Tensor):
-                return t
-        return None
-
-    @staticmethod
-    def _extract_upstream_reference_latent(
-        conditioning: list,
-    ) -> torch.Tensor | None:
-        for _, meta in conditioning:
-            vace_frames = meta.get("vace_frames")
-            vace_masks = meta.get("vace_mask")
-            if not isinstance(vace_frames, list) or not isinstance(vace_masks, list):
-                continue
-            if not vace_frames or not vace_masks:
-                continue
-
-            frames = vace_frames[0]
-            mask = vace_masks[0]
-            if not isinstance(frames, torch.Tensor) or not isinstance(
-                mask, torch.Tensor
-            ):
-                continue
-            if frames.ndim != 5 or mask.ndim != 5:
-                continue
-
-            total_frames = min(frames.shape[2], mask.shape[2])
-            reference_frames = 0
-            for index in range(total_frames):
-                if mask[:, :, index].abs().max() < 1e-6:
-                    reference_frames += 1
-                else:
-                    break
-
-            if reference_frames > 0:
-                return frames[:, :, :reference_frames].clone()
-
-        return None
-
-    @staticmethod
     def _resize_phantom_in_conditioning(
-        conditioning: list, latent_height: int, latent_width: int
+        conditioning: list, latent_height: int, latent_width: int, drop: bool = False
     ) -> list:
+        """Resize time_dim_concat spatial dims to match the latent being sampled.
+
+        Pass drop=True for models whose patch_embedding in_dim > 16: they use
+        channel-wise phantom concatenation via concat_cond, making time_dim_concat
+        (which is always 16-channel) incompatible — the temporal cat would try to
+        join a 36-channel x with a 16-channel phantom and crash.
+        """
         result = []
         for tensor, meta in conditioning:
             t = meta.get("time_dim_concat")
-            if isinstance(t, torch.Tensor) and (
-                t.shape[-2] != latent_height or t.shape[-1] != latent_width
-            ):
+            if not isinstance(t, torch.Tensor):
+                result.append((tensor, meta))
+                continue
+            if drop:
+                new_meta = dict(meta)
+                del new_meta["time_dim_concat"]
+                result.append((tensor, new_meta))
+                continue
+            if t.shape[-2] != latent_height or t.shape[-1] != latent_width:
                 b, c, frames, h, w = t.shape
                 resized = F.interpolate(
-                    t.view(b * c * frames, 1, h, w),
+                    t.contiguous().reshape(b * c * frames, 1, h, w),
                     size=(latent_height, latent_width),
                     mode="bilinear",
                     align_corners=False,
-                ).view(b, c, frames, latent_height, latent_width)
+                ).reshape(b, c, frames, latent_height, latent_width)
                 new_meta = dict(meta)
                 new_meta["time_dim_concat"] = resized
                 result.append((tensor, new_meta))
@@ -298,53 +297,12 @@ class VideoDetailer:
         return result
 
     @staticmethod
-    def _resize_reference_latent(
-        reference_latent: torch.Tensor,
-        latent_height: int,
-        latent_width: int,
-    ) -> torch.Tensor:
-        if (
-            reference_latent.shape[-2] == latent_height
-            and reference_latent.shape[-1] == latent_width
-        ):
-            return reference_latent
-
-        b, c, t, h, w = reference_latent.shape
-        return F.interpolate(
-            reference_latent.view(b * c * t, 1, h, w),
-            size=(latent_height, latent_width),
-            mode="bilinear",
-            align_corners=False,
-        ).view(b, c, t, latent_height, latent_width)
-
-    @staticmethod
-    def _upscale_frames_with_model(
-        upscale_model,
-        images: torch.Tensor,
-        target_height: int,
-        target_width: int,
-    ) -> torch.Tensor:
-        """Upscale frames through an upscale model then resize to exact target dims."""
-        upscaled = ImageUpscaleWithModel().upscale(upscale_model, images)[0]
-        upscaled = upscaled.to(device=images.device, dtype=torch.float32)
-        if upscaled.shape[1] != target_height or upscaled.shape[2] != target_width:
-            upscaled = VideoDetailer._resize_images(
-                upscaled, target_height, target_width
-            )
-        return upscaled
-
-    @staticmethod
     def _resize_vace_in_conditioning(
         conditioning: list,
         latent_height: int,
         latent_width: int,
     ) -> list:
-        """Resize vace_frames and vace_mask latents to match a new spatial resolution.
-
-        Safe to call when latents are already the right size — returns conditioning
-        unchanged in that case. Must be called per-chunk so latent_height/latent_width
-        match what the sampler will receive.
-        """
+        """Resize vace_frames and vace_mask latents to match a new spatial resolution."""
         needs_resize = False
         for _, meta in conditioning:
             for key in ("vace_frames", "vace_mask"):
@@ -408,26 +366,6 @@ class VideoDetailer:
         return result
 
     @staticmethod
-    def _set_vace_conditioning(
-        conditioning: list,
-        vace_frames: torch.Tensor,
-        vace_mask: torch.Tensor,
-    ) -> list:
-        # Append detailer's inpainting VACE stream to the existing conditioning.
-        # append=True concatenates the lists, so any upstream VACE (e.g. pose
-        # control from WanVaceToVideoControlStrength) is preserved alongside the
-        # detailer's own inpainting context stream.
-        return node_helpers.conditioning_set_values(
-            conditioning,
-            {
-                "vace_frames": [vace_frames],
-                "vace_mask": [vace_mask],
-                "vace_strength": [1.0],
-            },
-            append=True,
-        )
-
-    @staticmethod
     def _pick_target_size(
         height: int, width: int, guide_size: int, max_size: int
     ) -> tuple[int, int]:
@@ -448,130 +386,89 @@ class VideoDetailer:
         return new_width, new_height
 
     @staticmethod
-    def _build_vace_inputs(
-        chunk_frames: torch.Tensor,
-        chunk_masks: torch.Tensor,
-        vae,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        chunk_length, height, width, _ = chunk_frames.shape
-        latent_length = ((chunk_length - 1) // 4) + 1
-
-        control_video = chunk_frames - 0.5
-        mask = chunk_masks.unsqueeze(-1)
-        inactive = (control_video * (1.0 - mask)) + 0.5
-        reactive = (control_video * mask) + 0.5
-
-        inactive_latent = vae.encode(inactive[:, :, :, :3])
-        reactive_latent = vae.encode(reactive[:, :, :, :3])
-        control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
-
-        latent_height = inactive_latent.shape[-2]
-        latent_width = inactive_latent.shape[-1]
-        stride_h = height // latent_height
-        stride_w = width // latent_width
-        mask_blocks = mask.reshape(
-            chunk_length,
-            latent_height,
-            stride_h,
-            latent_width,
-            stride_w,
-            1,
-        )
-        mask_blocks = mask_blocks.permute(2, 4, 0, 1, 3, 5).reshape(
-            stride_h * stride_w, chunk_length, latent_height, latent_width
-        )
-        vace_mask = (
-            F.adaptive_max_pool3d(
-                mask_blocks.unsqueeze(0),
-                output_size=(latent_length, latent_height, latent_width),
-            )
-            .squeeze(0)
-            .unsqueeze(0)
-        )
-
-        return control_latent, vace_mask
-
-    @staticmethod
-    def _extend_vace_for_upstream_phantom(
-        control_latent: torch.Tensor,
-        vace_mask: torch.Tensor,
-        phantom_latent_frames: int,
-        latent_height: int,
-        latent_width: int,
+    def _upscale_frames_with_model(
+        upscale_model,
+        images: torch.Tensor,
         target_height: int,
         target_width: int,
-        vae,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if phantom_latent_frames <= 0:
-            return control_latent, vace_mask
-
-        # Match WanVaceAdvanced's native phantom handling: the phantom embed itself
-        # stays in time_dim_concat, while vace_context only gets neutral control slots.
-        phantom_frame_count = phantom_latent_frames * 4
-        inactive_pixels = torch.full(
-            (phantom_frame_count, target_height, target_width, 3),
-            0.5,
-            dtype=torch.float32,
-            device=device,
-        )
-        reactive_pixels = torch.zeros_like(inactive_pixels)
-
-        inactive_latent = vae.encode(inactive_pixels[:, :, :, :3]).to(device)
-        reactive_latent = vae.encode(reactive_pixels[:, :, :, :3]).to(device)
-        phantom_control_latent = torch.cat((inactive_latent, reactive_latent), dim=1)
-
-        if (
-            phantom_control_latent.shape[-2] != latent_height
-            or phantom_control_latent.shape[-1] != latent_width
-        ):
-            raise ValueError(
-                "Upstream phantom padding produced mismatched latent dimensions."
+    ) -> torch.Tensor:
+        upscaled = ImageUpscaleWithModel().upscale(upscale_model, images)[0]
+        upscaled = upscaled.to(device=images.device, dtype=torch.float32)
+        if upscaled.shape[1] != target_height or upscaled.shape[2] != target_width:
+            upscaled = VideoDetailer._resize_images(
+                upscaled, target_height, target_width
             )
-
-        phantom_mask = torch.ones(
-            vace_mask.shape[0],
-            vace_mask.shape[1],
-            phantom_latent_frames,
-            latent_height,
-            latent_width,
-            device=device,
-            dtype=vace_mask.dtype,
-        )
-
-        return (
-            torch.cat([control_latent, phantom_control_latent], dim=2),
-            torch.cat([vace_mask, phantom_mask], dim=2),
-        )
+        return upscaled
 
     @staticmethod
     def _build_noise_mask(
-        mask_chunk: torch.Tensor,
+        mask: torch.Tensor,
         latent_frames: int,
-        ref_latent_length: int,
         latent_height: int,
         latent_width: int,
     ) -> torch.Tensor:
+        """Downsample pixel-space frame mask to latent space.
+
+        Shape returned: [1, 1, latent_frames, latent_height, latent_width]
+        Max-pools temporally so any masked pixel frame marks the whole latent frame.
+        """
         latent_mask = F.interpolate(
-            mask_chunk.unsqueeze(1),
+            mask.unsqueeze(1),
             size=(latent_height, latent_width),
             mode="bilinear",
             align_corners=False,
         ).squeeze(1)
-        latent_mask = F.adaptive_max_pool3d(
+        return F.adaptive_max_pool3d(
             latent_mask.unsqueeze(0).unsqueeze(0),
             output_size=(latent_frames, latent_height, latent_width),
         )
-        ref_mask = torch.zeros(
-            1,
-            1,
-            ref_latent_length,
-            latent_height,
-            latent_width,
-            device=mask_chunk.device,
-            dtype=latent_mask.dtype,
-        )
-        return torch.cat((ref_mask, latent_mask), dim=2)
+
+    @staticmethod
+    def _build_vace_conditioning(
+        vae,
+        frames: torch.Tensor,  # [T, H, W, 3] at encoding resolution, float32 [0,1]
+        mask: torch.Tensor,    # [T, H, W] at encoding resolution, float32 [0,1]
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build vace_frames (32ch) and vace_mask (64ch) for VACE conditioning.
+
+        Mirrors the inactive/reactive encoding in WanVaceToVideo so the VACE
+        feature-injection blocks receive accurate, frame-aligned reference:
+          - inactive channels: original content where mask=0 (reference frames), gray where mask=1
+          - reactive channels: original content where mask=1 (to-generate frames), gray where mask=0
+          - vace_mask: 64-channel stride-packed mask matching WAN's latent packing convention
+
+        Returns:
+            vace_frames: [1, 32, T_lat, H_lat, W_lat] on device
+            vace_mask:   [1, 64, T_lat, H_lat, W_lat] on device
+        """
+        T, H, W = mask.shape
+        vae_stride = 8
+        H_lat, W_lat = H // vae_stride, W // vae_stride
+
+        mask_3ch = mask.unsqueeze(-1).expand(-1, -1, -1, 3)
+
+        frames_c = frames - 0.5
+        inactive = (frames_c * (1.0 - mask_3ch) + 0.5).clamp(0.0, 1.0)
+        reactive = (frames_c * mask_3ch + 0.5).clamp(0.0, 1.0)
+
+        inactive_lat = vae.encode(inactive[:, :, :, :3]).to(device)
+        reactive_lat = vae.encode(reactive[:, :, :, :3]).to(device)
+        vace_frames = torch.cat([inactive_lat, reactive_lat], dim=1)
+
+        T_lat = vace_frames.shape[2]
+
+        # Stride-pack spatial dims into 64 channels then resize temporally,
+        # matching WanVaceToVideo's mask encoding exactly.
+        m = mask.view(T, H_lat, vae_stride, W_lat, vae_stride)
+        m = m.permute(2, 4, 0, 1, 3).reshape(vae_stride * vae_stride, T, H_lat, W_lat)
+        m = F.interpolate(
+            m.unsqueeze(0).float(),
+            size=(T_lat, H_lat, W_lat),
+            mode="nearest-exact",
+        ).squeeze(0)
+
+        return vace_frames, m.unsqueeze(0).to(device)
 
     @staticmethod
     def _cleanup():
@@ -580,7 +477,6 @@ class VideoDetailer:
 
     def execute(
         self,
-        image_frames,
         model,
         vae,
         positive,
@@ -591,151 +487,151 @@ class VideoDetailer:
         sampler_name,
         scheduler,
         denoise,
-        guide_size,
-        max_size,
         feather,
         noise_mask_feather,
+        image_frames=None,
+        latent=None,
         mask_opt=None,
+        guide_size=1024,
+        max_size=1536,
         upscale_model=None,
         **_kwargs,
     ):
+        if image_frames is None and latent is None:
+            raise ValueError("Connect either image_frames or latent — at least one is required.")
+
         device = comfy.model_management.get_torch_device()
-        frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
-        frame_count, height, width, _ = frames.shape
-        if frame_count == 0:
-            raise ValueError("image_frames is empty.")
 
-        if frame_count < 5:
-            raise ValueError(
-                f"image_frames has {frame_count} frame(s); minimum is 5. "
-                f"If feeding a video, ensure frames are passed as a single batch."
+        # --- Build starting latent and pixel frames ---
+        if image_frames is not None:
+            # Image path: encode with optional upscaling for quality.
+            frames = image_frames.to(device=device, dtype=torch.float32).clamp_(0.0, 1.0)
+            frame_count, height, width, _ = frames.shape
+
+            if frame_count < 5:
+                raise ValueError(
+                    f"image_frames has {frame_count} frame(s); minimum is 5."
+                )
+            if isinstance(model.model, comfy.model_base.WAN21) and (frame_count - 1) % 4 != 0:
+                rem = (frame_count - 1) % 4
+                lower = frame_count - rem
+                upper = lower + 4
+                raise ValueError(
+                    f"{frame_count} frames is not valid for WAN (must satisfy 1 + n×4). "
+                    f"Nearest valid counts: {lower} or {upper}."
+                )
+            mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
+
+            target_width, target_height = self._pick_target_size(height, width, guide_size, max_size)
+            if upscale_model is not None:
+                frames_target = self._upscale_frames_with_model(upscale_model, frames, target_height, target_width)
+            else:
+                frames_target = self._resize_images(frames, target_height, target_width)
+
+            mask_target = self._resize_masks(mask, target_height, target_width).clamp_(0.0, 1.0)
+
+            mask_for_noise = self._gaussian_blur_mask(
+                mask_target, noise_mask_feather
+            ).clamp_(0.0, 1.0)
+
+            # Gray out masked-frame regions before encoding.  WAN's temporal VAE uses
+            # causal convolutions, so bad original content in frame N bleeds into frame
+            # N+1's latent, N+1 into N+2, etc.  This directional bleed-through is the
+            # exact cause of the quality ramp-up across masked frames: the first masked
+            # frame carries the most contamination, the last the least.  Replacing masked
+            # regions with neutral gray (0.5) breaks the contamination chain and gives
+            # all masked frames a clean, equivalent starting point in latent space.
+            frames_for_latent = (
+                frames_target * (1.0 - mask_target.unsqueeze(-1))
+                + 0.5 * mask_target.unsqueeze(-1)
             )
+            all_latent = vae.encode(frames_for_latent[:, :, :, :3]).to(device)
 
-        if isinstance(model.model, comfy.model_base.WAN21) and (frame_count - 1) % 4 != 0:
-            rem = (frame_count - 1) % 4
-            lower = frame_count - rem
-            upper = lower + 4
-            raise ValueError(
-                f"{frame_count} frames is not valid for this WAN model "
-                f"(must satisfy 1 + n×4). Nearest valid counts: {lower} or {upper}."
-            )
-
-        if mask_opt is not None and mask_opt.ndim == 3 and mask_opt.shape[0] not in (1, frame_count):
-            raise ValueError(
-                f"mask has {mask_opt.shape[0]} frames but image_frames has {frame_count}. "
-                f"Mask must have 1 frame or match exactly."
-            )
-
-        mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
-        upstream_reference_latent = self._extract_upstream_reference_latent(positive)
-        has_upstream_vace = any("vace_frames" in meta for _, meta in positive)
-
-        target_width, target_height = self._pick_target_size(
-            height, width, guide_size, max_size
-        )
-        if upscale_model is not None:
-            frames_target = self._upscale_frames_with_model(
-                upscale_model, frames, target_height, target_width
-            )
         else:
-            frames_target = self._resize_images(frames, target_height, target_width)
-        mask_target = self._resize_masks(mask, target_height, target_width).clamp_(
-            0.0, 1.0
-        )
-        noise_mask_target = self._gaussian_blur_mask(
-            mask_target, noise_mask_feather
-        ).clamp_(0.0, 1.0)
-        composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
+            # Latent path: use provided latent directly, decode once for pixel reference.
+            all_latent = latent["samples"].to(device=device, dtype=torch.float32)
 
-        if (
-            noise_mask_feather > 0
-            and "denoise_mask_function" not in model.model_options
-        ):
-            model = DifferentialDiffusion.execute(model)[0]
+            decoded = vae.decode(all_latent).to(device=device, dtype=torch.float32)
+            if decoded.ndim == 5:
+                decoded = decoded.squeeze(0)
+            frames = decoded.clamp_(0.0, 1.0)
+            frame_count, height, width, _ = frames.shape
 
-        start_step = int(steps * (1.0 - denoise))
-        end_step = steps
+            if frame_count < 5:
+                raise ValueError(
+                    f"Decoded latent has {frame_count} frame(s); minimum is 5."
+                )
+            if isinstance(model.model, comfy.model_base.WAN21) and (frame_count - 1) % 4 != 0:
+                rem = (frame_count - 1) % 4
+                lower = frame_count - rem
+                upper = lower + 4
+                raise ValueError(
+                    f"{frame_count} decoded frames is not valid for WAN (must satisfy 1 + n×4). "
+                    f"Nearest valid counts: {lower} or {upper}."
+                )
+            mask = self._prepare_mask(mask_opt, frame_count, height, width, device)
+            mask_for_noise = self._gaussian_blur_mask(mask, noise_mask_feather).clamp_(0.0, 1.0)
 
-        if composite_mask.amax() < 1e-6:
-            return (frames.cpu(), mask.cpu())
-
-        all_latent = vae.encode(frames_target[:, :, :, :3]).to(device)
         latent_height = all_latent.shape[-2]
         latent_width = all_latent.shape[-1]
 
-        if has_upstream_vace:
-            ref_latent_length = (
-                upstream_reference_latent.shape[2]
-                if upstream_reference_latent is not None
-                else 0
+        # --- Prepare conditioning ---
+        positive_cond = self._slice_conditioning_for_chunk(positive, 0, frame_count)
+        negative_cond = self._slice_conditioning_for_chunk(negative, 0, frame_count)
+
+        # Channel-wise phantom models (in_dim > 16, e.g. Phantom Pure Fusionix) expand x to
+        # 36 channels via concat_cond before _forward runs.  time_dim_concat is always 16-channel
+        # so the temporal cat at model.py:657 would mismatch.  Drop it and let concat_cond handle
+        # phantom conditioning channel-wise instead.
+        patch_emb = getattr(getattr(model.model, 'diffusion_model', None), 'patch_embedding', None)
+        drop_time_dim = (
+            patch_emb is not None
+            and hasattr(patch_emb, 'weight')
+            and patch_emb.weight.shape[1] > 16
+        )
+        positive_cond = self._resize_phantom_in_conditioning(positive_cond, latent_height, latent_width, drop=drop_time_dim)
+        negative_cond = self._resize_phantom_in_conditioning(negative_cond, latent_height, latent_width, drop=drop_time_dim)
+        positive_cond = self._resize_vace_in_conditioning(positive_cond, latent_height, latent_width)
+        negative_cond = self._resize_vace_in_conditioning(negative_cond, latent_height, latent_width)
+
+        start_step = int(steps * (1.0 - denoise))
+
+        # --- Sample ---
+        if image_frames is not None:
+            composite_mask = self._gaussian_blur_mask(mask, feather).clamp_(0.0, 1.0)
+            if composite_mask.amax() < 1e-6:
+                return (frames.cpu(), mask.cpu(), {"samples": all_latent.cpu()})
+
+            # Rebuild VACE conditioning from the actual encoded frames so the VACE
+            # feature-injection blocks get frame-accurate reference.  Surrounding good
+            # frames get mask=0 (VACE reference) and masked frames get mask=1 (generate).
+            # This replaces any upstream vace_frames from WanVaceToVideo, which may have
+            # been encoded at a different resolution or from a different pass.
+            if isinstance(model.model, comfy.model_base.WAN21_Vace):
+                import node_helpers
+                vace_f, vace_m = self._build_vace_conditioning(
+                    vae, frames_target, mask_target, device
+                )
+                _vace_vals = {"vace_frames": [vace_f], "vace_mask": [vace_m], "vace_strength": [1.0]}
+                positive_cond = node_helpers.conditioning_set_values(positive_cond, _vace_vals)
+                negative_cond = node_helpers.conditioning_set_values(negative_cond, _vace_vals)
+
+            if "denoise_mask_function" not in model.model_options:
+                model = DifferentialDiffusion.execute(model)[0]
+
+            noise_mask = self._build_noise_mask(
+                mask_for_noise, all_latent.shape[2], latent_height, latent_width
             )
-            if ref_latent_length > 0:
-                ref_for_concat = upstream_reference_latent[:, : all_latent.shape[1]].to(
-                    device=device, dtype=torch.float32
-                )
-                ref_for_concat = self._resize_reference_latent(
-                    ref_for_concat, latent_height, latent_width
-                )
-                combined_latent = torch.cat((ref_for_concat, all_latent), dim=2)
-            else:
-                combined_latent = all_latent
-            positive_cond = positive
-            negative_cond = negative
+            latent_in = {"samples": all_latent, "noise_mask": noise_mask}
         else:
-            control_latent, vace_mask = self._build_vace_inputs(
-                frames_target, mask_target, vae
-            )
-            control_latent = control_latent.to(device)
-            vace_mask = vace_mask.to(device)
-            ref_latent_length = 0
-
-            phantom = self._extract_phantom_latent(positive)
-            if phantom is not None:
-                control_latent, vace_mask = self._extend_vace_for_upstream_phantom(
-                    control_latent=control_latent,
-                    vace_mask=vace_mask,
-                    phantom_latent_frames=phantom.shape[2],
-                    latent_height=latent_height,
-                    latent_width=latent_width,
-                    target_height=target_height,
-                    target_width=target_width,
-                    vae=vae,
-                    device=device,
-                )
-
-            combined_latent = all_latent
-            positive_cond = self._set_vace_conditioning(
-                positive, control_latent, vace_mask
-            )
-            negative_cond = self._set_vace_conditioning(
-                negative, control_latent, vace_mask
-            )
-
-        noise_mask = self._build_noise_mask(
-            noise_mask_target,
-            all_latent.shape[2],
-            ref_latent_length,
-            latent_height,
-            latent_width,
-        )
-        positive_cond = self._slice_conditioning_for_chunk(
-            positive_cond, 0, frame_count
-        )
-        negative_cond = self._slice_conditioning_for_chunk(
-            negative_cond, 0, frame_count
-        )
-        positive_cond = self._resize_phantom_in_conditioning(
-            positive_cond, latent_height, latent_width
-        )
-        negative_cond = self._resize_phantom_in_conditioning(
-            negative_cond, latent_height, latent_width
-        )
-        positive_cond = self._resize_vace_in_conditioning(
-            positive_cond, latent_height, latent_width
-        )
-        negative_cond = self._resize_vace_in_conditioning(
-            negative_cond, latent_height, latent_width
-        )
+            # Latent path: the input latent from WanVaceToVideo is zeros (noise
+            # initialization), NOT encoded video content.  Decoding zeros gives
+            # garbage pixels, so we cannot composite against it.  DifferentialDiffusion
+            # with a zero latent would "preserve" those zeros as unmasked frame output,
+            # producing garbage for good frames.  Skip both: regenerate all frames
+            # from the conditioning, then return the decoded result directly.
+            composite_mask = None
+            latent_in = {"samples": all_latent}
 
         sampled = nodes.NODE_CLASS_MAPPINGS["KSamplerAdvanced"]().sample(
             model,
@@ -747,31 +643,36 @@ class VideoDetailer:
             scheduler,
             positive_cond,
             negative_cond,
-            {"samples": combined_latent, "noise_mask": noise_mask},
+            latent_in,
             start_step,
-            end_step,
+            steps,
             "disable",
         )[0]
 
-        refined_latent = sampled["samples"][:, :, ref_latent_length:, :, :]
-        refined = vae.decode(refined_latent).to(device=device, dtype=torch.float32)
+        sampled_latent = sampled["samples"]
+
+        # --- Decode ---
+        refined = vae.decode(sampled_latent).to(device=device, dtype=torch.float32)
         if refined.ndim == 5:
             refined = refined.squeeze(0)
         refined = refined.clamp_(0.0, 1.0)
 
-        if refined.shape[1] != height or refined.shape[2] != width:
-            refined = self._resize_images(refined, height, width, mode="bicubic")
+        # --- Composite (image path only) ---
+        if composite_mask is not None:
+            if refined.shape[1] != height or refined.shape[2] != width:
+                refined = self._resize_images(refined, height, width, mode="bicubic")
 
-        # WAN's temporal VAE may decode fewer frames than were encoded (e.g. 55→53).
-        # Pad with original frames so the output frame count always matches the input.
-        n_refined = refined.shape[0]
-        n_frames = frames.shape[0]
-        if n_refined < n_frames:
-            refined = torch.cat([refined, frames[n_refined:]], dim=0)
-        elif n_refined > n_frames:
-            refined = refined[:n_frames]
+            # WAN's temporal VAE may decode fewer frames than were encoded.
+            n_refined = refined.shape[0]
+            if n_refined < frame_count:
+                refined = torch.cat([refined, frames[n_refined:]], dim=0)
+            elif n_refined > frame_count:
+                refined = refined[:frame_count]
 
-        composite_mask_4d = composite_mask.unsqueeze(-1)
-        output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
+            composite_mask_4d = composite_mask.unsqueeze(-1)
+            output = (1.0 - composite_mask_4d) * frames + composite_mask_4d * refined
+        else:
+            output = refined
+
         self._cleanup()
-        return (output.clamp(0.0, 1.0).cpu(), mask.cpu())
+        return (output.clamp(0.0, 1.0).cpu(), mask.cpu(), {"samples": sampled_latent.cpu()})
