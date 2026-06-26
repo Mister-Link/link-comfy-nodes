@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import io
-import json
-import time
+import urllib.request
 from pathlib import Path
 from typing import Protocol
 
@@ -12,294 +10,105 @@ import torch
 from PIL import Image
 
 try:
-    from curl_cffi import CurlMime, requests
-    from curl_cffi.requests import RequestsError as _HTTPError
-
-    _RequestException = _HTTPError
-    _IMPERSONATE: str | None = "firefox"
+    import onnxruntime as ort
 except ImportError:
-    import subprocess
-    import sys
-
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "curl_cffi", "-q"])
-    try:
-        from curl_cffi import CurlMime, requests  # type: ignore[no-redef]
-        from curl_cffi.requests import (
-            RequestsError as _HTTPError,  # type: ignore[no-redef]
-        )
-
-        _RequestException = _HTTPError
-        _IMPERSONATE = "firefox"
-    except ImportError:
-        import requests  # type: ignore[no-redef]
-
-        CurlMime = None  # type: ignore[assignment,misc]
-        _HTTPError = requests.HTTPError  # type: ignore[attr-defined]
-        _RequestException = requests.RequestException  # type: ignore[attr-defined]
-        _IMPERSONATE = None
-
-
-class ProgressBarProtocol(Protocol):
-    def update(self, value: int) -> None: ...
-
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "onnxruntime", "-q"])
+    import onnxruntime as ort
 
 try:
     from comfy.utils import ProgressBar  # type: ignore[import-not-found]
 except Exception:
     ProgressBar = None
 
-UPLOAD_URL = "https://photoai.imglarger.com/api/PhoAi/Upload"
-STATUS_URL = "https://bgeraser.com/"
-STATUS_ACTION = "1af975bb141cc30518bca9d55ab31f1f992fec60"
-STATUS_STATE = "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2F%22%2C%22refresh%22%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "bgeraser"
-BATCH_SIZE = 5
-RATE_LIMIT_SLEEP = 12.0
-UPLOAD_DELAY = 1.0
-MAX_WAITING_CHECKS = 40
+MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "bgeraser"
+
+MODELS: dict[str, dict] = {
+    "u2netp – Fast (4 MB)": {
+        "url": "https://huggingface.co/robertwt7/bg-remover-models/resolve/main/onnx/u2netp.onnx",
+        "filename": "u2netp.onnx",
+        "dims": (320, 320),
+    },
+    "silueta – Balanced (43 MB)": {
+        "url": "https://huggingface.co/robertwt7/bg-remover-models/resolve/main/onnx/silueta.onnx",
+        "filename": "silueta.onnx",
+        "dims": (320, 320),
+    },
+    "RMBG-1.4 Quantized – Quality (88 MB)": {
+        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
+        "filename": "rmbg14_quantized.onnx",
+        "dims": (1024, 1024),
+    },
+    "RMBG-1.4 FP16 – Quality (88 MB)": {
+        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
+        "filename": "rmbg14_fp16.onnx",
+        "dims": (1024, 1024),
+    },
+    "RMBG-1.4 Float32 – Max Quality (176 MB)": {
+        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
+        "filename": "rmbg14_fp32.onnx",
+        "dims": (1024, 1024),
+    },
+}
+
+_sessions: dict[str, ort.InferenceSession] = {}
 
 
-def build_headers() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    if _IMPERSONATE:
-        # curl_cffi impersonation sets UA, Accept-Encoding, Connection, Sec-Fetch-* etc.
-        # automatically — only pass request-specific headers to avoid fingerprint conflicts.
-        upload_headers = {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Origin": "https://bgeraser.com",
-            "Referer": "https://bgeraser.com/",
-        }
-        download_headers = {
-            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Referer": "https://bgeraser.com/",
-        }
-        status_headers = {
-            "Accept": "text/x-component",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Origin": "https://bgeraser.com",
-            "Referer": "https://bgeraser.com/",
-            "Content-Type": "text/plain;charset=UTF-8",
-            "Next-Action": STATUS_ACTION,
-            "Next-Router-State-Tree": STATUS_STATE,
-        }
-    else:
-        upload_headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
-            "Origin": "https://bgeraser.com",
-            "Referer": "https://bgeraser.com/",
-        }
-        download_headers = {
-            "User-Agent": upload_headers["User-Agent"],
-            "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
-            "Accept-Language": upload_headers["Accept-Language"],
-            "Accept-Encoding": upload_headers["Accept-Encoding"],
-            "Referer": upload_headers["Referer"],
-        }
-        status_headers = {
-            "User-Agent": upload_headers["User-Agent"],
-            "Accept": "text/x-component",
-            "Accept-Language": upload_headers["Accept-Language"],
-            "Accept-Encoding": upload_headers["Accept-Encoding"],
-            "Origin": upload_headers["Origin"],
-            "Referer": upload_headers["Referer"],
-            "Content-Type": "text/plain;charset=UTF-8",
-            "Next-Action": STATUS_ACTION,
-            "Next-Router-State-Tree": STATUS_STATE,
-        }
-    return upload_headers, status_headers, download_headers
+def _download_model(filename: str, url: str) -> Path:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    path = MODELS_DIR / filename
+    if path.exists():
+        return path
+    print(f"BgRemover: downloading {filename} from {url} ...")
+    tmp = path.with_suffix(".tmp")
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        tmp.rename(path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    print(f"BgRemover: saved {filename} ({path.stat().st_size // (1024*1024)} MB)")
+    return path
 
 
-def _image_to_jpeg_bytes(image: np.ndarray) -> bytes:
-    img_255 = (image * 255.0).clip(0, 255).astype(np.uint8)
-    if img_255.ndim == 2:
-        pil_img = Image.fromarray(img_255, mode="L").convert("RGB")
-    elif img_255.shape[2] == 4:
-        rgba = Image.fromarray(img_255, mode="RGBA")
-        background = Image.new("RGB", rgba.size, (255, 255, 255))
-        background.paste(rgba, mask=rgba.split()[-1])
-        pil_img = background
-    else:
-        pil_img = Image.fromarray(img_255[:, :, :3], mode="RGB")
-
-    buffer = io.BytesIO()
-    pil_img.save(buffer, format="JPEG", quality=95)
-    return buffer.getvalue()
-
-
-def _upload_image(
-    image_bytes: bytes,
-    name: str,
-    session: requests.Session,
-    headers: dict[str, str],
-    max_attempts: int = 5,
-    rate_limit_sleep: float = RATE_LIMIT_SLEEP,
-) -> str:
-    data = {"type": "4", "mattValue": "0"}
-
-    last_exc: Exception | None = None
-    for attempt in range(max_attempts):
-        try:
-            if _IMPERSONATE and CurlMime is not None:
-                # curl_cffi requires a CurlMime object for multipart uploads
-                mp = CurlMime()
-                mp.addpart(
-                    name="file",
-                    filename=name,
-                    content_type="image/jpeg",
-                    data=image_bytes,
-                )
-                mp.addpart(name="type", data=b"4")
-                mp.addpart(name="mattValue", data=b"0")
-                resp = session.post(
-                    UPLOAD_URL, headers=headers, multipart=mp, timeout=30
-                )
-            else:
-                files = {"file": (name, io.BytesIO(image_bytes), "image/jpeg")}
-                resp = session.post(
-                    UPLOAD_URL, headers=headers, files=files, data=data, timeout=30
-                )
-            resp.raise_for_status()
-        except _HTTPError as exc:
-            last_exc = exc
-            if attempt == max_attempts - 1:
-                raise
-            time.sleep(1.0)
-            continue
-
-        payload = resp.json()
-        if payload.get("code") == 200:
-            return payload["data"]["code"]
-        if payload.get("code") == 999 and attempt < max_attempts - 1:
-            time.sleep(rate_limit_sleep)
-            continue
-        raise RuntimeError(f"Upload failed: {payload}")
-
-    if last_exc:
-        _ = last_exc
-    raise RuntimeError("Upload failed: exhausted retries.")
+def _get_session(model_key: str) -> ort.InferenceSession:
+    if model_key in _sessions:
+        return _sessions[model_key]
+    cfg = MODELS[model_key]
+    model_path = _download_model(cfg["filename"], cfg["url"])
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if "CUDAExecutionProvider" in ort.get_available_providers()
+        else ["CPUExecutionProvider"]
+    )
+    print(f"BgRemover: loading {cfg['filename']} with {providers[0]}")
+    session = ort.InferenceSession(str(model_path), providers=providers)
+    _sessions[model_key] = session
+    return session
 
 
-def _poll_and_download(
-    pending: dict[str, tuple[list[int], str]],
-    session: requests.Session,
-    status_headers: dict[str, str],
-    download_headers: dict[str, str],
-    results: list[np.ndarray | None],
-    progress_bar: ProgressBarProtocol | None,
-    request_timeout: float,
-    completed_counter: list[int],
-) -> None:
-    check_interval = 3.0
-    max_checks = 120
-    total = len(results)
-    failure_counts: dict[str, int] = {}
-    waiting_count = 0
-    for check_num in range(max_checks):
-        if not pending:
-            return
-        codes = list(pending.keys())
-        status_body = json.dumps([{"type": 4, "codes": codes}], separators=(",", ":"))
-        try:
-            status = session.post(
-                STATUS_URL,
-                headers=status_headers,
-                data=status_body,
-                timeout=request_timeout,
-            )
-            status.raise_for_status()
-        except _RequestException as exc:
-            print(f"BgEraser: status check failed ({exc}); retrying...")
-            time.sleep(check_interval)
-            continue
-        data_line = next(
-            (line for line in status.text.splitlines() if line.startswith("1:")), None
-        )
-        if not data_line:
-            time.sleep(check_interval)
-            continue
-        status_payload = json.loads(data_line[2:])
-        if status_payload.get("code") == 999:
-            print(f"BgEraser: rate limited (code 999); waiting {RATE_LIMIT_SLEEP}s...")
-            time.sleep(RATE_LIMIT_SLEEP)
-            continue
-        if status_payload.get("code") != 200:
-            raise RuntimeError(f"Status failed: {status_payload}")
-        status_data = status_payload.get("data", {})
-        current_status = status_data.get("status", "unknown")
-        urls = status_data.get("downloadUrls", {})
-
-        if current_status == "waiting":
-            waiting_count += 1
-            if waiting_count % 5 == 0:
-                print(
-                    f"BgEraser: still waiting for {len(pending)} images "
-                    f"(check {check_num + 1}/{max_checks})..."
-                )
-            if waiting_count >= MAX_WAITING_CHECKS:
-                print(
-                    f"BgEraser: service appears stuck "
-                    f"(waited {waiting_count * check_interval}s)"
-                )
-                raise RuntimeError(
-                    f"Service stuck in 'waiting' status for {len(pending)} images after "
-                    f"{waiting_count * check_interval}s. The service may be overloaded. "
-                    f"Try processing fewer images at once or waiting before retrying."
-                )
-        elif current_status == "failed":
-            print(f"BgEraser: service reported failure status: {status_data}")
-            raise RuntimeError(f"Service processing failed: {status_data}")
-        else:
-            waiting_count = 0
-        if isinstance(urls, dict) and urls:
-            for code, url in urls.items():
-                if code not in pending:
-                    continue
-                indices, cache_key = pending.pop(code)
-                try:
-                    download = session.get(
-                        url,
-                        headers=download_headers,
-                        timeout=request_timeout,
-                        stream=True,
-                    )
-                    download.raise_for_status()
-                    img = Image.open(io.BytesIO(download.content)).convert("RGBA")
-                except _RequestException as exc:
-                    failures = failure_counts.get(code, 0) + 1
-                    failure_counts[code] = failures
-                    if failures >= 2:
-                        raise RuntimeError(
-                            f"BgEraser: download failed twice for {code}: {exc}"
-                        ) from exc
-                    pending[code] = (indices, cache_key)
-                    print(f"BgEraser: download failed ({exc}); retrying...")
-                    continue
-                result_array = np.asarray(img, dtype=np.float32) / 255.0
-                for idx in indices:
-                    results[idx] = result_array
-                try:
-                    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                    cache_path = CACHE_DIR / f"{cache_key}.png"
-                    img.save(cache_path, format="PNG")
-                except Exception as exc:
-                    print(f"BgEraser: cache write failed ({exc})")
-                completed_counter[0] += len(indices)
-                completed = completed_counter[0]
-                print(f"BgEraser: downloaded {completed}/{total}")
-                if progress_bar is not None:
-                    progress_bar.update(len(indices))
-        time.sleep(check_interval)
-
-    if pending:
-        remaining = ", ".join(sorted(pending.keys()))
-        raise RuntimeError(f"Timed out waiting for: {remaining}")
+def _preprocess(image: np.ndarray, h: int, w: int) -> np.ndarray:
+    """image: float32 [H, W, C] in [0,1] → float32 [1, 3, h, w] in [-1, 1]"""
+    pil = Image.fromarray((image * 255).clip(0, 255).astype(np.uint8)).convert("RGB")
+    pil = pil.resize((w, h), Image.BILINEAR)
+    arr = np.array(pil, dtype=np.float32) / 255.0
+    arr = (arr - 0.5) / 0.5                        # normalize to [-1, 1]
+    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]  # [1, 3, H, W]
+    return arr
 
 
-class BulkBackgroundRemoverBgEraserNode:
+def _postprocess(mask_output: np.ndarray, orig_h: int, orig_w: int) -> np.ndarray:
+    """Squeeze model output to [H, W] float32 in [0, 1], resize to original dims."""
+    mask = mask_output.squeeze()
+    # sigmoid if values are outside [0, 1] (some models skip it)
+    if mask.min() < 0 or mask.max() > 1:
+        mask = 1.0 / (1.0 + np.exp(-mask))
+    mask = (mask * 255).clip(0, 255).astype(np.uint8)
+    mask_pil = Image.fromarray(mask, mode="L").resize((orig_w, orig_h), Image.BILINEAR)
+    return np.array(mask_pil, dtype=np.float32) / 255.0
+
+
+class LocalBackgroundRemoverNode:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("images", "alpha")
     FUNCTION = "remove_background"
@@ -310,104 +119,47 @@ class BulkBackgroundRemoverBgEraserNode:
         return {
             "required": {
                 "images": ("IMAGE",),
+                "model": (list(MODELS.keys()),),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    def remove_background(self, images: torch.Tensor, unique_id: str | None = None):
+    def remove_background(
+        self,
+        images: torch.Tensor,
+        model: str,
+        unique_id: str | None = None,
+    ):
         frames = images.detach().cpu().float()
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
-        session = (
-            requests.Session(impersonate=_IMPERSONATE)
-            if _IMPERSONATE
-            else requests.Session()
-        )
-        upload_headers, status_headers, download_headers = build_headers()
+        cfg = MODELS[model]
+        target_h, target_w = cfg["dims"]
+        session = _get_session(model)
+        input_name = session.get_inputs()[0].name
+        output_name = session.get_outputs()[0].name
 
-        pending: dict[str, tuple[list[int], str]] = {}
-        pending_by_key: dict[str, str] = {}
-        results: list[np.ndarray | None] = [None] * frames.shape[0]
-        total_steps = frames.shape[0] * 2
-        progress_bar = (
-            ProgressBar(total_steps, node_id=unique_id) if ProgressBar else None
-        )
-        completed_counter = [0]
+        total = frames.shape[0]
+        progress_bar = ProgressBar(total, node_id=unique_id) if ProgressBar else None
 
-        def flush_pending() -> None:
-            if not pending:
-                return
-            _poll_and_download(
-                pending,
-                session=session,
-                status_headers=status_headers,
-                download_headers=download_headers,
-                results=results,
-                progress_bar=progress_bar,
-                request_timeout=60.0,
-                completed_counter=completed_counter,
-            )
-            pending.clear()
-            pending_by_key.clear()
+        results_rgb: list[np.ndarray] = []
+        results_alpha: list[np.ndarray] = []
 
-        for idx, img_data in enumerate(frames.numpy()):
-            image_bytes = _image_to_jpeg_bytes(img_data)
-            cache_key = hashlib.sha256(image_bytes).hexdigest()
-            cache_path = CACHE_DIR / f"{cache_key}.png"
-            if cache_path.exists():
-                try:
-                    cached = Image.open(cache_path).convert("RGBA")
-                    result_array = np.asarray(cached, dtype=np.float32) / 255.0
-                    results[idx] = result_array
-                    completed_counter[0] += 1
-                    if progress_bar is not None:
-                        progress_bar.update(2)
-                    print(f"BgEraser: cache hit {completed_counter[0]}/{len(results)}")
-                    continue
-                except Exception as exc:
-                    print(f"BgEraser: cache read failed ({exc}); reprocessing...")
-            if cache_key in pending_by_key:
-                code = pending_by_key[cache_key]
-                pending[code][0].append(idx)
-                if progress_bar is not None:
-                    progress_bar.update(1)
-                continue
-            code = _upload_image(
-                image_bytes,
-                name=f"frame_{idx}.jpg",
-                session=session,
-                headers=upload_headers,
-            )
-            pending[code] = ([idx], cache_key)
-            pending_by_key[cache_key] = code
+        for idx, frame in enumerate(frames.numpy()):
+            orig_h, orig_w = frame.shape[:2]
+            tensor = _preprocess(frame, target_h, target_w)
+            raw_mask = session.run([output_name], {input_name: tensor})[0]
+            alpha = _postprocess(raw_mask, orig_h, orig_w)
+
+            rgb = frame[..., :3]
+            results_rgb.append(rgb)
+            results_alpha.append(alpha)
+
+            print(f"BgRemover: [{idx + 1}/{total}] done")
             if progress_bar is not None:
                 progress_bar.update(1)
-            time.sleep(UPLOAD_DELAY)
-            if len(pending) >= BATCH_SIZE:
-                flush_pending()
-                if idx < frames.shape[0] - 1:
-                    time.sleep(UPLOAD_DELAY * 2)
 
-        flush_pending()
-
-        if any(result is None for result in results):
-            raise RuntimeError("Missing output for one or more images.")
-
-        non_null_results: list[np.ndarray] = [r for r in results if r is not None]
-
-        first_shape = non_null_results[0].shape
-        if any(result.shape != first_shape for result in non_null_results):
-            raise RuntimeError("Output images have mismatched dimensions.")
-
-        stacked = torch.from_numpy(np.stack(non_null_results))
-        if stacked.shape[-1] == 4:
-            images_out = stacked[..., :3]
-            alpha_out = stacked[..., 3]
-        else:
-            images_out = stacked[..., :3]
-            alpha_out = torch.ones(
-                (stacked.shape[0], stacked.shape[1], stacked.shape[2]),
-                dtype=stacked.dtype,
-            )
+        images_out = torch.from_numpy(np.stack(results_rgb))
+        alpha_out = torch.from_numpy(np.stack(results_alpha))
         return (images_out, alpha_out)

@@ -1,6 +1,6 @@
 from .average_mask_region_size import AverageMaskRegionSizeNode
 from .batch_mask_crop import BatchMaskCropper
-from .detailer import VideoDetailer
+from .detailer import VACESampler
 from .mask_editor import VideoMaskEditor
 from .replace_alpha import ReplaceAlpha
 from .segs_flatten import SEGSFlatten

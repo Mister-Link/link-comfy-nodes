@@ -1,5 +1,5 @@
 from .auto_cropper import AutoCropperNode
-from .background_remover import BulkBackgroundRemoverBgEraserNode
+from .background_remover import LocalBackgroundRemoverNode
 from .batch import AddImageToBatchNode
 from .crop import CropToContentNode
 from .crop_by_bbox import CropByBBoxNode

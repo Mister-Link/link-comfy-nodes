@@ -4,7 +4,7 @@ from .color import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
 from .image import (
     AddImageToBatchNode,
     AutoCropperNode,
-    BulkBackgroundRemoverBgEraserNode,
+    LocalBackgroundRemoverNode,
     CropByBBoxNode,
     CropToContentNode,
     ImageRotatorNode,
@@ -32,19 +32,22 @@ from .video import (
     StabilizerTrimNode,
     TemporalMaskCropper,
     TrimConditioning,
-    VideoDetailer,
+    VACESampler,
     VideoMaskEditor,
     VideoTileDetailer,
 )
 from .wan import (
     LoadVACEModuleNode,
     NativeWanPoseStrength,
+    LoopSCAILPoseFramesNode,
+    WanVideoAddSCAILPoseEmbedsMasked,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
 
 __all__ = [
     "AddImageToBatchNode",
+    "LoopSCAILPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
     "BatchMaskCropper",
@@ -52,7 +55,7 @@ __all__ = [
     "SnapToDivisible",
     "AutoCropperNode",
     "BatchImageSave",
-    "BulkBackgroundRemoverBgEraserNode",
+    "LocalBackgroundRemoverNode",
     "ColorParserNode",
     "ConvertToPixelArt",
     "CropByBBoxNode",
@@ -64,6 +67,7 @@ __all__ = [
     "LoadVACEModuleNode",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
+    "WanVideoAddSCAILPoseEmbedsMasked",
     "PixelationDimensionsNode",
     "PoseImageSetupNode",
     "PreviewAsMarkdown",
@@ -81,7 +85,7 @@ __all__ = [
     "StabilizerTrimNode",
     "TemporalMaskCropper",
     "TrimConditioning",
-    "VideoDetailer",
+    "VACESampler",
     "VideoMaskEditor",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
