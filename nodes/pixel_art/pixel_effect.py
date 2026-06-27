@@ -216,13 +216,6 @@ class PixelEffectModule(nn.Module):
             bias=None,
         )[0, :, :, :]
 
-        # Let contiguous neutral regions (e.g. eye whites) survive when they are
-        # genuinely present, while still suppressing tiny neutral edge specks.
-        neutral_relief = 0.40
-        neutral_gate = torch.zeros([num_bins, 1, 1], device=rgb.device, dtype=rgb.dtype)
-        neutral_gate[neutral_start:, :, :] = 1.0
-        vote_conv = vote_conv + (neutral_gate * neutral_relief * alpha_conv)
-
         # Pick the dominant color family by vote strength.
         _, alpha_argmax = torch.max(vote_conv, dim=0)
         alpha_max = self.select_by_idx(
