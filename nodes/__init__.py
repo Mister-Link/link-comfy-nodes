@@ -4,11 +4,11 @@ from .color import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
 from .image import (
     AddImageToBatchNode,
     AutoCropperNode,
-    LocalBackgroundRemoverNode,
     CropByBBoxNode,
     CropToContentNode,
     ImageRotatorNode,
     PixelationDimensionsNode,
+    PixPunkRemoveBackground,
     ResizeImageAndMaskBySideNode,
     SpritesheetBuilderNode,
 )
@@ -34,12 +34,14 @@ from .wan import (
     LoadVACEModuleNode,
     NativeWanPoseStrength,
     LoopSCAILPoseFramesNode,
+    ShiftImageBatchNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
 
 __all__ = [
     "AddImageToBatchNode",
+    "PixPunkRemoveBackground",
     "LoopSCAILPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
@@ -47,7 +49,6 @@ __all__ = [
     "SnapToDivisible",
     "AutoCropperNode",
     "BatchImageSave",
-    "LocalBackgroundRemoverNode",
     "ColorParserNode",
     "ConvertToPixelArt",
     "CropByBBoxNode",
@@ -73,6 +74,7 @@ __all__ = [
     "TemporalMaskCropper",
     "TrimConditioning",
     "VACESampler",
+    "ShiftImageBatchNode",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
 ]

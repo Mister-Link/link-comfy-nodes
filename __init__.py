@@ -6,9 +6,9 @@ from .nodes import (
     AdvancedStringConcat,
     StringToListNode,
     AutoCropperNode,
+    PixPunkRemoveBackground,
     AverageMaskRegionSizeNode,
     BatchImageSave,
-    LocalBackgroundRemoverNode,
     ChangeLatentDimensions,
     ColorParserNode,
     ConvertToPixelArt,
@@ -36,6 +36,7 @@ from .nodes import (
     TrimConditioning,
     VACESampler,
     LoopSCAILPoseFramesNode,
+    ShiftImageBatchNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
@@ -54,7 +55,6 @@ NODE_CLASS_MAPPINGS = {
     "Native Wan Pose Strength": NativeWanPoseStrength,
     "Image Rotator": ImageRotatorNode,
     "KSampler Advanced (Dual Output)": KSamplerAdvancedDual,
-    "Remove Background": LocalBackgroundRemoverNode,
     "Crop by BBox": CropByBBoxNode,
     "Crop to Content": CropToContentNode,
     "Pixelation Dimensions": PixelationDimensionsNode,
@@ -74,9 +74,11 @@ NODE_CLASS_MAPPINGS = {
     "Fast Image Preview": FastImagePreviewNode,
     "Temporal Mask Cropper": TemporalMaskCropper,
     "Trim Conditioning": TrimConditioning,
+    "Shift Image Batch": ShiftImageBatchNode,
     "VACE Sampler": VACESampler,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
     "Preview (webm)": PreviewWebmNode,
+    "Remove Background": PixPunkRemoveBackground,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -93,7 +95,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Native Wan Pose Strength": "Native Wan Pose Strength",
     "Image Rotator": "Rotate Image",
     "KSampler Advanced (Dual Output)": "KSampler Advanced (Dual Output)",
-    "Remove Background": "Remove Background",
     "Crop by BBox": "Crop by BBox",
     "Crop to Content": "Crop to Content",
     "Pixelation Dimensions": "Pixelation Dimensions",
@@ -113,9 +114,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Fast Image Preview": "Fast Image Preview",
     "Temporal Mask Cropper": "Temporal Mask Cropper",
     "Trim Conditioning": "Trim Conditioning",
+    "Shift Image Batch": "Shift Image Batch",
     "VACE Sampler": "VACE Sampler",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
     "Preview (webm)": "Preview (webm)",
+    "Remove Background": "Remove Background",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

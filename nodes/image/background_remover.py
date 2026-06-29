@@ -1,125 +1,108 @@
 from __future__ import annotations
 
-import hashlib
-import urllib.request
+import importlib.util
+import sys
 from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
+from torchvision import transforms
 
 try:
-    import onnxruntime as ort
-except ImportError:
-    import subprocess, sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "onnxruntime", "-q"])
-    import onnxruntime as ort
-
-try:
-    from comfy.utils import ProgressBar  # type: ignore[import-not-found]
+    from comfy.utils import ProgressBar
 except Exception:
     ProgressBar = None
 
-MODELS_DIR = Path(__file__).resolve().parents[2] / "models" / "bgeraser"
+_MEAN = [0.485, 0.456, 0.406]
+_STD  = [0.229, 0.224, 0.225]
 
-MODELS: dict[str, dict] = {
-    "u2netp – Fast (4 MB)": {
-        "url": "https://huggingface.co/robertwt7/bg-remover-models/resolve/main/onnx/u2netp.onnx",
-        "filename": "u2netp.onnx",
-        "dims": (320, 320),
-    },
-    "silueta – Balanced (43 MB)": {
-        "url": "https://huggingface.co/robertwt7/bg-remover-models/resolve/main/onnx/silueta.onnx",
-        "filename": "silueta.onnx",
-        "dims": (320, 320),
-    },
-    "RMBG-1.4 Quantized – Quality (88 MB)": {
-        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
-        "filename": "rmbg14_quantized.onnx",
-        "dims": (1024, 1024),
-    },
-    "RMBG-1.4 FP16 – Quality (88 MB)": {
-        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
-        "filename": "rmbg14_fp16.onnx",
-        "dims": (1024, 1024),
-    },
-    "RMBG-1.4 Float32 – Max Quality (176 MB)": {
-        "url": "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
-        "filename": "rmbg14_fp32.onnx",
-        "dims": (1024, 1024),
-    },
-}
-
-_sessions: dict[str, ort.InferenceSession] = {}
+_model: torch.nn.Module | None = None
+_device: torch.device | None = None
 
 
-def _download_model(filename: str, url: str) -> Path:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    path = MODELS_DIR / filename
-    if path.exists():
-        return path
-    print(f"BgRemover: downloading {filename} from {url} ...")
-    tmp = path.with_suffix(".tmp")
-    try:
-        urllib.request.urlretrieve(url, tmp)
-        tmp.rename(path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-    print(f"BgRemover: saved {filename} ({path.stat().st_size // (1024*1024)} MB)")
-    return path
+def _load_model() -> tuple[torch.nn.Module, torch.device]:
+    global _model, _device
+    if _model is not None:
+        return _model, _device
+
+    from huggingface_hub import hf_hub_download
+
+    print("RemoveBackground: downloading BEN2 model files...")
+    script_path  = hf_hub_download("PramaLLC/BEN2", "BEN2.py")
+    weights_path = hf_hub_download("PramaLLC/BEN2", "BEN2_Base.pth")
+
+    # Import BEN2 module from its cached path
+    spec = importlib.util.spec_from_file_location("BEN2", script_path)
+    ben2_module = importlib.util.module_from_spec(spec)
+    sys.modules["BEN2"] = ben2_module
+    spec.loader.exec_module(ben2_module)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"RemoveBackground: loading BEN2 on {device}")
+
+    model = ben2_module.BEN_Base().to(device).eval()
+    model.loadcheckpoints(weights_path)
+
+    _model, _device = model, device
+    print("RemoveBackground: BEN2 ready")
+    return _model, _device
 
 
-def _get_session(model_key: str) -> ort.InferenceSession:
-    if model_key in _sessions:
-        return _sessions[model_key]
-    cfg = MODELS[model_key]
-    model_path = _download_model(cfg["filename"], cfg["url"])
-    providers = (
-        ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        if "CUDAExecutionProvider" in ort.get_available_providers()
-        else ["CPUExecutionProvider"]
-    )
-    print(f"BgRemover: loading {cfg['filename']} with {providers[0]}")
-    session = ort.InferenceSession(str(model_path), providers=providers)
-    _sessions[model_key] = session
-    return session
+_transform_fp16 = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.ConvertImageDtype(torch.float16),
+    transforms.Normalize(mean=_MEAN, std=_STD),
+])
+
+_transform_fp32 = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=_MEAN, std=_STD),
+])
 
 
-def _preprocess(image: np.ndarray, h: int, w: int) -> np.ndarray:
-    """image: float32 [H, W, C] in [0,1] → float32 [1, 3, h, w] in [-1, 1]"""
-    pil = Image.fromarray((image * 255).clip(0, 255).astype(np.uint8)).convert("RGB")
-    pil = pil.resize((w, h), Image.BILINEAR)
-    arr = np.array(pil, dtype=np.float32) / 255.0
-    arr = (arr - 0.5) / 0.5                        # normalize to [-1, 1]
-    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]  # [1, 3, H, W]
-    return arr
+def _infer(frame: np.ndarray, model: torch.nn.Module, device: torch.device) -> np.ndarray:
+    """frame: float32 [H, W, C] in [0,1] → float32 [H, W] alpha in [0,1]"""
+    pil = Image.fromarray((frame[..., :3] * 255).clip(0, 255).astype(np.uint8))
+    orig_w, orig_h = pil.size  # PIL: (width, height)
+    resized = pil.resize((1024, 1024), Image.LANCZOS)
+
+    transform = _transform_fp16 if device.type == "cuda" else _transform_fp32
+    inp = transform(resized).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        result = model(inp)  # [1, 1, 1024, 1024]
+
+    # Resize to original, normalize to [0, 1]
+    result = F.interpolate(result.float(), size=(orig_h, orig_w), mode="bilinear", align_corners=False)
+    lo, hi = result.min(), result.max()
+    result = (result - lo) / (hi - lo).clamp(min=1e-6)
+    alpha = result.squeeze().cpu().numpy()  # [H, W] in [0, 1]
+
+    # Port the JS contrast-boost that removes white fringing:
+    #   normalized = (raw − min) / range × 255
+    #   boosted    = clamp((normalized − 8) × 1.12, 0, 255)
+    #   alpha      = 0 if boosted < 12 else boosted
+    # Note: raw is already normalized above so this simplifies to a contrast stretch.
+    a255 = alpha * 255.0
+    boosted = np.clip((a255 - 8.0) * 1.12, 0.0, 255.0)
+    boosted[boosted < 12.0] = 0.0
+    return (boosted / 255.0).astype(np.float32)
 
 
-def _postprocess(mask_output: np.ndarray, orig_h: int, orig_w: int) -> np.ndarray:
-    """Squeeze model output to [H, W] float32 in [0, 1], resize to original dims."""
-    mask = mask_output.squeeze()
-    # sigmoid if values are outside [0, 1] (some models skip it)
-    if mask.min() < 0 or mask.max() > 1:
-        mask = 1.0 / (1.0 + np.exp(-mask))
-    mask = (mask * 255).clip(0, 255).astype(np.uint8)
-    mask_pil = Image.fromarray(mask, mode="L").resize((orig_w, orig_h), Image.BILINEAR)
-    return np.array(mask_pil, dtype=np.float32) / 255.0
-
-
-class LocalBackgroundRemoverNode:
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "alpha")
+class PixPunkRemoveBackground:
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
     FUNCTION = "remove_background"
     CATEGORY = "image/transform"
+    DESCRIPTION = "Removes image backgrounds locally using BEN2 (GPU accelerated). No data leaves your machine."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "images": ("IMAGE",),
-                "model": (list(MODELS.keys()),),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -127,39 +110,26 @@ class LocalBackgroundRemoverNode:
     def remove_background(
         self,
         images: torch.Tensor,
-        model: str,
         unique_id: str | None = None,
     ):
         frames = images.detach().cpu().float()
         if frames.ndim != 4:
             raise ValueError("Expected images with shape (N, H, W, C)")
 
-        cfg = MODELS[model]
-        target_h, target_w = cfg["dims"]
-        session = _get_session(model)
-        input_name = session.get_inputs()[0].name
-        output_name = session.get_outputs()[0].name
+        model, device = _load_model()
 
         total = frames.shape[0]
         progress_bar = ProgressBar(total, node_id=unique_id) if ProgressBar else None
 
-        results_rgb: list[np.ndarray] = []
-        results_alpha: list[np.ndarray] = []
+        results: list[np.ndarray] = []
 
         for idx, frame in enumerate(frames.numpy()):
-            orig_h, orig_w = frame.shape[:2]
-            tensor = _preprocess(frame, target_h, target_w)
-            raw_mask = session.run([output_name], {input_name: tensor})[0]
-            alpha = _postprocess(raw_mask, orig_h, orig_w)
+            alpha = _infer(frame, model, device)
+            rgba = np.concatenate([frame[..., :3], alpha[..., np.newaxis]], axis=-1)
+            results.append(rgba)
 
-            rgb = frame[..., :3]
-            results_rgb.append(rgb)
-            results_alpha.append(alpha)
-
-            print(f"BgRemover: [{idx + 1}/{total}] done")
+            print(f"RemoveBackground: [{idx + 1}/{total}] done")
             if progress_bar is not None:
                 progress_bar.update(1)
 
-        images_out = torch.from_numpy(np.stack(results_rgb))
-        alpha_out = torch.from_numpy(np.stack(results_alpha))
-        return (images_out, alpha_out)
+        return (torch.from_numpy(np.stack(results)),)

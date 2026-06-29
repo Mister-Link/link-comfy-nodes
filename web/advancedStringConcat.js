@@ -6,6 +6,8 @@ const INPUT_TYPE = "STRING";
 
 const getInputName = (index) => `${INPUT_PREFIX}${index}`;
 
+const MATCHING_NODE_NAMES = new Set(["Concat", "Concat Strings"]);
+
 const removeWidget = (node, name) => {
   if (!node.widgets) {
     return;
@@ -49,6 +51,14 @@ const moveWidgetToEnd = (node, widget) => {
   node.widgets.push(widget);
 };
 
+const updateNodeSize = (node) => {
+  if (!node) {
+    return;
+  }
+  node.computeSize?.();
+  node.setDirtyCanvas?.(true, true);
+};
+
 const syncDynamicInputs = (node) => {
   const inputs = [];
   for (let i = 1; i <= MAX_INPUTS; i += 1) {
@@ -76,14 +86,14 @@ const syncDynamicInputs = (node) => {
     moveWidgetToEnd(node, templateWidget);
   }
 
-  node.setDirtyCanvas(true, true);
+  updateNodeSize(node);
 };
 
 app.registerExtension({
   name: "Concat.DynamicInputs",
 
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData.name !== "Concat") {
+    if (!MATCHING_NODE_NAMES.has(nodeData.name)) {
       return;
     }
 
@@ -101,6 +111,13 @@ app.registerExtension({
 
       syncDynamicInputs(this);
 
+      const originalOnConfigure = this.onConfigure;
+      this.onConfigure = function () {
+        const configureResult = originalOnConfigure?.apply(this, arguments);
+        syncDynamicInputs(this);
+        return configureResult;
+      };
+
       return result;
     };
 
@@ -116,5 +133,12 @@ app.registerExtension({
       syncDynamicInputs(this);
       return result;
     };
+  },
+
+  async nodeCreated(node) {
+    if (!MATCHING_NODE_NAMES.has(node.comfyClass)) {
+      return;
+    }
+    syncDynamicInputs(node);
   },
 });

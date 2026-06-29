@@ -4,17 +4,19 @@ import torch
 
 
 class LoopSCAILPoseFramesNode:
-    RETURN_TYPES = ("IMAGE", "INT", "INT")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT")
     RETURN_NAMES = (
         "looped_frames",
         "total_frames",
         "overlap_frames",
+        "insertion_point",
     )
     OUTPUT_TOOLTIPS = (
         "Looped frame sequence ready for WAN SCAIL: [end portion] + [blank frames] + [start portion], "
         "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
         "Actual total frame count of looped_frames. Equals total_frames input +4 when frame_overlap is on (2 prefix + 2 suffix).",
         "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
+        "0-based index of the first blank frame in looped_frames.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -89,5 +91,6 @@ class LoopSCAILPoseFramesNode:
 
         out_total = looped_frames.shape[0]
         overlap_frames = 4 if frame_overlap else 0
+        insertion_point = (2 if frame_overlap else 0) + end_num_frames
 
-        return (looped_frames, out_total, overlap_frames)
+        return (looped_frames, out_total, overlap_frames, insertion_point)
