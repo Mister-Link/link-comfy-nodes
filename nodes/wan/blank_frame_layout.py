@@ -16,7 +16,7 @@ class LoopSCAILPoseFramesNode:
         "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
         "Actual total frame count of looped_frames. Equals total_frames input +4 when frame_overlap is on (2 prefix + 2 suffix).",
         "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
-        "0-based index of the first blank frame in looped_frames.",
+        "0-based index of the first frame after the blank frames in looped_frames.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -91,6 +91,6 @@ class LoopSCAILPoseFramesNode:
 
         out_total = looped_frames.shape[0]
         overlap_frames = 4 if frame_overlap else 0
-        insertion_point = (2 if frame_overlap else 0) + end_num_frames
+        insertion_point = (2 if frame_overlap else 0) + end_num_frames + blank_frames
 
         return (looped_frames, out_total, overlap_frames, insertion_point)
