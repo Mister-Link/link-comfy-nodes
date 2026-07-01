@@ -18,6 +18,7 @@ from .nodes import (
     FastImagePreviewNode,
     ImageRotatorNode,
     KSamplerAdvancedDual,
+    LoadFolderNode,
     LoadVACEModuleNode,
     MatchColorPaletteNode,
     NativeWanPoseStrength,
@@ -42,6 +43,7 @@ from .nodes import (
 )
 
 NODE_CLASS_MAPPINGS = {
+    "Load Folder": LoadFolderNode,
     "Load VACE Module": LoadVACEModuleNode,
     "Average Mask Region Size": AverageMaskRegionSizeNode,
     "Add Image to Batch": AddImageToBatchNode,
@@ -82,6 +84,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "Load Folder": "Load Folder",
     "Load VACE Module": "Load VACE Module",
     "Average Mask Region Size": "Average Mask Region Size",
     "Add Image to Batch": "Add Image to Batch",
