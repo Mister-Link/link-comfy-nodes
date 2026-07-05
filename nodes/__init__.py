@@ -11,6 +11,7 @@ from .image import (
     PixelationDimensionsNode,
     PixPunkRemoveBackground,
     ResizeImageAndMaskBySideNode,
+    SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
 )
 from .latent import ChangeLatentDimensions, SnapToDivisible
@@ -69,6 +70,7 @@ __all__ = [
     "PreviewWebmNode",
     "ReplaceAlpha",
     "ResizeImageAndMaskBySideNode",
+    "SpriteScaleCalculatorNode",
     "SaveFolderAsZip",
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",

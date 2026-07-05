@@ -25,6 +25,7 @@ A collection of custom nodes for [ComfyUI](https://github.com/comfyanonymous/Com
 - **Resize Image and Mask by Side** — resize by longest/shortest side
 - **Add Image to Batch** — insert an image at a specific batch index
 - **Pixelation Dimensions** — dimension presets
+- **Sprite Scale Calculator** — convert intended real-world sprite size into pixel dimensions
 - **Remove Background** — bulk background removal via bgeraser.com
 - **Spritesheet Builder** — combine frames into a spritesheet with target aspect ratio
 - **Convert to Pixel Art** — pixelation effect with color quantization

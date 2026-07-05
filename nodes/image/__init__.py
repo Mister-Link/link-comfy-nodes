@@ -8,3 +8,4 @@ from .load_folder import LoadFolderNode
 from .resize import ResizeImageAndMaskBySideNode
 from .rotate import ImageRotatorNode
 from .spritesheet import SpritesheetBuilderNode
+from .sprite_scale import SpriteScaleCalculatorNode
