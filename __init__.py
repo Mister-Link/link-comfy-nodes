@@ -6,7 +6,6 @@ from .nodes import (
     AdvancedStringConcat,
     StringToListNode,
     AutoCropperNode,
-    PixPunkRemoveBackground,
     AverageMaskRegionSizeNode,
     BatchImageSave,
     ChangeLatentDimensions,
@@ -35,8 +34,6 @@ from .nodes import (
     SpriteScaleCalculatorNode,
     SpritesheetPreviewNode,
     TemporalMaskCropper,
-    TrimConditioning,
-    VACESampler,
     LoopSCAILPoseFramesNode,
     ShiftImageBatchNode,
     WANFrameCalculatorNode,
@@ -77,12 +74,9 @@ NODE_CLASS_MAPPINGS = {
     "Auto Cropper": AutoCropperNode,
     "Fast Image Preview": FastImagePreviewNode,
     "Temporal Mask Cropper": TemporalMaskCropper,
-    "Trim Conditioning": TrimConditioning,
     "Shift Image Batch": ShiftImageBatchNode,
-    "VACE Sampler": VACESampler,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
     "Preview (webm)": PreviewWebmNode,
-    "Remove Background": PixPunkRemoveBackground,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -119,12 +113,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Auto Cropper": "Auto Cropper",
     "Fast Image Preview": "Fast Image Preview",
     "Temporal Mask Cropper": "Temporal Mask Cropper",
-    "Trim Conditioning": "Trim Conditioning",
     "Shift Image Batch": "Shift Image Batch",
-    "VACE Sampler": "VACE Sampler",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
     "Preview (webm)": "Preview (webm)",
-    "Remove Background": "Remove Background",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

@@ -1,5 +1,4 @@
 from .auto_cropper import AutoCropperNode
-from .background_remover import PixPunkRemoveBackground
 from .batch import AddImageToBatchNode
 from .crop import CropToContentNode
 from .crop_by_bbox import CropByBBoxNode

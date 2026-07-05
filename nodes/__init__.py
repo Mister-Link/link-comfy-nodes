@@ -9,7 +9,6 @@ from .image import (
     ImageRotatorNode,
     LoadFolderNode,
     PixelationDimensionsNode,
-    PixPunkRemoveBackground,
     ResizeImageAndMaskBySideNode,
     SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
@@ -29,8 +28,6 @@ from .video import (
     AverageMaskRegionSizeNode,
     ReplaceAlpha,
     TemporalMaskCropper,
-    TrimConditioning,
-    VACESampler,
 )
 from .wan import (
     LoadVACEModuleNode,
@@ -43,7 +40,6 @@ from .wan import (
 
 __all__ = [
     "AddImageToBatchNode",
-    "PixPunkRemoveBackground",
     "LoopSCAILPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
@@ -76,8 +72,6 @@ __all__ = [
     "SpritesheetBuilderNode",
     "SpritesheetPreviewNode",
     "TemporalMaskCropper",
-    "TrimConditioning",
-    "VACESampler",
     "ShiftImageBatchNode",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
