@@ -14,7 +14,7 @@ class LoopSCAILPoseFramesNode:
     OUTPUT_TOOLTIPS = (
         "Looped frame sequence ready for WAN SCAIL: [end portion] + [blank frames] + [start portion], "
         "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
-        "Actual total frame count of frames. Equals total_frames input +4 when frame_overlap is on (2 prefix + 2 suffix).",
+        "Actual total frame count of frames after trimming the source frames to keep the output WAN-valid.",
         "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
         "0-based index of the first frame after the blank frames in frames.",
     )
@@ -32,8 +32,8 @@ class LoopSCAILPoseFramesNode:
                         "default": 37,
                         "min": 1,
                         "max": 10000,
-                        "step": 4,
-                        "tooltip": "Total WAN frame count — must be 1+n*4 (1, 5, 9, 13, … 25, 29, 33, 37…). Errors if invalid.",
+                        "step": 1,
+                        "tooltip": "Maximum target frame count before optional overlap. The node may trim source frames down from this target to keep blank frames and output frames WAN-valid.",
                     },
                 ),
                 "blank_frames": (
@@ -43,7 +43,7 @@ class LoopSCAILPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Number of black frames placed in the middle of the loop. SCAIL inpaints these to create a smooth pose transition between the end and start of the original sequence.",
+                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Must be 0 or a WAN-valid count: 1+n*4 (1, 5, 9, 13, ...).",
                     },
                 ),
                 "frame_overlap": (
@@ -62,38 +62,77 @@ class LoopSCAILPoseFramesNode:
         }
 
     def calculate(self, frames: torch.Tensor, total_frames: int, blank_frames: int, frame_overlap: bool):
-        if blank_frames <= 0:
-            return (frames, int(frames.shape[0]), 0, 0)
+        def is_wan_valid(count: int) -> bool:
+            return count >= 1 and (count - 1) % 4 == 0
 
-        if (total_frames - 1) % 4 != 0:
-            nearest_low = 1 + ((total_frames - 1) // 4) * 4
+        def nearest_wan_values(count: int) -> tuple[int, int]:
+            nearest_low = 1 + ((max(1, count) - 1) // 4) * 4
             nearest_high = nearest_low + 4
+            return nearest_low, nearest_high
+
+        input_frame_count = int(frames.shape[0])
+
+        if blank_frames <= 0:
+            if not is_wan_valid(input_frame_count):
+                nearest_low, nearest_high = nearest_wan_values(input_frame_count)
+                raise ValueError(
+                    f"frames input has {input_frame_count} frames. With blank_frames=0, "
+                    f"the input must be WAN-valid (1+n*4). Use {nearest_low} or {nearest_high}."
+                )
+            return (frames, input_frame_count, 0, 0)
+
+        if not is_wan_valid(blank_frames):
+            nearest_low, nearest_high = nearest_wan_values(blank_frames)
             raise ValueError(
-                f"total_frames={total_frames} is not a valid WAN frame count (must be 1+n*4). "
+                f"blank_frames={blank_frames} is not a valid WAN frame count (must be 1+n*4 or 0). "
                 f"Use {nearest_low} or {nearest_high}."
             )
 
-        blank_frames = min(blank_frames, total_frames)
-        remaining = total_frames - blank_frames
+        overlap_frames = 4 if frame_overlap else 0
+        target_source_frames = max(0, min(input_frame_count, total_frames - blank_frames))
+        source_frame_count = target_source_frames - (target_source_frames % 4)
 
-        start_num_frames = remaining // 2
-        end_num_frames = remaining - start_num_frames
+        if frame_overlap and 0 < source_frame_count < 4:
+            source_frame_count = 0
+
+        if frame_overlap and source_frame_count == 0 and input_frame_count > 0:
+            raise ValueError(
+                "frame_overlap requires at least 4 usable source frames after trimming. "
+                "Increase total_frames, reduce blank_frames, or disable frame_overlap."
+            )
+
+        start_num_frames = source_frame_count // 2
+        end_num_frames = source_frame_count - start_num_frames
 
         _, H, W, C = frames.shape
 
-        start_portion = frames[:start_num_frames] if start_num_frames > 0 else frames[:0]
-        end_portion = frames[start_num_frames:start_num_frames + end_num_frames] if end_num_frames > 0 else frames[:0]
+        start_portion = (
+            frames[:start_num_frames] if start_num_frames > 0 else frames[:0]
+        )
+        end_portion = (
+            frames[input_frame_count - end_num_frames : input_frame_count]
+            if end_num_frames > 0
+            else frames[:0]
+        )
         black = torch.zeros(blank_frames, H, W, C, dtype=frames.dtype, device=frames.device)
 
         if frame_overlap:
-            prefix = frames[start_num_frames - 2 : start_num_frames]
-            suffix = frames[start_num_frames : start_num_frames + 2]
+            if start_num_frames < 2 or end_num_frames < 2:
+                raise ValueError(
+                    "frame_overlap requires at least 2 retained frames on both sides of the insertion point."
+                )
+            prefix = end_portion[-2:]
+            suffix = start_portion[:2]
             looped_frames = torch.cat([prefix, end_portion, black, start_portion, suffix], dim=0)
         else:
             looped_frames = torch.cat([end_portion, black, start_portion], dim=0)
 
         out_total = looped_frames.shape[0]
-        overlap_frames = 4 if frame_overlap else 0
         insertion_point = (2 if frame_overlap else 0) + end_num_frames + blank_frames
+
+        if not is_wan_valid(out_total):
+            raise ValueError(
+                "Could not construct a WAN-valid output frame count from the provided inputs."
+            )
 
         return (looped_frames, out_total, overlap_frames, insertion_point)
