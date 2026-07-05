@@ -24,35 +24,58 @@ class WANFramesToAddAndCut:
         }
 
     def calculate(self, frame_count: int, frames_to_add: int, frames_to_cut: int):
-        def next_valid(n):
+        def next_valid(n: int) -> int:
             n = max(1, n)
             rem = (n - 1) % 4
             return n if rem == 0 else n + (4 - rem)
 
-        def prev_valid(n):
+        def prev_valid(n: int) -> int:
             n = max(1, n)
-            return n - (n - 1) % 4
+            return n - ((n - 1) % 4)
 
-        target = frame_count + frames_to_add - frames_to_cut
+        def candidate_frame_counts(target: int):
+            lo = prev_valid(target)
+            hi = next_valid(target)
+            return sorted({lo, hi}, key=lambda value: (abs(value - target), value))
 
-        lo = prev_valid(max(1, target))
-        hi = next_valid(max(1, target))
+        requested_output = frame_count + frames_to_add - frames_to_cut
+
+        # If the requested cut is large, we may need a larger add count just to keep
+        # the final frame count positive. Search a bounded set of WAN-valid add
+        # values that covers both the requested add count and that feasibility edge.
+        min_add_for_positive_output = max(1, frames_to_cut - frame_count + 1)
+        max_add_candidate = max(
+            next_valid(frames_to_add),
+            next_valid(min_add_for_positive_output),
+        ) + 8
 
         best = None
-        for valid_target in sorted({lo, hi}, key=lambda v: abs(v - target)):
-            delta = valid_target - target
+        for add in range(1, max_add_candidate + 1, 4):
+            target_output = frame_count + add - frames_to_cut
 
-            # Option A: absorb delta into frames_to_cut (cut fewer or more)
-            add_a, cut_a = frames_to_add, frames_to_cut - delta
-            # Option B: absorb delta into frames_to_add (add more or fewer)
-            add_b, cut_b = frames_to_add + delta, frames_to_cut
+            for output_frame_count in candidate_frame_counts(target_output):
+                cut = frame_count + add - output_frame_count
+                if cut < 0:
+                    continue
 
-            for add, cut in ((add_a, cut_a), (add_b, cut_b)):
-                if add >= 0 and cut >= 0 and cut < frame_count + add:
-                    cost = abs(add - frames_to_add) + abs(cut - frames_to_cut)
-                    if best is None or cost < best[3]:
-                        best = (valid_target, add, cut, cost)
+                cost = abs(add - frames_to_add) + abs(cut - frames_to_cut)
+                candidate = (
+                    cost,
+                    abs(output_frame_count - requested_output),
+                    abs(add - frames_to_add),
+                    abs(cut - frames_to_cut),
+                    output_frame_count,
+                    add,
+                    cut,
+                )
 
-        if best:
-            return (best[0], best[1], best[2])
-        return (frame_count + frames_to_add - frames_to_cut, frames_to_add, frames_to_cut)
+                if best is None or candidate < best:
+                    best = candidate
+
+        if best is None:
+            fallback_add = next_valid(max(1, frames_to_add))
+            fallback_output = next_valid(max(1, frame_count + fallback_add - frames_to_cut))
+            fallback_cut = max(0, frame_count + fallback_add - fallback_output)
+            return (fallback_output, fallback_add, fallback_cut)
+
+        return (best[4], best[5], best[6])
