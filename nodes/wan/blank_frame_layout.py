@@ -9,14 +9,15 @@ class LoopSCAILPoseFramesNode:
         "frames",
         "total_frames",
         "overlap_frames",
-        "insertion_point",
+        "shift",
     )
     OUTPUT_TOOLTIPS = (
         "Looped frame sequence ready for WAN SCAIL: [end portion] + [blank frames] + [start portion], "
         "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
         "Actual total frame count of frames after trimming the source frames to keep the output WAN-valid.",
         "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
-        "0-based index of the first frame after the blank frames in frames.",
+        "Amount to rotate the (overlap-trimmed) sequence left by to put original frame 1 back at position 1: "
+        "end_portion length + blank_frames.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -26,16 +27,6 @@ class LoopSCAILPoseFramesNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
-                "total_frames": (
-                    "INT",
-                    {
-                        "default": 37,
-                        "min": 1,
-                        "max": 10000,
-                        "step": 1,
-                        "tooltip": "Maximum target frame count before optional overlap. The node may trim source frames down from this target to keep blank frames and output frames WAN-valid.",
-                    },
-                ),
                 "blank_frames": (
                     "INT",
                     {
@@ -61,7 +52,7 @@ class LoopSCAILPoseFramesNode:
             }
         }
 
-    def calculate(self, frames: torch.Tensor, total_frames: int, blank_frames: int, frame_overlap: bool):
+    def calculate(self, frames: torch.Tensor, blank_frames: int, frame_overlap: bool):
         def is_wan_valid(count: int) -> bool:
             return count >= 1 and (count - 1) % 4 == 0
 
@@ -89,50 +80,59 @@ class LoopSCAILPoseFramesNode:
             )
 
         overlap_frames = 4 if frame_overlap else 0
-        target_source_frames = max(0, min(input_frame_count, total_frames - blank_frames))
-        source_frame_count = target_source_frames - (target_source_frames % 4)
 
-        if frame_overlap and 0 < source_frame_count < 4:
-            source_frame_count = 0
+        # Shift left 50%: rotate so the true end/begin seam sits near the middle.
+        split = input_frame_count // 2
+        end_portion = frames[split:]
+        start_portion = frames[:split]
 
-        if frame_overlap and source_frame_count == 0 and input_frame_count > 0:
+        # Cut frames adjacent to the blank region (before, then after, then before again)
+        # until [end_portion] + [blank_frames] + [start_portion] is WAN-valid.
+        excess = input_frame_count % 4
+        cut_before = True
+        for _ in range(excess):
+            if cut_before:
+                if end_portion.shape[0] == 0:
+                    raise ValueError(
+                        "Could not construct a WAN-valid output frame count: ran out of frames "
+                        "before the blank region while trimming."
+                    )
+                end_portion = end_portion[:-1]
+            else:
+                if start_portion.shape[0] == 0:
+                    raise ValueError(
+                        "Could not construct a WAN-valid output frame count: ran out of frames "
+                        "after the blank region while trimming."
+                    )
+                start_portion = start_portion[1:]
+            cut_before = not cut_before
+
+        end_num_frames = end_portion.shape[0]
+        start_num_frames = start_portion.shape[0]
+
+        if frame_overlap and (end_num_frames < 2 or start_num_frames < 2):
             raise ValueError(
-                "frame_overlap requires at least 4 usable source frames after trimming. "
-                "Increase total_frames, reduce blank_frames, or disable frame_overlap."
+                "frame_overlap requires at least 2 retained frames on both sides of the blank region."
             )
 
-        start_num_frames = source_frame_count // 2
-        end_num_frames = source_frame_count - start_num_frames
-
         _, H, W, C = frames.shape
-
-        start_portion = (
-            frames[:start_num_frames] if start_num_frames > 0 else frames[:0]
-        )
-        end_portion = (
-            frames[input_frame_count - end_num_frames : input_frame_count]
-            if end_num_frames > 0
-            else frames[:0]
-        )
         black = torch.zeros(blank_frames, H, W, C, dtype=frames.dtype, device=frames.device)
+        seq = torch.cat([end_portion, black, start_portion], dim=0)
 
         if frame_overlap:
-            if start_num_frames < 2 or end_num_frames < 2:
-                raise ValueError(
-                    "frame_overlap requires at least 2 retained frames on both sides of the insertion point."
-                )
-            prefix = end_portion[-2:]
-            suffix = start_portion[:2]
-            looped_frames = torch.cat([prefix, end_portion, black, start_portion, suffix], dim=0)
+            # segment 1 = end_portion (before blanks), segment 2 = start_portion (after blanks).
+            prefix = start_portion[-2:]
+            suffix = end_portion[:2]
+            looped_frames = torch.cat([prefix, seq, suffix], dim=0)
         else:
-            looped_frames = torch.cat([end_portion, black, start_portion], dim=0)
+            looped_frames = seq
 
         out_total = looped_frames.shape[0]
-        insertion_point = (2 if frame_overlap else 0) + end_num_frames + blank_frames
+        shift = end_num_frames + blank_frames
 
         if not is_wan_valid(out_total):
             raise ValueError(
                 "Could not construct a WAN-valid output frame count from the provided inputs."
             )
 
-        return (looped_frames, out_total, overlap_frames, insertion_point)
+        return (looped_frames, out_total, overlap_frames, shift)
