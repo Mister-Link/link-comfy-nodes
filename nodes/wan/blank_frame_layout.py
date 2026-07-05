@@ -43,7 +43,7 @@ class LoopSCAILPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Must be 0 or a WAN-valid count: 1+n*4 (1, 5, 9, 13, ...).",
+                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Looping/inpainting only applies when this is greater than 1. For values above 1, it must be WAN-valid: 1+n*4 (1, 5, 9, 13, ...).",
                     },
                 ),
                 "frame_overlap": (
@@ -72,11 +72,11 @@ class LoopSCAILPoseFramesNode:
 
         input_frame_count = int(frames.shape[0])
 
-        if blank_frames <= 0:
+        if blank_frames <= 1:
             if not is_wan_valid(input_frame_count):
                 nearest_low, nearest_high = nearest_wan_values(input_frame_count)
                 raise ValueError(
-                    f"frames input has {input_frame_count} frames. With blank_frames=0, "
+                    f"frames input has {input_frame_count} frames. With blank_frames <= 1, "
                     f"the input must be WAN-valid (1+n*4). Use {nearest_low} or {nearest_high}."
                 )
             return (frames, input_frame_count, 0, 0)
