@@ -6,7 +6,7 @@ import torch
 class LoopSCAILPoseFramesNode:
     RETURN_TYPES = ("IMAGE", "INT", "INT", "INT")
     RETURN_NAMES = (
-        "looped_frames",
+        "frames",
         "total_frames",
         "overlap_frames",
         "insertion_point",
@@ -14,9 +14,9 @@ class LoopSCAILPoseFramesNode:
     OUTPUT_TOOLTIPS = (
         "Looped frame sequence ready for WAN SCAIL: [end portion] + [blank frames] + [start portion], "
         "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
-        "Actual total frame count of looped_frames. Equals total_frames input +4 when frame_overlap is on (2 prefix + 2 suffix).",
+        "Actual total frame count of frames. Equals total_frames input +4 when frame_overlap is on (2 prefix + 2 suffix).",
         "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
-        "0-based index of the first frame after the blank frames in looped_frames.",
+        "0-based index of the first frame after the blank frames in frames.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -62,6 +62,9 @@ class LoopSCAILPoseFramesNode:
         }
 
     def calculate(self, frames: torch.Tensor, total_frames: int, blank_frames: int, frame_overlap: bool):
+        if blank_frames <= 0:
+            return (frames, int(frames.shape[0]), 0, 0)
+
         if (total_frames - 1) % 4 != 0:
             nearest_low = 1 + ((total_frames - 1) // 4) * 4
             nearest_high = nearest_low + 4
