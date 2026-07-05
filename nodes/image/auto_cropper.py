@@ -241,6 +241,8 @@ class AutoCropperNode:
                 f"Expected frames with shape (N, H, W, C), got {frames_np.shape}"
             )
 
+        num_frames, H, W, C = frames_np.shape
+
         if alpha is not None:
             alpha_np = alpha.cpu().numpy()
             if alpha_np.ndim == 4 and alpha_np.shape[-1] == 1:
@@ -249,13 +251,27 @@ class AutoCropperNode:
                 raise ValueError(
                     f"Expected alpha with shape (N, H, W), got {alpha_np.shape}"
                 )
+            if alpha_np.shape[1:3] != (H, W):
+                print(
+                    f"[AutoCropper] alpha resolution {alpha_np.shape[1:3]} does not "
+                    f"match frames resolution {(H, W)}; resizing alpha to match."
+                )
+                resized = np.empty((alpha_np.shape[0], H, W), dtype=alpha_np.dtype)
+                for i in range(alpha_np.shape[0]):
+                    resized[i] = cv2.resize(
+                        alpha_np[i], (W, H), interpolation=cv2.INTER_LINEAR
+                    )
+                alpha_np = resized
+            if alpha_np.shape[0] != num_frames:
+                if alpha_np.shape[0] == 1:
+                    alpha_np = np.repeat(alpha_np, num_frames, axis=0)
+                else:
+                    raise ValueError(
+                        f"alpha has {alpha_np.shape[0]} frames but frames has "
+                        f"{num_frames}; frame counts must match (or alpha must have 1 frame)"
+                    )
         else:
-            alpha_np = np.ones(
-                (frames_np.shape[0], frames_np.shape[1], frames_np.shape[2]),
-                dtype=np.float32,
-            )
-
-        num_frames, H, W, C = frames_np.shape
+            alpha_np = np.ones((num_frames, H, W), dtype=np.float32)
 
         print(f"[AutoCropper] Analyzing frames with sensitivity {sensitivity}...")
         global_box = None

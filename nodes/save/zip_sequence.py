@@ -168,7 +168,7 @@ class SaveImageSequenceZip:
                     ext = "png"
                     format_name = "PNG"
 
-                if frames.shape[0] == 1:
+                if len(frames) == 1:
                     pil_img = self._to_pil(frames[0], ext)
                     img_buffer = BytesIO()
                     pil_img.save(img_buffer, format=format_name)
@@ -182,7 +182,7 @@ class SaveImageSequenceZip:
 
                     zipf.writestr(image_filename, img_buffer.getvalue())
                 else:
-                    for i in range(frames.shape[0]):
+                    for i in range(len(frames)):
                         frame_index = i + 1
                         pil_img = self._to_pil(frames[i], ext)
                         img_buffer = BytesIO()
@@ -195,14 +195,14 @@ class SaveImageSequenceZip:
                                     prefix_ext if has_extension else f".{ext}"
                                 )
                             except (KeyError, IndexError):
-                                digits = max(2, len(str(frames.shape[0])))
+                                digits = max(2, len(str(len(frames))))
                                 image_filename = (
                                     f"{prefix}_{frame_index:0{digits}d}.{ext}"
                                     if not has_extension
                                     else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                                 )
                         else:
-                            digits = max(2, len(str(frames.shape[0])))
+                            digits = max(2, len(str(len(frames))))
                             image_filename = (
                                 f"{prefix}_{frame_index:0{digits}d}.{ext}"
                                 if not has_extension
@@ -238,14 +238,16 @@ class SaveImageSequenceZip:
         return "txt"
 
     @staticmethod
-    def _normalize_frames(data: torch.Tensor | np.ndarray | list | tuple) -> np.ndarray:
+    def _normalize_frames(data: torch.Tensor | np.ndarray | list | tuple) -> list[np.ndarray]:
+        # Returns a flat list of (H, W, C) frames rather than a single stacked
+        # array, since frames may not all share the same dimensions.
         if isinstance(data, (list, tuple)):
-            frames_list = [
-                SaveImageSequenceZip._normalize_frames(item) for item in data
-            ]
+            frames_list: list[np.ndarray] = []
+            for item in data:
+                frames_list.extend(SaveImageSequenceZip._normalize_frames(item))
             if not frames_list:
                 raise ValueError("Expected non-empty list/tuple for frames")
-            return np.concatenate(frames_list, axis=0)
+            return frames_list
         if isinstance(data, np.ndarray):
             frames = torch.from_numpy(data).float()
         else:
@@ -261,7 +263,7 @@ class SaveImageSequenceZip:
             frames = frames.unsqueeze(-1)
         if frames.ndim != 4:
             raise ValueError("Expected data with shape (N, H, W, C)")
-        return frames.numpy()
+        return [frames[i].numpy() for i in range(frames.shape[0])]
 
     @staticmethod
     def _to_pil(frame: np.ndarray, ext: str) -> Image.Image:

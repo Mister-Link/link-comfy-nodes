@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -11,6 +12,13 @@ import folder_paths  # type: ignore[import-untyped]
 from comfy_execution.utils import get_executing_context
 
 _BATCH_IMAGE_SAVE_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _resolve_batch_save_template(template: str, timestamp_token: str, idx: int = 1) -> str:
+    resolved = template.replace("{:datetime}", timestamp_token)
+    if "{index" in resolved:
+        return resolved.format_map({"index": idx})
+    return resolved.format(idx)
 
 
 class BatchImageSave:
@@ -60,6 +68,7 @@ class BatchImageSave:
         unique_id: str | None = None,
     ):
         images_np = images.cpu().numpy()
+        timestamp_token = datetime.now().strftime("%m%d%y-%H%M%S")
 
         if images_np.ndim != 4:
             raise ValueError(
@@ -97,16 +106,12 @@ class BatchImageSave:
                 resolved_path, full_dir = _BATCH_IMAGE_SAVE_CACHE[cache_key]
                 os.makedirs(full_dir, exist_ok=True)
             else:
-
-                def format_path(template: str, idx: int) -> str:
-                    if "{index" in template:
-                        return template.format_map({"index": idx})
-                    return template.format(idx)
-
                 uses_template = False
                 if "{" in path and "}" in path:
                     try:
-                        test_candidate = format_path(path, 1)
+                        test_candidate = _resolve_batch_save_template(
+                            path, timestamp_token, 1
+                        )
                         uses_template = test_candidate != path
                     except (ValueError, KeyError, IndexError):
                         uses_template = False
@@ -115,7 +120,9 @@ class BatchImageSave:
                     index = 1
                     while True:
                         try:
-                            candidate = format_path(path, index)
+                            candidate = _resolve_batch_save_template(
+                                path, timestamp_token, index
+                            )
                         except (ValueError, KeyError, IndexError):
                             uses_template = False
                             break
@@ -172,9 +179,12 @@ class BatchImageSave:
             if link_path:
                 os.symlink(full_dir, link_path)
 
+        resolved_filename_prefix = _resolve_batch_save_template(
+            filename_prefix, timestamp_token
+        )
         existing_max = 0
         pattern = re.compile(
-            rf"^{re.escape(filename_prefix)}{re.escape(delimiter)}(\d+)\.{re.escape(ext)}$"
+            rf"^{re.escape(resolved_filename_prefix)}{re.escape(delimiter)}(\d+)\.{re.escape(ext)}$"
         )
         for name in os.listdir(full_dir):
             match = pattern.match(name)
@@ -187,9 +197,9 @@ class BatchImageSave:
 
         for i in range(num_images):
             index = start_index + i
-            filename = f"{filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
+            filename = f"{resolved_filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
 
-            relative_path = os.path.join(path, filename) if path else filename
+            relative_path = os.path.join(resolved_path, filename) if resolved_path else filename
             full_path = os.path.join(full_dir, filename)
 
             frame = images_np[i]

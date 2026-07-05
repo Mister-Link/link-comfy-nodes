@@ -12,6 +12,10 @@ class SpritesheetBuilderNode:
     RETURN_NAMES = ("spritesheet", "alpha", "metadata")
     FUNCTION = "build_spritesheet"
     CATEGORY = "image/transform"
+    # Building one spritesheet requires every frame at once, even when they
+    # arrive as a list of variable-sized images (e.g. from Load Folder), so
+    # this must run as a single call rather than being mapped per list item.
+    INPUT_IS_LIST = True
 
     _ASPECT_RATIOS = {
         "1:1 (Square)": (1, 1),
@@ -31,40 +35,62 @@ class SpritesheetBuilderNode:
             }
         }
 
-    def build_spritesheet(self, frames, alpha=None, aspect_ratio: str = "1:1 (Square)"):
-        frames_cpu = frames.detach().cpu().float()
-        if frames_cpu.ndim != 4:
+    @staticmethod
+    def _flatten_frames(value) -> list[torch.Tensor]:
+        if isinstance(value, (list, tuple)):
+            frames: list[torch.Tensor] = []
+            for item in value:
+                frames.extend(SpritesheetBuilderNode._flatten_frames(item))
+            return frames
+        tensor = value.detach().cpu().float()
+        if tensor.ndim == 3:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim != 4:
             raise ValueError("Expected frames with shape (N, H, W, C)")
+        return [tensor[i] for i in range(tensor.shape[0])]
 
-        alpha_cpu = None
+    @staticmethod
+    def _flatten_masks(value) -> list[torch.Tensor]:
+        if isinstance(value, (list, tuple)):
+            masks: list[torch.Tensor] = []
+            for item in value:
+                masks.extend(SpritesheetBuilderNode._flatten_masks(item))
+            return masks
+        tensor = value.detach().cpu().float()
+        if tensor.ndim == 4 and tensor.shape[-1] == 1:
+            tensor = tensor[..., 0]
+        if tensor.ndim == 2:
+            tensor = tensor.unsqueeze(0)
+        if tensor.ndim != 3:
+            raise ValueError("Expected alpha mask with shape (N, H, W)")
+        return [tensor[i] for i in range(tensor.shape[0])]
+
+    def build_spritesheet(self, frames, alpha=None, aspect_ratio="1:1 (Square)"):
+        if isinstance(aspect_ratio, (list, tuple)):
+            aspect_ratio = aspect_ratio[0]
+
+        frame_list = self._flatten_frames(frames)
+        if not frame_list:
+            raise ValueError("Expected at least one frame")
+        frame_count = len(frame_list)
+
+        alpha_list = None
         if alpha is not None:
-            alpha_tensor = alpha.detach().cpu().float()
-            if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
-                alpha_tensor = alpha_tensor[..., 0]
-            if alpha_tensor.ndim != 3:
-                raise ValueError("Expected alpha mask with shape (N, H, W)")
-            if alpha_tensor.shape[0] != frames_cpu.shape[0]:
-                raise ValueError("Alpha mask batch size does not match frames")
-            alpha_cpu = alpha_tensor.clamp(0, 1)
+            alpha_list = self._flatten_masks(alpha)
+            if len(alpha_list) != frame_count:
+                raise ValueError("Alpha mask count does not match frame count")
 
         target_ratio = self._aspect_ratio_value(aspect_ratio)
-        frame_count, frame_height, frame_width, frame_channels = frames_cpu.shape
-        use_alpha = alpha_cpu is not None or frame_channels == 4
 
-        if use_alpha and frame_channels == 3:
-            alpha_stack = (
-                alpha_cpu
-                if alpha_cpu is not None
-                else torch.ones(
-                    (frame_count, frame_height, frame_width),
-                    dtype=frames_cpu.dtype,
-                )
-            )
-            frames_cpu = torch.cat((frames_cpu, alpha_stack.unsqueeze(-1)), dim=-1)
-            frame_channels = 4
-        elif not use_alpha and frame_channels == 4:
-            frames_cpu = frames_cpu[..., :3]
-            frame_channels = 3
+        # Frames may not all share the same size, so the grid cell is sized to
+        # fit the largest frame; smaller frames are placed in the top-left of
+        # their cell rather than being resized or cropped to match the rest.
+        frame_width = max(frame.shape[1] for frame in frame_list)
+        frame_height = max(frame.shape[0] for frame in frame_list)
+        use_alpha = alpha_list is not None or any(
+            frame.shape[-1] == 4 for frame in frame_list
+        )
+        frame_channels = 4 if use_alpha else 3
 
         columns, rows = self._closest_grid(
             frame_count, target_ratio, frame_width, frame_height
@@ -76,15 +102,25 @@ class SpritesheetBuilderNode:
             (sheet_height, sheet_width, frame_channels), dtype=np.float32
         )
 
-        frames_np = frames_cpu.numpy()
-        for idx in range(frame_count):
+        for idx, frame in enumerate(frame_list):
+            frame_np = frame.numpy()
+            h, w = frame_np.shape[0], frame_np.shape[1]
+
             row = idx // columns
             col = idx % columns
             y0 = row * frame_height
             x0 = col * frame_width
-            spritesheet[
-                y0 : y0 + frame_height, x0 : x0 + frame_width, :frame_channels
-            ] = frames_np[idx, :, :, :frame_channels]
+
+            spritesheet[y0 : y0 + h, x0 : x0 + w, :3] = frame_np[:, :, :3]
+            if frame_channels == 4:
+                if alpha_list is not None:
+                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = (
+                        alpha_list[idx].clamp(0, 1).numpy()
+                    )
+                elif frame_np.shape[-1] == 4:
+                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = frame_np[:, :, 3]
+                else:
+                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = 1.0
 
         result = torch.from_numpy(spritesheet).unsqueeze(0)
         if frame_channels == 4:
