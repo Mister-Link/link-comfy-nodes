@@ -72,7 +72,7 @@ const loadSilhouetteImage = () => {
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = () => resolve(null);
-    img.src = new URL("./spriteScaleSilhouette.png", import.meta.url).href;
+    img.src = new URL("./spriteScaleSilhouette.svg", import.meta.url).href;
   });
 
   return silhouetteImagePromise;
@@ -187,7 +187,7 @@ const drawPreview = (node) => {
 
   if (silhouetteImage) {
     ctx.save();
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(silhouetteImage, refX, refY, refDrawW, refDrawH);
     ctx.restore();
   } else {
