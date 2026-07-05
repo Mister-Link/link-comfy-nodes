@@ -270,6 +270,23 @@ app.registerExtension({
         silhouetteImage: null,
         applyingPreset: false,
       };
+
+      // ComfyUI's DOM widget layout can settle to its final size a frame or two
+      // after onNodeCreated fires (e.g. on initial workflow load), so a single
+      // requestAnimationFrame draw can catch the canvas at a stale, too-narrow
+      // rect. Watch the actual laid-out size instead of guessing when it's ready.
+      if (typeof ResizeObserver !== "undefined") {
+        const resizeObserver = new ResizeObserver(() => drawPreview(this));
+        resizeObserver.observe(canvasWrap);
+        this._spriteScaleState.resizeObserver = resizeObserver;
+
+        const originalOnRemoved = this.onRemoved;
+        this.onRemoved = function () {
+          resizeObserver.disconnect();
+          return originalOnRemoved?.apply(this, arguments);
+        };
+      }
+
       const presetWidget = getWidget(this, "preset");
       const widthWidget = getWidget(this, "target_width_inches");
       const heightWidget = getWidget(this, "target_height_inches");
