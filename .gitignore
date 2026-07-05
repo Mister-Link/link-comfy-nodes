@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.cache/
+
+# Model weights should be fetched at runtime (see background_remover.py's
+# hf_hub_download), not committed to the repo.
+*.onnx
+*.pth
+*.safetensors
+*.ckpt
+*.bin
+
+.DS_Store
