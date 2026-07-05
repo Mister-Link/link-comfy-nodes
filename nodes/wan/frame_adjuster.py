@@ -20,10 +20,20 @@ class WANFramesToAddAndCut:
                     "INT",
                     {"default": 0, "min": 0, "max": 9999, "step": 1},
                 ),
+                "preference": (
+                    ["balanced", "add frames", "remove frames"],
+                    {"default": "balanced"},
+                ),
             }
         }
 
-    def calculate(self, frame_count: int, frames_to_add: int, frames_to_cut: int):
+    def calculate(
+        self,
+        frame_count: int,
+        frames_to_add: int,
+        frames_to_cut: int,
+        preference: str,
+    ):
         def next_valid(n: int) -> int:
             n = max(1, n)
             rem = (n - 1) % 4
@@ -50,12 +60,15 @@ class WANFramesToAddAndCut:
         ) + 8
 
         best = None
-        for add in range(1, max_add_candidate + 1, 4):
+        min_add_candidate = next_valid(max(1, frames_to_add))
+        for add in range(min_add_candidate, max_add_candidate + 1, 4):
             target_output = frame_count + add - frames_to_cut
 
             for output_frame_count in candidate_frame_counts(target_output):
                 cut = frame_count + add - output_frame_count
                 if cut < 0:
+                    continue
+                if preference == "remove frames" and cut < frames_to_cut:
                     continue
 
                 cost = abs(add - frames_to_add) + abs(cut - frames_to_cut)
@@ -73,9 +86,14 @@ class WANFramesToAddAndCut:
                     best = candidate
 
         if best is None:
-            fallback_add = next_valid(max(1, frames_to_add))
-            fallback_output = next_valid(max(1, frame_count + fallback_add - frames_to_cut))
+            fallback_add = min_add_candidate
+            fallback_output = next_valid(
+                max(1, frame_count + fallback_add - frames_to_cut)
+            )
             fallback_cut = max(0, frame_count + fallback_add - fallback_output)
+            if preference == "remove frames" and fallback_cut < frames_to_cut:
+                fallback_cut = frames_to_cut
+                fallback_output = next_valid(max(1, frame_count + fallback_add - fallback_cut))
             return (fallback_output, fallback_add, fallback_cut)
 
         return (best[4], best[5], best[6])
