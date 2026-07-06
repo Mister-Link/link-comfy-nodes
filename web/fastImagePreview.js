@@ -4,6 +4,7 @@ import { api } from "../../scripts/api.js";
 const STYLE_ID = "lc_fast_image_preview_styles";
 const PREVIEW_MIN_HEIGHT = 140;
 const NODE_HEIGHT_PADDING = 54;
+const LOAD_FOLDER_FPS = 12;
 
 function ensureStyles() {
   if (document.getElementById(STYLE_ID)) {
@@ -15,6 +16,12 @@ function ensureStyles() {
   style.textContent = `
     .lc-fast-preview-wrapper {
       pointer-events: none;
+    }
+    .lc-fast-preview-wrapper.loadfolder-mode {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      min-height: 0;
     }
     .dom-widget:has(.lc-fast-preview-wrapper) {
       pointer-events: none !important;
@@ -143,6 +150,38 @@ function ensureStyles() {
     }
     .lc-fast-preview-wrapper.spritesheet-mode .lc-fast-preview-info {
       display: none !important;
+    }
+    .lc-fast-preview.loadfolder-mode {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: hidden !important;
+      width: 100% !important;
+      height: 100% !important;
+      margin: 0 !important;
+      max-height: 100% !important;
+    }
+    .lc-loadfolder-anim-item {
+      max-width: 100%;
+      max-height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+    .lc-loadfolder-anim-item img {
+      max-width: 100%;
+      max-height: 100%;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: -moz-crisp-edges;
+      image-rendering: crisp-edges;
     }
   `;
 
@@ -292,6 +331,199 @@ function buildFullImageUrl(data) {
     type: data.type ?? "temp",
   });
   return api.apiURL(`/view?${params.toString()}`);
+}
+
+function stopLoadFolderAnimation(state) {
+  if (state.loadFolderTimer) {
+    clearInterval(state.loadFolderTimer);
+    state.loadFolderTimer = null;
+  }
+}
+
+function getLoadFolderPreviewRect(node) {
+  const horizontalPadding = 8;
+  const bottomPadding = 8;
+  const widgets = node?.widgets ?? [];
+  const widgetYs = widgets
+    .map((widget) => widget?.last_y)
+    .filter((value) => Number.isFinite(value));
+  const widgetsBottom = widgetYs.length
+    ? Math.max(...widgetYs) + 24
+    : 44 + widgets.length * 24;
+  const x = horizontalPadding;
+  const y = Math.max(44, widgetsBottom + 6);
+  const width = Math.max(1, (node?.size?.[0] ?? 0) - horizontalPadding * 2);
+  const height = Math.max(1, (node?.size?.[1] ?? 0) - y - bottomPadding);
+  return { x, y, width, height };
+}
+
+function updateLoadFolderCanvasFrame(state, node, index) {
+  const frames = state.loadFolderFrames ?? [];
+  if (!frames.length) {
+    state.loadFolderImage = null;
+    state.loadFolderIndex = 0;
+    node.setDirtyCanvas(true, true);
+    return;
+  }
+
+  const nextIndex = ((index % frames.length) + frames.length) % frames.length;
+  state.loadFolderIndex = nextIndex;
+  const frame = frames[nextIndex];
+  const src = buildImageUrl(frame);
+  state.pendingLoadFolderSrc = src;
+
+  const img = new Image();
+  img.onload = () => {
+    if (state.pendingLoadFolderSrc !== src) {
+      return;
+    }
+    state.loadFolderImage = img;
+    node.setDirtyCanvas(true, true);
+  };
+  img.onerror = () => {
+    if (state.pendingLoadFolderSrc !== src) {
+      return;
+    }
+    state.loadFolderImage = null;
+    node.setDirtyCanvas(true, true);
+  };
+  img.src = src;
+}
+
+function drawLoadFolderPreview(ctx, node, state) {
+  const rect = getLoadFolderPreviewRect(node);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(rect.x, rect.y, rect.width, rect.height);
+  ctx.clip();
+
+  const img = state.loadFolderImage;
+  const frameData = state.loadFolderFrames?.[state.loadFolderIndex];
+  const sourceWidth =
+    frameData?.width || img?.naturalWidth || img?.width || rect.width;
+  const sourceHeight =
+    frameData?.height || img?.naturalHeight || img?.height || rect.height;
+
+  if (img && sourceWidth > 0 && sourceHeight > 0) {
+    const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
+    const drawWidth = Math.max(1, sourceWidth * scale);
+    const drawHeight = Math.max(1, sourceHeight * scale);
+    const drawX = rect.x + (rect.width - drawWidth) / 2;
+    const drawY = rect.y + (rect.height - drawHeight) / 2;
+    ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+  }
+
+  ctx.restore();
+}
+
+function renderLoadFolderFrames(state, container, infoDiv, frames, node) {
+  stopLoadFolderAnimation(state);
+  state.imageDimensions = [];
+  state.loadFolderFrames = frames;
+  state.loadFolderIndex = 0;
+
+  if (!frames || !frames.length) {
+    if (container) {
+      container.innerHTML = "";
+    }
+    if (infoDiv) {
+      infoDiv.innerHTML = "";
+    }
+    state.loadFolderImage = null;
+    node.setDirtyCanvas(true, true);
+    return;
+  }
+
+  frames.forEach((frameData, index) => {
+    if (frameData.width && frameData.height) {
+      state.imageDimensions[index] = {
+        width: frameData.width,
+        height: frameData.height,
+      };
+    }
+  });
+
+  const firstDim = state.imageDimensions[0];
+  if (firstDim) {
+    state.aspectRatio = firstDim.width / firstDim.height;
+  }
+
+  if (state.useCanvasLoadFolderPreview) {
+    updateLoadFolderCanvasFrame(state, node, 0);
+    if (frames.length > 1) {
+      state.loadFolderTimer = setInterval(() => {
+        updateLoadFolderCanvasFrame(
+          state,
+          node,
+          (state.loadFolderIndex + 1) % frames.length,
+        );
+      }, 1000 / LOAD_FOLDER_FPS);
+    }
+    return;
+  }
+
+  container.innerHTML = "";
+  container.classList.add("loadfolder-mode");
+  state.items = [];
+
+  const wrapperEl = document.createElement("div");
+  wrapperEl.className = "lc-loadfolder-anim-item";
+
+  const img = document.createElement("img");
+  img.loading = "eager";
+  img.src = buildImageUrl(frames[0]);
+  wrapperEl.appendChild(img);
+  container.appendChild(wrapperEl);
+
+  wrapperEl.addEventListener("click", (event) => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    app.canvas?.selectNode?.(node, false);
+    stopLoadFolderAnimation(state);
+    showOverlay(state, container, frames, state.loadFolderIndex ?? 0, true, node);
+  });
+  attachNavigationForwarding(wrapperEl);
+
+  updateInfoDisplay(state, 0);
+
+  if (frames.length > 1) {
+    state.loadFolderTimer = setInterval(() => {
+      state.loadFolderIndex = (state.loadFolderIndex + 1) % frames.length;
+      img.src = buildImageUrl(frames[state.loadFolderIndex]);
+      updateInfoDisplay(state, state.loadFolderIndex);
+    }, 1000 / LOAD_FOLDER_FPS);
+  }
+}
+
+async function fetchLoadFolderPreview(node) {
+  const getWidget = (name) => node.widgets?.find((w) => w.name === name);
+  const directoryWidget = getWidget("directory");
+  const directory = directoryWidget?.value;
+  if (!directory) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    directory,
+    image_load_cap: String(getWidget("image_load_cap")?.value ?? 0),
+    skip_first_images: String(getWidget("skip_first_images")?.value ?? 0),
+    select_every_nth: String(getWidget("select_every_nth")?.value ?? 1),
+  });
+
+  try {
+    const resp = await api.fetchApi(
+      `/link_comfy/load_folder_preview?${params.toString()}`,
+    );
+    if (!resp.ok) {
+      return [];
+    }
+    const data = await resp.json();
+    return data?.frames ?? [];
+  } catch (e) {
+    console.warn("[Load Folder] preview fetch failed", e);
+    return [];
+  }
 }
 
 function scheduleLayout(state) {
@@ -634,7 +866,8 @@ app.registerExtension({
   async nodeCreated(node) {
     if (
       node.comfyClass !== "Fast Image Preview" &&
-      node.comfyClass !== "Spritesheet Preview"
+      node.comfyClass !== "Spritesheet Preview" &&
+      node.comfyClass !== "Load Folder"
     ) {
       return;
     }
@@ -642,11 +875,93 @@ app.registerExtension({
     ensureStyles();
 
     const isSpritesheet = node.comfyClass === "Spritesheet Preview";
+    const isLoadFolder = node.comfyClass === "Load Folder";
 
     if (isSpritesheet) {
       ensureAnimationStyles();
     } else {
       initPointerEventsEnforcement();
+    }
+
+    if (isLoadFolder) {
+      const state = {
+        items: [],
+        aspectRatio: 1,
+        layoutRaf: null,
+        resizeObserver: null,
+        overlay: null,
+        imagesPreloaded: false,
+        imageCache: {},
+        imageDimensions: [],
+        isSpritesheet: false,
+        isLoadFolder: true,
+        useCanvasLoadFolderPreview: true,
+        loadFolderFrames: [],
+        loadFolderIndex: 0,
+        loadFolderImage: null,
+        pendingLoadFolderSrc: null,
+        animationNames: null,
+        frameHeight: 120,
+      };
+      node._fastPreviewState = state;
+
+      const originalOnDrawBackground = node.onDrawBackground;
+      node.onDrawBackground = function (ctx) {
+        if (originalOnDrawBackground) {
+          originalOnDrawBackground.apply(this, arguments);
+        }
+        drawLoadFolderPreview(ctx, this, state);
+      };
+
+      const originalOnResize = node.onResize;
+      node.onResize = function () {
+        if (originalOnResize) {
+          originalOnResize.apply(this, arguments);
+        }
+        this.setDirtyCanvas(true, true);
+      };
+
+      const triggerPreviewFetch = async () => {
+        const frames = await fetchLoadFolderPreview(node);
+        renderLoadFolderFrames(state, null, null, frames, node);
+      };
+
+      ["directory", "image_load_cap", "skip_first_images", "select_every_nth"].forEach(
+        (name) => {
+          const widget = node.widgets?.find((w) => w.name === name);
+          if (!widget) {
+            return;
+          }
+          const originalCallback = widget.callback;
+          widget.callback = function (...args) {
+            const ret = originalCallback?.apply(this, args);
+            triggerPreviewFetch();
+            return ret;
+          };
+        },
+      );
+
+      const originalOnRemoved = node.onRemoved;
+      node.onRemoved = function () {
+        stopLoadFolderAnimation(state);
+        if (originalOnRemoved) {
+          originalOnRemoved.apply(this, arguments);
+        }
+      };
+
+      const originalOnExecuted = node.onExecuted;
+      node.onExecuted = function (message) {
+        if (originalOnExecuted) {
+          originalOnExecuted.apply(this, arguments);
+        }
+        renderLoadFolderFrames(state, null, null, message?.fast_images ?? [], node);
+      };
+
+      requestAnimationFrame(() => {
+        triggerPreviewFetch();
+      });
+
+      return;
     }
 
     const wrapper = document.createElement("div");
@@ -682,8 +997,6 @@ app.registerExtension({
       });
     }
 
-    console.log(previewWidget);
-
     const state = {
       container,
       infoDiv,
@@ -696,6 +1009,7 @@ app.registerExtension({
       imageCache: {},
       imageDimensions: [],
       isSpritesheet,
+      isLoadFolder,
       animationNames: null,
       frameHeight: 120,
     };
@@ -709,6 +1023,10 @@ app.registerExtension({
         this.computedHeight = widgetHeight;
         return [width, widgetHeight];
       }
+      if (isLoadFolder) {
+        this.computedHeight = 1;
+        return [width, 1];
+      }
       const available = Math.max(
         0,
         (node?.size?.[1] ?? 0) - NODE_HEIGHT_PADDING,
@@ -721,7 +1039,7 @@ app.registerExtension({
     const minNodeHeight = isSpritesheet
       ? 150
       : PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING;
-    if ((node?.size?.[1] ?? 0) < minNodeHeight) {
+    if (!isLoadFolder && (node?.size?.[1] ?? 0) < minNodeHeight) {
       node.setSize([node.size?.[0] ?? 240, minNodeHeight]);
     }
 
@@ -740,10 +1058,58 @@ app.registerExtension({
 
     resetPreview(state);
 
+    if (isLoadFolder) {
+      const triggerPreviewFetch = async () => {
+        const frames = await fetchLoadFolderPreview(node);
+        renderLoadFolderFrames(state, container, infoDiv, frames, node);
+      };
+
+      ["directory", "image_load_cap", "skip_first_images", "select_every_nth"].forEach(
+        (name) => {
+          const widget = node.widgets?.find((w) => w.name === name);
+          if (!widget) {
+            return;
+          }
+          const originalCallback = widget.callback;
+          widget.callback = function (...args) {
+            const ret = originalCallback?.apply(this, args);
+            triggerPreviewFetch();
+            return ret;
+          };
+        },
+      );
+
+      const originalOnRemoved = node.onRemoved;
+      node.onRemoved = function () {
+        stopLoadFolderAnimation(state);
+        if (originalOnRemoved) {
+          originalOnRemoved.apply(this, arguments);
+        }
+      };
+
+      // Populate the preview as soon as the node exists (e.g. a workflow
+      // that was reloaded with a directory already chosen) rather than
+      // waiting for the graph to run.
+      requestAnimationFrame(() => {
+        triggerPreviewFetch();
+      });
+    }
+
     const originalOnExecuted = node.onExecuted;
     node.onExecuted = function (message) {
       if (originalOnExecuted) {
         originalOnExecuted.apply(this, arguments);
+      }
+
+      if (state.isLoadFolder) {
+        renderLoadFolderFrames(
+          state,
+          container,
+          infoDiv,
+          message?.fast_images ?? [],
+          node,
+        );
+        return;
       }
 
       // Handle spritesheet animation separately
