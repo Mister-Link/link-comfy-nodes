@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import zipfile
+from datetime import datetime
 from io import BytesIO
 
 import numpy as np
@@ -58,17 +59,23 @@ class SaveImageSequenceZip:
 
         zip_path = zip_path.strip()
 
-        def format_path(template: str, idx: int) -> str:
-            if "{index" in template:
-                return template.format_map({"index": idx})
-            return template.format(idx)
+        timestamp_token = datetime.now().strftime("%m%d%y-%H%M%S")
+
+        def resolve_template(template: str, idx: int) -> str:
+            resolved = template.replace("{:datetime}", timestamp_token)
+            if "{index" in resolved:
+                return resolved.format_map({"index": idx})
+            return resolved.format(idx)
+
+        def resolve_datetime_token(template: str) -> str:
+            return template.replace("{:datetime}", timestamp_token)
 
         output_dir = folder_paths.get_output_directory()
 
         uses_template = False
         if "{" in zip_path and "}" in zip_path:
             try:
-                test_candidate = format_path(zip_path, 1)
+                test_candidate = resolve_template(zip_path, 1)
                 uses_template = test_candidate != zip_path
             except (ValueError, KeyError, IndexError):
                 uses_template = False
@@ -77,7 +84,7 @@ class SaveImageSequenceZip:
             index = 1
             while True:
                 try:
-                    candidate = format_path(zip_path, index)
+                    candidate = resolve_template(zip_path, index)
                 except (ValueError, KeyError, IndexError):
                     uses_template = False
                     break
@@ -125,15 +132,16 @@ class SaveImageSequenceZip:
             for _input_name, data, prefix in inputs:
                 if data is None:
                     continue
+                resolved_prefix = resolve_template(prefix, 1)
                 if isinstance(data, str):
                     payload = data.encode("utf-8")
                     ext = self._extension_for_text(data)
-                    file_name = reserve_name(f"{prefix}.{ext}")
+                    file_name = reserve_name(f"{resolved_prefix}.{ext}")
                     zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, dict):
                     payload = json.dumps(data, indent=2).encode("utf-8")
-                    file_name = reserve_name(f"{prefix}.json")
+                    file_name = reserve_name(f"{resolved_prefix}.json")
                     zipf.writestr(file_name, payload)
                     continue
                 if isinstance(data, (list, tuple)) and data:
@@ -141,18 +149,21 @@ class SaveImageSequenceZip:
                         for i, item in enumerate(data, start=1):
                             payload = item.encode("utf-8")
                             ext = self._extension_for_text(item)
-                            file_name = reserve_name(f"{prefix}.{ext}")
+                            item_prefix = resolve_template(prefix, i)
+                            file_name = reserve_name(f"{item_prefix}.{ext}")
                             zipf.writestr(file_name, payload)
                         continue
                     if all(isinstance(item, dict) for item in data):
                         for i, item in enumerate(data, start=1):
                             payload = json.dumps(item, indent=2).encode("utf-8")
-                            file_name = reserve_name(f"{prefix}.json")
+                            item_prefix = resolve_template(prefix, i)
+                            file_name = reserve_name(f"{item_prefix}.json")
                             zipf.writestr(file_name, payload)
                         continue
                 frames = self._normalize_frames(data)
+                prefix_template = resolve_datetime_token(prefix)
 
-                prefix_base, prefix_ext = os.path.splitext(prefix)
+                prefix_base, prefix_ext = os.path.splitext(prefix_template)
                 has_extension = bool(prefix_ext)
 
                 if has_extension:
@@ -191,20 +202,23 @@ class SaveImageSequenceZip:
 
                         if "{" in prefix_base:
                             try:
-                                image_filename = prefix_base.format(frame_index) + (
+                                image_filename = resolve_template(
+                                    prefix_base,
+                                    frame_index,
+                                ) + (
                                     prefix_ext if has_extension else f".{ext}"
                                 )
                             except (KeyError, IndexError):
                                 digits = max(2, len(str(len(frames))))
                                 image_filename = (
-                                    f"{prefix}_{frame_index:0{digits}d}.{ext}"
+                                    f"{resolved_prefix}_{frame_index:0{digits}d}.{ext}"
                                     if not has_extension
                                     else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                                 )
                         else:
                             digits = max(2, len(str(len(frames))))
                             image_filename = (
-                                f"{prefix}_{frame_index:0{digits}d}.{ext}"
+                                f"{resolved_prefix}_{frame_index:0{digits}d}.{ext}"
                                 if not has_extension
                                 else f"{prefix_base}_{frame_index:0{digits}d}{prefix_ext}"
                             )
