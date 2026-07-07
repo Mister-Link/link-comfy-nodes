@@ -26,6 +26,7 @@ class ImagePixelateNode:
                 "num_colors": ("INT", {"default": 16, "min": 2, "max": 256, "step": 1}),
                 "init_mode": (["k-means++", "random", "none"],),
                 "dither": (["False", "True"],),
+                "dither_mode": (["FloydSteinberg", "Ordered"],),
             },
             "optional": {
                 "mask": ("MASK",),
@@ -40,6 +41,7 @@ class ImagePixelateNode:
         init_mode: str = "random",
         mask: torch.Tensor | None = None,
         dither: str = "False",
+        dither_mode: str = "FloydSteinberg",
     ):
         dither_on = dither == "True"
 
@@ -55,6 +57,7 @@ class ImagePixelateNode:
             num_colors,
             init_mode,
             dither_on,
+            dither_mode,
         )
 
         result = torch.from_numpy(np.stack([np.asarray(img, dtype=np.float32) / 255.0 for img in pixelated]))
@@ -93,6 +96,7 @@ class ImagePixelateNode:
         num_colors: int,
         init_mode: str,
         dither: bool,
+        dither_mode: str,
         random_state: int = 42,
     ) -> tuple[list[Image.Image], list[Image.Image]]:
         original_sizes = [image.size for image in images]
@@ -117,7 +121,7 @@ class ImagePixelateNode:
                 for image, alpha in zip(downscaled, downscaled_alpha)
             ]
         if dither:
-            downscaled = [self._floyd_steinberg_dither(image, num_colors) for image in downscaled]
+            downscaled = [self._dither_image(image, dither_mode, num_colors) for image in downscaled]
 
         pixelated = [image.resize(size, Image.NEAREST) for image, size in zip(downscaled, original_sizes)]
         pixelated_alpha = [
@@ -165,6 +169,14 @@ class ImagePixelateNode:
 
         return Image.fromarray(quantized.reshape(np_image.shape))
 
+    @classmethod
+    def _dither_image(cls, image: Image.Image, mode: str, num_colors: int) -> Image.Image:
+        if mode == "FloydSteinberg":
+            return cls._floyd_steinberg_dither(image, num_colors)
+        if mode == "Ordered":
+            return cls._ordered_dither(image, num_colors)
+        raise ValueError(f"Invalid dithering mode `{mode}`.")
+
     @staticmethod
     def _floyd_steinberg_dither(image: Image.Image, num_colors: int) -> Image.Image:
         arr = np.array(image, dtype=float) / 255
@@ -187,3 +199,38 @@ class ImagePixelateNode:
                         arr[y + 1, x + 1] += err / 16
 
         return Image.fromarray(np.array(arr * 255, dtype=np.uint8))
+
+    @staticmethod
+    def _ordered_dither(image: Image.Image, num_colors: int) -> Image.Image:
+        width, height = image.size
+        dither_matrix = [
+            [0, 8, 2, 10],
+            [12, 4, 14, 6],
+            [3, 11, 1, 9],
+            [15, 7, 13, 5],
+        ]
+        levels = min(2 ** int(np.log2(num_colors)), 16)
+        dithered = Image.new("RGB", (width, height))
+
+        def clamp(value: float) -> int:
+            return max(min(int(value), 255), 0)
+
+        def quantize(pixel):
+            return tuple(int(c * levels / 256) * (256 // levels) for c in pixel)
+
+        for y in range(height):
+            for x in range(width):
+                old_pixel = image.getpixel((x, y))
+                new_pixel = quantize(old_pixel)
+                dithered.putpixel((x, y), new_pixel)
+
+                for (dx, dy), weight in (((1, 0), 7 / 16), ((1, 1), 1 / 16), ((0, 1), 5 / 16), ((-1, 1), 3 / 16)):
+                    nx, ny = x + dx, y + dy
+                    if not (0 <= nx < width and 0 <= ny < height):
+                        continue
+                    neighbor = quantize(image.getpixel((nx, ny)))
+                    error = tuple(n - new for n, new in zip(neighbor, new_pixel))
+                    corrected = tuple(clamp(p + e * weight) for p, e in zip(neighbor, error))
+                    image.putpixel((nx, ny), corrected)
+
+        return dithered
