@@ -1,8 +1,8 @@
 import { app } from "../../scripts/app.js";
 
 const NODE_NAME = "Sprite Scale Calculator";
-const PREVIEW_MIN_HEIGHT = 270;
-const NODE_HEIGHT_PADDING = 150;
+const MIN_NODE_WIDTH = 350;
+const MIN_NODE_HEIGHT = 550;
 const SPIRE_REFERENCE = {
   widthInches: 27.5,
   heightInches: 62.5,
@@ -18,50 +18,7 @@ const PRESET_DIMENSIONS = {
   },
 };
 
-let stylesInjected = false;
 let silhouetteImagePromise = null;
-
-const ensureStyles = () => {
-  if (stylesInjected || typeof document === "undefined") {
-    return;
-  }
-  stylesInjected = true;
-
-  const style = document.createElement("style");
-  style.textContent = `
-    .lc-sprite-scale {
-      box-sizing: border-box;
-      width: 100%;
-      min-height: ${PREVIEW_MIN_HEIGHT}px;
-      height: 100%;
-      padding: 12px;
-      background: linear-gradient(180deg, #2e2b27 0%, #24211e 100%);
-      border: 1px solid rgba(196, 181, 160, 0.12);
-      border-radius: 14px;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-    }
-
-    .lc-sprite-scale__canvas-wrap {
-      box-sizing: border-box;
-      height: 100%;
-      padding: 8px;
-      border-radius: 12px;
-      background: rgba(20, 18, 17, 0.42);
-      border: 1px solid rgba(196, 181, 160, 0.1);
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-    }
-
-    .lc-sprite-scale__canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-      min-height: 230px;
-      border-radius: 8px;
-      background: linear-gradient(180deg, #35312d 0%, #26231f 100%);
-    }
-  `;
-  document.head.appendChild(style);
-};
 
 const loadSilhouetteImage = () => {
   if (silhouetteImagePromise) {
@@ -86,16 +43,6 @@ const getWidgetValue = (node, name, fallback = 0) => {
   return widget?.value ?? fallback;
 };
 
-const formatNumber = (value) => {
-  if (!Number.isFinite(value)) {
-    return "-";
-  }
-  if (Math.abs(value - Math.round(value)) < 0.001) {
-    return `${Math.round(value)}`;
-  }
-  return value.toFixed(2);
-};
-
 const formatDimension = (inches) => {
   const wholeInches = Math.max(0, Math.round(inches));
   if (wholeInches < 12) {
@@ -110,26 +57,36 @@ const formatDimension = (inches) => {
   return `${feet}'${remainingInches}"`;
 };
 
-const drawPreview = (node) => {
+const getPreviewRect = (node) => {
+  const horizontalPadding = 12;
+  const bottomPadding = 12;
+  const widgets = node?.widgets ?? [];
+  const widgetYs = widgets
+    .map((widget) => widget?.last_y)
+    .filter((value) => Number.isFinite(value));
+  const widgetsBottom = widgetYs.length
+    ? Math.max(...widgetYs) + 24
+    : 44 + widgets.length * 24;
+  const x = horizontalPadding;
+  const y = Math.max(44, widgetsBottom + 8);
+  const width = Math.max(1, (node?.size?.[0] ?? 0) - horizontalPadding * 2);
+  const height = Math.max(1, (node?.size?.[1] ?? 0) - y - bottomPadding);
+  return { x, y, width, height };
+};
+
+const drawPreview = (node, ctx) => {
   const state = node._spriteScaleState;
   if (!state) {
     return;
   }
 
-  const { canvas, silhouetteImage } = state;
-  const bounds = canvas.getBoundingClientRect();
-  const width = Math.max(260, Math.round(bounds.width || canvas.clientWidth || 260));
-  const height = Math.max(220, Math.round(bounds.height || canvas.clientHeight || 220));
-  const dpr = window.devicePixelRatio || 1;
-
-  if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
+  const { silhouetteImage } = state;
+  const rect = getPreviewRect(node);
+  const width = rect.width;
+  const height = rect.height;
+  if (width <= 1 || height <= 1) {
+    return;
   }
-
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
 
   const ref = SPIRE_REFERENCE;
   const targetWidthInches = Number(
@@ -138,17 +95,29 @@ const drawPreview = (node) => {
   const targetHeightInches = Number(
     getWidgetValue(node, "target_height_inches", ref.defaultTargetHeightInches),
   );
+  const widthKnown = targetWidthInches > 0;
+  const heightKnown = targetHeightInches > 0;
 
   const pixelsPerInchWidth = ref.pixelWidth / ref.widthInches;
   const pixelsPerInchHeight = ref.pixelHeight / ref.heightInches;
-  const targetPixelWidth = Math.max(1, Math.round(targetWidthInches * pixelsPerInchWidth));
-  const targetPixelHeight = Math.max(1, Math.round(targetHeightInches * pixelsPerInchHeight));
+
+  // Either (or both) dimensions may be unset (0) — the user may only know
+  // one measurement. Keep the unknown side as null so we never draw a box
+  // that implies a size we don't actually have.
+  const targetPixelWidth = widthKnown
+    ? Math.max(1, Math.round(targetWidthInches * pixelsPerInchWidth))
+    : null;
+  const targetPixelHeight = heightKnown
+    ? Math.max(1, Math.round(targetHeightInches * pixelsPerInchHeight))
+    : null;
 
   const margin = 18;
-  const groundY = height - 28;
-  const maxVisualHeight = Math.max(ref.pixelHeight, targetPixelHeight, 1);
-  const maxVisualWidth = Math.max(ref.pixelWidth, targetPixelWidth, 1);
-  const availableHeight = Math.max(80, groundY - 18);
+  const innerX = rect.x;
+  const innerY = rect.y;
+  const groundY = innerY + height - 28;
+  const maxVisualHeight = Math.max(ref.pixelHeight, targetPixelHeight ?? 0, 1);
+  const maxVisualWidth = Math.max(ref.pixelWidth, targetPixelWidth ?? 0, 1);
+  const availableHeight = Math.max(80, height - 62);
   const availableWidth = Math.max(80, width - (margin * 2) - 18);
   const visualScale = Math.max(
     0.25,
@@ -159,31 +128,81 @@ const drawPreview = (node) => {
   );
   const refDrawW = Math.max(12, ref.pixelWidth * visualScale);
   const refDrawH = Math.max(24, ref.pixelHeight * visualScale);
-  const targetDrawW = Math.max(12, targetPixelWidth * visualScale);
-  const targetDrawH = Math.max(24, targetPixelHeight * visualScale);
-  const centerX = width / 2;
-  const targetX = centerX - targetDrawW / 2;
+  const targetDrawW = targetPixelWidth !== null ? Math.max(12, targetPixelWidth * visualScale) : null;
+  const targetDrawH = targetPixelHeight !== null ? Math.max(24, targetPixelHeight * visualScale) : null;
+  const centerX = innerX + width / 2;
   const refX = centerX - refDrawW / 2;
-  const targetY = groundY - targetDrawH;
   const refY = groundY - refDrawH;
+  const targetX = targetDrawW !== null ? centerX - targetDrawW / 2 : null;
+  const targetY = targetDrawH !== null ? groundY - targetDrawH : null;
 
-  ctx.fillStyle = "#2f2b27";
-  ctx.fillRect(0, 0, width, height);
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(rect.x, rect.y, rect.width, rect.height, 14);
+  ctx.clip();
+
+  const background = ctx.createLinearGradient(0, rect.y, 0, rect.y + rect.height);
+  background.addColorStop(0, "#2e2b27");
+  background.addColorStop(1, "#24211e");
+  ctx.fillStyle = background;
+  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+
+  ctx.fillStyle = "rgba(20, 18, 17, 0.42)";
+  ctx.fillRect(rect.x + 8, rect.y + 8, rect.width - 16, rect.height - 16);
 
   ctx.strokeStyle = "#7c7266";
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(margin, groundY + 0.5);
-  ctx.lineTo(width - margin, groundY + 0.5);
+  ctx.moveTo(innerX + margin, groundY + 0.5);
+  ctx.lineTo(innerX + width - margin, groundY + 0.5);
   ctx.stroke();
 
-  ctx.fillStyle = "rgba(104, 149, 169, 0.18)";
-  ctx.fillRect(targetX, targetY, targetDrawW, targetDrawH);
+  const CAP_TICK = 14;
   ctx.strokeStyle = "#5e93a8";
-  ctx.lineWidth = 2;
-  ctx.setLineDash([7, 4]);
-  ctx.strokeRect(targetX, targetY, targetDrawW, targetDrawH);
-  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(104, 149, 169, 0.18)";
+
+  if (widthKnown && heightKnown) {
+    ctx.fillRect(targetX, targetY, targetDrawW, targetDrawH);
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 4]);
+    ctx.strokeRect(targetX, targetY, targetDrawW, targetDrawH);
+    ctx.setLineDash([]);
+  } else if (heightKnown) {
+    // Width unknown: show the height extent as two end-cap ticks joined by
+    // a connector, instead of a box that would falsely imply a width.
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 4]);
+    ctx.beginPath();
+    ctx.moveTo(centerX - CAP_TICK, targetY);
+    ctx.lineTo(centerX + CAP_TICK, targetY);
+    ctx.moveTo(centerX - CAP_TICK, targetY + targetDrawH);
+    ctx.lineTo(centerX + CAP_TICK, targetY + targetDrawH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(centerX, targetY);
+    ctx.lineTo(centerX, targetY + targetDrawH);
+    ctx.stroke();
+  } else if (widthKnown) {
+    // Height unknown: mirror the above with vertical end-cap ticks joined
+    // by a horizontal connector at the reference figure's midline.
+    const midY = refY + refDrawH / 2;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 4]);
+    ctx.beginPath();
+    ctx.moveTo(targetX, midY - CAP_TICK);
+    ctx.lineTo(targetX, midY + CAP_TICK);
+    ctx.moveTo(targetX + targetDrawW, midY - CAP_TICK);
+    ctx.lineTo(targetX + targetDrawW, midY + CAP_TICK);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(targetX, midY);
+    ctx.lineTo(targetX + targetDrawW, midY);
+    ctx.stroke();
+  }
 
   if (silhouetteImage) {
     ctx.save();
@@ -195,21 +214,30 @@ const drawPreview = (node) => {
     ctx.fillRect(refX, refY, refDrawW, refDrawH);
   }
 
+  const pixelParts = [];
+  if (widthKnown) pixelParts.push(`${targetPixelWidth}`);
+  if (heightKnown) pixelParts.push(`${targetPixelHeight}`);
+  const pixelLabel = pixelParts.length ? `${pixelParts.join("×")}px` : "";
+
+  const dimensionParts = [];
+  if (widthKnown) dimensionParts.push(formatDimension(targetWidthInches));
+  if (heightKnown) dimensionParts.push(formatDimension(targetHeightInches));
+  const dimensionLabel = dimensionParts.join(" × ");
+
+  const label = [pixelLabel, dimensionLabel].filter(Boolean).join("  |  ");
+
   ctx.fillStyle = "#d0c5b6";
   ctx.font = '12px "Trebuchet MS", "Segoe UI", sans-serif';
   ctx.textAlign = "center";
-  ctx.fillText(
-    `${targetPixelWidth}×${targetPixelHeight}px  |  ${formatDimension(targetWidthInches)} × ${formatDimension(targetHeightInches)}`,
-    centerX,
-    groundY + 18,
-  );
+  if (label) {
+    ctx.fillText(label, centerX, groundY + 18);
+  }
   ctx.textAlign = "left";
+  ctx.restore();
 };
 
 const updateNodeLayout = (node) => {
-  node.computeSize?.();
   node.setDirtyCanvas?.(true, true);
-  requestAnimationFrame(() => drawPreview(node));
 };
 
 app.registerExtension({
@@ -223,69 +251,27 @@ app.registerExtension({
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated?.apply(this, arguments);
-      ensureStyles();
-
-      const wrapper = document.createElement("div");
-      wrapper.className = "lc-sprite-scale";
-
-      const canvasWrap = document.createElement("div");
-      canvasWrap.className = "lc-sprite-scale__canvas-wrap";
-      const canvas = document.createElement("canvas");
-      canvas.className = "lc-sprite-scale__canvas";
-      canvasWrap.appendChild(canvas);
-      wrapper.appendChild(canvasWrap);
-
-      const previewWidget = this.addDOMWidget(
-        "preview",
-        "sprite_scale_preview",
-        wrapper,
-        {
-          serialize: false,
-          hideOnZoom: false,
-        },
-      );
-
-      previewWidget.computeSize = function (width) {
-        const available = Math.max(
-          PREVIEW_MIN_HEIGHT,
-          (this.node?.size?.[1] ?? PREVIEW_MIN_HEIGHT + NODE_HEIGHT_PADDING) -
-            NODE_HEIGHT_PADDING,
-        );
-        this.computedHeight = available;
-        return [width, available];
-      };
 
       if (
-        (this.size?.[0] ?? 0) < 340 ||
-        (this.size?.[1] ?? 0) < NODE_HEIGHT_PADDING + PREVIEW_MIN_HEIGHT
+        (this.size?.[0] ?? 0) < MIN_NODE_WIDTH ||
+        (this.size?.[1] ?? 0) < MIN_NODE_HEIGHT
       ) {
         this.setSize([
-          Math.max(this.size?.[0] ?? 0, 340),
-          Math.max(this.size?.[1] ?? 0, NODE_HEIGHT_PADDING + PREVIEW_MIN_HEIGHT),
+          Math.max(this.size?.[0] ?? 0, MIN_NODE_WIDTH),
+          Math.max(this.size?.[1] ?? 0, MIN_NODE_HEIGHT),
         ]);
       }
 
       this._spriteScaleState = {
-        canvas,
         silhouetteImage: null,
         applyingPreset: false,
       };
 
-      // ComfyUI's DOM widget layout can settle to its final size a frame or two
-      // after onNodeCreated fires (e.g. on initial workflow load), so a single
-      // requestAnimationFrame draw can catch the canvas at a stale, too-narrow
-      // rect. Watch the actual laid-out size instead of guessing when it's ready.
-      if (typeof ResizeObserver !== "undefined") {
-        const resizeObserver = new ResizeObserver(() => drawPreview(this));
-        resizeObserver.observe(canvasWrap);
-        this._spriteScaleState.resizeObserver = resizeObserver;
-
-        const originalOnRemoved = this.onRemoved;
-        this.onRemoved = function () {
-          resizeObserver.disconnect();
-          return originalOnRemoved?.apply(this, arguments);
-        };
-      }
+      const originalOnDrawBackground = this.onDrawBackground;
+      this.onDrawBackground = function (ctx) {
+        originalOnDrawBackground?.apply(this, arguments);
+        drawPreview(this, ctx);
+      };
 
       const presetWidget = getWidget(this, "preset");
       const widthWidget = getWidget(this, "target_width_inches");
@@ -335,7 +321,7 @@ app.registerExtension({
       const originalOnResize = this.onResize;
       this.onResize = function () {
         const resizeResult = originalOnResize?.apply(this, arguments);
-        drawPreview(this);
+        this.setDirtyCanvas?.(true, true);
         return resizeResult;
       };
 
@@ -349,7 +335,7 @@ app.registerExtension({
       loadSilhouetteImage().then((image) => {
         if (this._spriteScaleState) {
           this._spriteScaleState.silhouetteImage = image;
-          drawPreview(this);
+          this.setDirtyCanvas?.(true, true);
         }
       });
 

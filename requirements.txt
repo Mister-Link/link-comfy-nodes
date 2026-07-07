@@ -2,6 +2,7 @@ torch
 numpy
 pillow
 opencv-python
+scikit-learn
 transformers
 torchvision
 huggingface-hub

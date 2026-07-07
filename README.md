@@ -24,7 +24,7 @@ A collection of custom nodes for [ComfyUI](https://github.com/comfyanonymous/Com
 - **Auto Cropper** — content-aware cropping with multiple detection methods (bbox, contour, alpha, anime segmentation)
 - **Resize Image and Mask by Side** — resize by longest/shortest side
 - **Add Image to Batch** — insert an image at a specific batch index
-- **Pixelation Dimensions** — dimension presets
+- **Pixelate** — pixelate via color quantization, with optional dithering, hex palette remapping, and alpha-aware masking for transparent PNGs
 - **Sprite Scale Calculator** — convert intended real-world sprite size into pixel dimensions
 - **Remove Background** — bulk background removal via bgeraser.com
 - **Spritesheet Builder** — combine frames into a spritesheet with target aspect ratio

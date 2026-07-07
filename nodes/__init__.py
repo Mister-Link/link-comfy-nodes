@@ -1,14 +1,14 @@
 """Node implementations grouped by domain."""
 
-from .color import ColorParserNode, FarthestColorNode, MatchColorPaletteNode
+from .color import ApplyPaletteNode, ColorParserNode, FarthestColorNode, MatchColorPaletteNode
 from .image import (
     AddImageToBatchNode,
     AutoCropperNode,
     CropByBBoxNode,
     CropToContentNode,
+    ImagePixelateNode,
     ImageRotatorNode,
     LoadFolderNode,
-    PixelationDimensionsNode,
     ResizeImageAndMaskBySideNode,
     SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
@@ -40,6 +40,7 @@ from .wan import (
 
 __all__ = [
     "AddImageToBatchNode",
+    "ApplyPaletteNode",
     "LoopSCAILPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
@@ -53,13 +54,13 @@ __all__ = [
     "CropToContentNode",
     "FarthestColorNode",
     "FastImagePreviewNode",
+    "ImagePixelateNode",
     "ImageRotatorNode",
     "KSamplerAdvancedDual",
     "LoadFolderNode",
     "LoadVACEModuleNode",
     "MatchColorPaletteNode",
     "NativeWanPoseStrength",
-    "PixelationDimensionsNode",
     "PreviewAsMarkdown",
     "StringToListNode",
     "PreviewImageAlpha",

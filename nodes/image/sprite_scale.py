@@ -32,11 +32,11 @@ class SpriteScaleCalculatorNode:
                 "preset": (list(cls._PRESETS.keys()), {"default": "Spirie"}),
                 "target_width_inches": (
                     "INT",
-                    {"default": cls._SPIRE_TARGET_WIDTH_INCHES, "min": 1, "max": 10000, "step": 1},
+                    {"default": cls._SPIRE_TARGET_WIDTH_INCHES, "min": 0, "max": 10000, "step": 1},
                 ),
                 "target_height_inches": (
                     "INT",
-                    {"default": cls._SPIRE_TARGET_HEIGHT_INCHES, "min": 1, "max": 10000, "step": 1},
+                    {"default": cls._SPIRE_TARGET_HEIGHT_INCHES, "min": 0, "max": 10000, "step": 1},
                 ),
             },
         }
@@ -49,8 +49,12 @@ class SpriteScaleCalculatorNode:
     ):
         pixels_per_inch_width = self._SPIRE_PIXEL_WIDTH / self._SPIRE_WIDTH_INCHES
         pixels_per_inch_height = self._SPIRE_PIXEL_HEIGHT / self._SPIRE_HEIGHT_INCHES
-        pixel_width = max(1, round(target_width_inches * pixels_per_inch_width))
-        pixel_height = max(1, round(target_height_inches * pixels_per_inch_height))
+        pixel_width = (
+            0 if target_width_inches <= 0 else max(1, round(target_width_inches * pixels_per_inch_width))
+        )
+        pixel_height = (
+            0 if target_height_inches <= 0 else max(1, round(target_height_inches * pixels_per_inch_height))
+        )
 
         return (
             int(pixel_width),
