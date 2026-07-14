@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 const NODE_NAME = "Dropdown Select";
 const STYLE_ID = "lc_dropdown_select_styles";
 const ROW_HEIGHT = 26;
-const CHROME_HEIGHT = 90;
+const CHROME_HEIGHT = 60;
 const MIN_NODE_WIDTH = 260;
 
 function ensureStyles() {
@@ -34,7 +34,7 @@ function ensureStyles() {
       align-items: center;
       gap: 4px;
     }
-    .lc-dropdown-select-row input {
+    .lc-dropdown-select-field {
       flex: 1;
       min-width: 0;
       box-sizing: border-box;
@@ -43,7 +43,23 @@ function ensureStyles() {
       border-radius: 4px;
       color: #e6e6e6;
       font-size: 12px;
+      font-family: inherit;
       padding: 3px 6px;
+      cursor: pointer;
+    }
+    .lc-dropdown-select-label {
+      user-select: none;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    input.lc-dropdown-select-field {
+      cursor: text;
+    }
+    .lc-dropdown-select-row.lc-selected .lc-dropdown-select-field {
+      background: rgba(90, 200, 130, 0.16);
+      border-color: rgba(90, 200, 130, 0.6);
+      color: #eafff1;
     }
     .lc-dropdown-select-remove {
       flex: 0 0 auto;
@@ -72,16 +88,6 @@ function ensureStyles() {
     .lc-dropdown-select-add:hover {
       color: #e6e6e6;
       border-color: rgba(255, 255, 255, 0.4);
-    }
-    .lc-dropdown-select-choice {
-      box-sizing: border-box;
-      width: 100%;
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.16);
-      border-radius: 4px;
-      color: #e6e6e6;
-      font-size: 12px;
-      padding: 4px 6px;
     }
   `;
 
@@ -127,12 +133,8 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
   addBtn.className = "lc-dropdown-select-add";
   addBtn.textContent = "+ Add Option";
 
-  const selectEl = document.createElement("select");
-  selectEl.className = "lc-dropdown-select-choice";
-
   root.appendChild(rowsContainer);
   root.appendChild(addBtn);
-  root.appendChild(selectEl);
 
   let items = parseOptions(optionsWidget.value);
   let selected = selectedWidget.value;
@@ -164,18 +166,16 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     node.setDirtyCanvas(true, true);
   };
 
-  const renderSelect = () => {
-    selectEl.innerHTML = "";
-    for (const item of items) {
-      const opt = document.createElement("option");
-      opt.value = item;
-      opt.textContent = item;
-      selectEl.appendChild(opt);
-    }
-    if (!items.includes(selected)) {
-      selected = items[0] ?? "";
-    }
-    selectEl.value = selected;
+  const updateSelectionHighlight = () => {
+    rowsContainer.querySelectorAll(".lc-dropdown-select-row").forEach((row) => {
+      row.classList.toggle("lc-selected", row.dataset.value === selected);
+    });
+  };
+
+  const selectItem = (item) => {
+    selected = item;
+    persist();
+    updateSelectionHighlight();
   };
 
   const renderRows = () => {
@@ -183,15 +183,47 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     items.forEach((item, index) => {
       const row = document.createElement("div");
       row.className = "lc-dropdown-select-row";
+      row.dataset.value = item;
+      row.addEventListener("pointerdown", (e) => e.stopPropagation());
+      row.addEventListener("click", () => selectItem(items[index]));
 
-      const input = document.createElement("input");
-      input.type = "text";
-      input.value = item;
-      input.addEventListener("pointerdown", (e) => e.stopPropagation());
-      input.addEventListener("change", () => {
-        items[index] = input.value.trim() || item;
+      const commitRename = (rawValue) => {
+        const renamed = rawValue.trim() || item;
+        const wasSelected = items[index] === selected;
+        items[index] = renamed;
+        if (wasSelected) {
+          selected = renamed;
+        }
         persist();
-        renderSelect();
+        renderRows();
+      };
+
+      const label = document.createElement("div");
+      label.className = "lc-dropdown-select-field lc-dropdown-select-label";
+      label.textContent = item;
+      label.title = "Double-click to rename";
+      label.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "lc-dropdown-select-field";
+        input.value = item;
+        input.addEventListener("pointerdown", (e2) => e2.stopPropagation());
+        input.addEventListener("click", (e2) => e2.stopPropagation());
+        input.addEventListener("keydown", (e2) => {
+          if (e2.key === "Enter") {
+            input.blur();
+          } else if (e2.key === "Escape") {
+            input.value = item;
+            input.blur();
+          }
+        });
+        input.addEventListener("blur", () => commitRename(input.value));
+
+        row.replaceChild(input, label);
+        input.focus();
+        input.select();
       });
 
       const removeBtn = document.createElement("button");
@@ -199,18 +231,19 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
       removeBtn.className = "lc-dropdown-select-remove";
       removeBtn.textContent = "×";
       removeBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
-      removeBtn.addEventListener("click", () => {
+      removeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
         items.splice(index, 1);
         persist();
         renderRows();
-        renderSelect();
         resizeNode();
       });
 
-      row.appendChild(input);
+      row.appendChild(label);
       row.appendChild(removeBtn);
       rowsContainer.appendChild(row);
     });
+    updateSelectionHighlight();
   };
 
   addBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -224,26 +257,18 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     items.push(name);
     persist();
     renderRows();
-    renderSelect();
     resizeNode();
   });
 
-  selectEl.addEventListener("pointerdown", (e) => e.stopPropagation());
-  selectEl.addEventListener("change", () => {
-    selected = selectEl.value;
-    persist();
-  });
-
   renderRows();
-  renderSelect();
   persist();
+  updateSelectionHighlight();
 
   return {
     refreshFromWidgets() {
       items = parseOptions(optionsWidget.value);
       selected = selectedWidget.value;
       renderRows();
-      renderSelect();
       persist();
       resizeNode();
     },
