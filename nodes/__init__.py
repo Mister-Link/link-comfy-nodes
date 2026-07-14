@@ -17,13 +17,14 @@ from .latent import ChangeLatentDimensions, SnapToDivisible
 from .pixel_art.node import ConvertToPixelArt
 from .preview import (
     FastImagePreviewNode,
+    ImageCompareNode,
     PreviewImageAlpha,
     PreviewWebmNode,
     SpritesheetPreviewNode,
 )
 from .sampling import KSamplerAdvancedDual
 from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
-from .text import AdvancedStringConcat, PreviewAsMarkdown, StringToListNode
+from .text import AdvancedStringConcat, DropdownSelectNode, PreviewAsMarkdown, StringToListNode
 from .video import (
     AverageMaskRegionSizeNode,
     ReplaceAlpha,
@@ -44,6 +45,7 @@ __all__ = [
     "LoopSCAILPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
+    "DropdownSelectNode",
     "ChangeLatentDimensions",
     "SnapToDivisible",
     "AutoCropperNode",
@@ -54,6 +56,7 @@ __all__ = [
     "CropToContentNode",
     "FarthestColorNode",
     "FastImagePreviewNode",
+    "ImageCompareNode",
     "ImagePixelateNode",
     "ImageRotatorNode",
     "KSamplerAdvancedDual",

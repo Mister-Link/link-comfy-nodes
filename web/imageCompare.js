@@ -1,0 +1,213 @@
+import { app } from "../../scripts/app.js";
+
+const NODE_NAME = "Image Compare";
+
+app.registerExtension({
+  name: "LinkComfyNodes.ImageCompare",
+
+  async beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData.name !== NODE_NAME) return;
+
+    // Helper for aspect-correct "contain" fit inside a box
+    function fitContain(srcW, srcH, maxW, maxH) {
+      if (!srcW || !srcH || !maxW || !maxH) {
+        return { x: 0, y: 0, w: 0, h: 0 };
+      }
+      const s = Math.min(maxW / srcW, maxH / srcH);
+      const w = Math.max(1, Math.floor(srcW * s));
+      const h = Math.max(1, Math.floor(srcH * s));
+      const x = Math.floor((maxW - w) / 2);
+      const y = Math.floor((maxH - h) / 2);
+      return { x, y, w, h };
+    }
+
+    const origOnNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      if (origOnNodeCreated) origOnNodeCreated.apply(this, arguments);
+
+      if (!this.size || this.size[0] < 100 || this.size[1] < 100) {
+        this.size = [532, 582];
+      }
+
+      this.sliderPos = 0.5;
+      this.dragging = false;
+      this.hovered = false;
+
+      // Common geometry used across mouse + draw
+      const getDrawGeom = () => {
+        const margin = 10;
+        const topOffset = 40; // leave space for title/widgets
+        const drawX = margin;
+        const drawY = margin + topOffset;
+        const drawW = this.size[0] - margin * 2;
+        const drawH = this.size[1] - margin * 2 - topOffset;
+        return { drawX, drawY, drawW, drawH };
+      };
+
+      this.onMouseDown = function (_, pos) {
+        const { drawX, drawY, drawW, drawH } = getDrawGeom();
+
+        const x = pos[0] - drawX;
+        const y = pos[1] - drawY;
+
+        // Only react if inside draw area
+        if (x < 0 || x > drawW || y < 0 || y > drawH) return false;
+
+        const splitX = drawX + Math.floor(drawW * this.sliderPos);
+        const handleY = drawY + Math.floor(drawH / 2);
+        const dist = Math.hypot(pos[0] - splitX, pos[1] - handleY);
+
+        // Grab handle if close; otherwise jump slider to clicked x
+        if (dist < 15) {
+          this.dragging = true;
+          return true;
+        }
+
+        this.dragging = true;
+        this.sliderPos = Math.max(0, Math.min(1, x / drawW));
+        return true;
+      };
+
+      this.onMouseMove = function (e, pos) {
+        const { drawX, drawY, drawW, drawH } = getDrawGeom();
+
+        const splitX = drawX + Math.floor(drawW * this.sliderPos);
+        const handleY = drawY + Math.floor(drawH / 2);
+        const dist = Math.hypot(pos[0] - splitX, pos[1] - handleY);
+        this.hovered = dist < 15;
+
+        // Check if mouse button is no longer pressed (detect mouse up from event)
+        if (this.dragging && e && e.buttons !== undefined && e.buttons === 0) {
+          this.dragging = false;
+        }
+
+        if (this.dragging) {
+          let x = pos[0] - drawX;
+          x = Math.max(0, Math.min(drawW, x));
+          const newSliderPos = x / drawW;
+
+          if (Math.abs(newSliderPos - this.sliderPos) > 0.001) {
+            this.sliderPos = newSliderPos;
+          }
+        }
+      };
+
+      this.onDrawForeground = function (ctx) {
+        ctx.save();
+
+        const { drawX, drawY, drawW, drawH } = getDrawGeom();
+
+        // Neutral background for preview area
+        ctx.fillStyle = "#111";
+        ctx.fillRect(drawX, drawY, drawW, drawH);
+
+        // Calculate aspect-correct positioning for images
+        let rectA = { x: 0, y: 0, w: drawW, h: drawH };
+        let rectB = { x: 0, y: 0, w: drawW, h: drawH };
+
+        if (this.imgA?.width && this.imgA?.height) {
+          rectA = fitContain(this.imgA.width, this.imgA.height, drawW, drawH);
+        }
+        if (this.imgB?.width && this.imgB?.height) {
+          rectB = fitContain(this.imgB.width, this.imgB.height, drawW, drawH);
+        }
+
+        const splitX = drawX + Math.floor(drawW * this.sliderPos);
+
+        // Draw B clipped to the right of the slider only. Clipping (rather than
+        // drawing B unclipped as a full-box background) keeps B's own letterbox
+        // padding from showing through A's padding on the left side of the slider.
+        if (this.imgB) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(splitX, drawY, drawX + drawW - splitX, drawH);
+          ctx.clip();
+
+          ctx.drawImage(
+            this.imgB,
+            drawX + rectB.x,
+            drawY + rectB.y,
+            rectB.w,
+            rectB.h
+          );
+          ctx.restore();
+        }
+
+        // Draw A clipped by the slider (left part, aspect-correct, centered)
+        if (this.imgA) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(drawX, drawY, splitX - drawX, drawH);
+          ctx.clip();
+
+          ctx.drawImage(
+            this.imgA,
+            drawX + rectA.x,
+            drawY + rectA.y,
+            rectA.w,
+            rectA.h
+          );
+          ctx.restore();
+        }
+
+        // Slider line
+        ctx.strokeStyle = "#00e0ff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(splitX, drawY);
+        ctx.lineTo(splitX, drawY + drawH);
+        ctx.stroke();
+
+        // Optional handle highlight when hovered/dragging
+        if (this.hovered || this.dragging) {
+          ctx.fillStyle = "#00e0ff";
+          ctx.beginPath();
+          ctx.arc(splitX, drawY + drawH / 2, 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Labels
+        ctx.fillStyle = "white";
+        ctx.font = "bold 14px sans-serif";
+        ctx.shadowColor = "black";
+        ctx.shadowOffsetX = 2;
+        ctx.shadowOffsetY = 2;
+        ctx.fillText("A", drawX + 8, drawY + 20);
+        ctx.fillText("B", drawX + drawW - 20, drawY + 20);
+
+        ctx.font = "normal 10px sans-serif";
+        if (this.imgA && this.imgB) {
+          ctx.fillText(this.imgA.width + "x" + this.imgA.height, drawX + 8, drawY + 34);
+          ctx.textAlign = "right";
+          ctx.fillText(this.imgB.width + "x" + this.imgB.height, drawX + drawW - 10, drawY + 34);
+        }
+
+        ctx.restore();
+      };
+
+      const origOnExecuted = this.onExecuted;
+      this.onExecuted = function (output) {
+        if (origOnExecuted) origOnExecuted.apply(this, arguments);
+
+        if (output?.b64_a && output?.b64_b) {
+          if (this.imgA) this.imgA.src = "";
+          if (this.imgB) this.imgB.src = "";
+
+          this.imgA = new Image();
+          this.imgB = new Image();
+
+          this.imgA.onerror = () => console.warn("[LinkComfyNodes.ImageCompare] Failed to load image A");
+          this.imgB.onerror = () => console.warn("[LinkComfyNodes.ImageCompare] Failed to load image B");
+
+          const imgAData = Array.isArray(output.b64_a) ? output.b64_a.join("") : output.b64_a;
+          const imgBData = Array.isArray(output.b64_b) ? output.b64_b.join("") : output.b64_b;
+
+          this.imgA.src = "data:image/png;base64," + imgAData;
+          this.imgB.src = "data:image/png;base64," + imgBData;
+        } else {
+          console.warn("[LinkComfyNodes.ImageCompare] Missing image base64 data.");
+        }
+      };
+    };
+  },
+});

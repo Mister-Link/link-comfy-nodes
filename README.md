@@ -40,6 +40,7 @@ A collection of custom nodes for [ComfyUI](https://github.com/comfyanonymous/Com
 - **Preview Image (Alpha)** — preview RGBA images with transparency
 - **Spritesheet Preview** — animated spritesheet preview
 - **Preview (webm)** — encode and preview video as WebM
+- **Image Compare** — interactive before/after slider comparing two images
 
 **Save**
 - **Batch Image Save** — sequential image saving with auto-numbering
@@ -49,6 +50,8 @@ A collection of custom nodes for [ComfyUI](https://github.com/comfyanonymous/Com
 **Text**
 - **Concat** — template-based string concatenation (`%1`, `%2`, etc.)
 - **Preview as Markdown** — render a string as markdown on the node
+- **String to List** — split a delimited string into a typed list
+- **Dropdown Select** — editable dropdown; set the option list and output the selected value as a string, plus its index
 
 ## Installation
 
