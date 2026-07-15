@@ -99,7 +99,6 @@ DEFAULT_GAME_PALETTE = np.array([
     (55, 84, 105),
     (252, 174, 205),
     (246, 213, 203),
-    (104, 14, 54),
     (207, 203, 85),
     (74, 66, 106),
     (85, 64, 54),
@@ -109,11 +108,9 @@ DEFAULT_GAME_PALETTE = np.array([
     (135, 165, 154),
     (93, 56, 36),
     (174, 136, 32),
-    (35, 35, 54),
     (105, 84, 75),
     (54, 55, 104),
     (84, 124, 146),
-    (32, 25, 66),
     (115, 54, 35),
     (125, 83, 56),
     (174, 114, 75),
@@ -139,12 +136,9 @@ DEFAULT_GAME_PALETTE = np.array([
     (245, 45, 126),
     (104, 85, 103),
     (43, 63, 114),
-    (56, 44, 74),
     (123, 206, 13),
     (133, 126, 124),
-    (45, 16, 13),
     (152, 164, 105),
-    (84, 45, 74),
     (187, 173, 73),
     (95, 63, 36),
     (75, 105, 43),
@@ -164,12 +158,12 @@ DEFAULT_GAME_PALETTE = np.array([
     (175, 144, 115),
     (85, 155, 155),
     (125, 94, 74),
-    (76, 53, 16),
     (75, 104, 126),
     (174, 94, 76),
     (95, 75, 65),
     (195, 215, 225),
     (84, 94, 144),
+    (95, 54, 85),
     (251, 113, 166),
     (198, 164, 184),
     (173, 154, 135),
@@ -198,6 +192,7 @@ DEFAULT_GAME_PALETTE = np.array([
     (222, 175, 125),
     (105, 66, 54),
     (196, 216, 203),
+    (113, 25, 65),
     (114, 146, 176),
     (226, 76, 134),
     (165, 44, 93),
@@ -265,129 +260,6 @@ DEFAULT_GAME_PALETTE = np.array([
     (144, 182, 44),
     (225, 55, 125),
     (251, 125, 173),
-    (164, 124, 95),
-    (123, 115, 123),
-    (185, 144, 105),
-    (245, 154, 184),
-    (115, 94, 75),
-    (126, 83, 124),
-    (156, 51, 75),
-    (155, 115, 93),
-    (104, 143, 36),
-    (196, 103, 58),
-    (57, 63, 113),
-    (95, 153, 185),
-    (95, 83, 124),
-    (166, 123, 85),
-    (105, 95, 104),
-    (195, 143, 95),
-    (206, 134, 85),
-    (84, 54, 76),
-    (224, 184, 144),
-    (116, 83, 55),
-    (164, 194, 205),
-    (45, 73, 95),
-    (236, 203, 125),
-    (84, 114, 135),
-    (116, 164, 183),
-    (114, 77, 63),
-    (66, 63, 64),
-    (133, 75, 45),
-    (164, 185, 174),
-    (153, 77, 44),
-    (184, 125, 84),
-    (43, 66, 34),
-    (234, 153, 95),
-    (224, 187, 84),
-    (225, 95, 144),
-    (227, 101, 126),
-    (94, 134, 155),
-    (185, 36, 105),
-    (153, 85, 54),
-    (195, 93, 135),
-    (205, 64, 115),
-    (253, 49, 131),
-    (64, 76, 115),
-    (65, 114, 86),
-    (146, 112, 27),
-    (114, 85, 74),
-    (66, 93, 36),
-    (194, 146, 104),
-    (174, 86, 55),
-    (85, 66, 83),
-    (217, 92, 124),
-    (225, 115, 154),
-    (53, 216, 222),
-    (134, 65, 37),
-    (64, 94, 116),
-    (94, 185, 13),
-    (184, 64, 94),
-    (185, 95, 55),
-    (46, 83, 65),
-    (244, 136, 174),
-    (136, 8, 31),
-    (174, 126, 93),
-    (105, 65, 35),
-    (84, 133, 84),
-    (175, 104, 64),
-    (232, 164, 95),
-    (164, 54, 53),
-    (102, 227, 245),
-    (195, 164, 145),
-    (125, 95, 85),
-    (244, 203, 146),
-    (144, 125, 106),
-    (145, 24, 75),
-    (227, 36, 112),
-    (83, 57, 52),
-    (104, 65, 96),
-    (126, 155, 143),
-    (134, 174, 194),
-    (64, 106, 83),
-    (185, 133, 86),
-    (253, 236, 243),
-    (154, 94, 63),
-    (175, 104, 126),
-    (175, 135, 105),
-    (76, 134, 135),
-    (164, 27, 94),
-    (76, 68, 111),
-    (65, 105, 73),
-    (124, 124, 165),
-    (204, 166, 53),
-    (146, 123, 85),
-    (93, 47, 65),
-    (55, 84, 95),
-    (77, 71, 112),
-    (64, 66, 94),
-    (193, 15, 86),
-    (97, 144, 134),
-    (236, 164, 175),
-    (136, 181, 37),
-    (144, 114, 94),
-    (36, 173, 187),
-    (174, 206, 194),
-    (226, 174, 32),
-    (123, 7, 67),
-    (64, 106, 142),
-    (143, 145, 44),
-    (187, 202, 124),
-    (124, 85, 46),
-    (52, 85, 57),
-    (145, 54, 95),
-    (125, 65, 44),
-    (154, 105, 83),
-    (76, 135, 104),
-    (244, 236, 216),
-    (134, 176, 164),
-    (252, 146, 185),
-    (126, 92, 66),
-    (74, 104, 35),
-    (236, 175, 114),
-    (144, 135, 143),
-    (134, 42, 25),
-    (114, 114, 106),
-    (145, 34, 44),
 ], dtype=np.uint8)
 
 
@@ -398,6 +270,37 @@ def _srgb_u8_to_linear(rgb_u8: np.ndarray) -> np.ndarray:
         rgb01 / 12.92,
         ((rgb01 + 0.055) / 1.055) ** 2.4,
     )
+
+
+def _srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
+    # Matching in Lab (not raw/linear RGB) matters because hue lives entirely
+    # in the a/b channels there; a linear-RGB distance can rate a hue-shifted
+    # orange-brown chip "closer" to a rose/magenta skin-shadow tone than an
+    # actual near-hue rose chip, since raw R/G/B can be numerically close
+    # while looking nothing alike.
+    linear = _srgb_u8_to_linear(rgb_u8).astype(np.float64)
+    matrix = np.array(
+        [
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ]
+    )
+    xyz = linear @ matrix.T
+    white = np.array([0.95047, 1.0, 1.08883])
+    scaled = xyz / white
+    delta = 6 / 29
+
+    fxyz = np.where(
+        scaled > delta**3,
+        np.cbrt(scaled),
+        scaled / (3 * delta**2) + 4 / 29,
+    )
+    fx, fy, fz = fxyz[:, 0], fxyz[:, 1], fxyz[:, 2]
+    lightness = 116 * fy - 16
+    a = 500 * (fx - fy)
+    b = 200 * (fy - fz)
+    return np.stack([lightness, a, b], axis=-1)
 
 
 class ApplyPaletteNode:
@@ -485,22 +388,52 @@ class ApplyPaletteNode:
         embedded_alpha = rgba[:, :, 3]
         output_alpha = embedded_alpha if alpha is None else np.clip(np.round(alpha * 255.0), 0, 255).astype(np.uint8)
         flattened = self._flatten_over_white(rgba, output_alpha)
-        unique_pixels, inverse = np.unique(flattened.reshape(-1, 3), axis=0, return_inverse=True)
-        mapped_unique = self._map_colors(unique_pixels, palette)
-        mapped = mapped_unique[inverse].reshape(flattened.shape)
+        mapped = self._map_colors_dithered(flattened, palette)
         return np.dstack((mapped, output_alpha))
 
     @staticmethod
     def _map_colors(colors: np.ndarray, palette: np.ndarray) -> np.ndarray:
-        colors_linear = _srgb_u8_to_linear(colors)
-        palette_linear = _srgb_u8_to_linear(palette)
-        delta = colors_linear[:, None, :] - palette_linear[None, :, :]
-        distances = (
-            (2.0 * delta[:, :, 0] ** 2)
-            + (4.0 * delta[:, :, 1] ** 2)
-            + (3.0 * delta[:, :, 2] ** 2)
-        )
+        colors_lab = _srgb_u8_to_lab(colors)
+        palette_lab = _srgb_u8_to_lab(palette)
+        delta = colors_lab[:, None, :] - palette_lab[None, :, :]
+        distances = np.sum(delta**2, axis=-1)
         return palette[np.argmin(distances, axis=1)]
+
+    @staticmethod
+    def _map_colors_dithered(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
+        # Hard nearest-neighbor matching has no way to represent a source
+        # shade that falls between two palette entries: a broad band of
+        # similar midtones (e.g. a skin-shadow gradient) all snap to
+        # whichever single chip is nearest, which reads as a flat, harsh
+        # blotch instead of a gradient. Floyd-Steinberg error diffusion in
+        # Lab space breaks that up by carrying each pixel's quantization
+        # error into its neighbors, so the region dithers between two close
+        # chips instead of hard-cutting to one.
+        palette_lab = _srgb_u8_to_lab(palette)
+        height, width, _ = image.shape
+        lab = _srgb_u8_to_lab(image.reshape(-1, 3)).reshape(height, width, 3).astype(np.float64)
+
+        output = np.empty((height, width, 3), dtype=np.uint8)
+        for y in range(height):
+            row = lab[y]
+            next_row = lab[y + 1] if y + 1 < height else None
+            for x in range(width):
+                working = row[x]
+                distances = np.sum((palette_lab - working) ** 2, axis=-1)
+                best = int(np.argmin(distances))
+                output[y, x] = palette[best]
+                error = working - palette_lab[best]
+
+                if x + 1 < width:
+                    row[x + 1] += error * (7 / 16)
+                if next_row is not None:
+                    if x - 1 >= 0:
+                        next_row[x - 1] += error * (3 / 16)
+                    next_row[x] += error * (5 / 16)
+                    if x + 1 < width:
+                        next_row[x + 1] += error * (1 / 16)
+
+        return output
 
     @staticmethod
     def _prepare_alpha(
