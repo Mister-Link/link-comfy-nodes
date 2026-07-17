@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from PIL import Image
+from sklearn.cluster import KMeans
 
 DEFAULT_GAME_PALETTE = np.array([
     (202, 133, 161),
@@ -305,6 +307,11 @@ def _srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
 
 NUM_COLORS_OPTIONS = ("256",)
 
+SWATCH_SOURCE_GAME_DEFAULT = "Game Default"
+SWATCH_SOURCE_EXTERNAL = "External Swatch"
+SWATCH_SOURCE_FROM_IMAGE = "From Image"
+SWATCH_SOURCE_OPTIONS = (SWATCH_SOURCE_GAME_DEFAULT, SWATCH_SOURCE_EXTERNAL, SWATCH_SOURCE_FROM_IMAGE)
+
 
 class ApplyPaletteNode:
     RETURN_TYPES = ("IMAGE",)
@@ -312,44 +319,71 @@ class ApplyPaletteNode:
     FUNCTION = "apply_palette"
     CATEGORY = "color"
 
+    _KMEANS_MAX_ITERATIONS = 100
+    _OPAQUE_ALPHA_THRESHOLD = 127
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "frames": ("IMAGE",),
-                "use_swatch": ("BOOLEAN", {"default": True}),
+                "image": ("IMAGE",),
+                "swatch_source": (SWATCH_SOURCE_OPTIONS, {"default": SWATCH_SOURCE_GAME_DEFAULT}),
                 "num_colors": (NUM_COLORS_OPTIONS, {"default": NUM_COLORS_OPTIONS[0]}),
             },
             "optional": {
+                "swatch_path": ("STRING", {"default": ""}),
                 "alpha_opt": ("MASK",),
             },
         }
 
     def apply_palette(
         self,
-        frames: torch.Tensor,
-        use_swatch: bool,
+        image: torch.Tensor,
+        swatch_source: str,
         num_colors: str,
+        swatch_path: str = "",
         alpha_opt: torch.Tensor | None = None,
     ):
         frames_np = (
-            frames.detach().cpu().numpy() * 255.0
+            image.detach().cpu().numpy() * 255.0
         ).round().clip(0, 255).astype(np.uint8)
-        alpha_tensor = self._prepare_alpha(alpha_opt, frames)
+        alpha_tensor = self._prepare_alpha(alpha_opt, image)
+        num_colors_int = int(num_colors)
 
-        # Only "256" exists today; num_colors is kept as a dropdown so
-        # future lower-color-count palettes can slot in here.
-        palette = DEFAULT_GAME_PALETTE
+        # The game palette and the external swatch are the same for every
+        # frame in the batch, so resolve them once up front instead of
+        # redoing the work (or a disk read) per frame.
+        fixed_palette = None
+        if swatch_source == SWATCH_SOURCE_GAME_DEFAULT:
+            fixed_palette = DEFAULT_GAME_PALETTE
+        elif swatch_source == SWATCH_SOURCE_EXTERNAL:
+            fixed_palette = self._load_external_palette(swatch_path)
 
         palettized = []
         for idx in range(frames_np.shape[0]):
             frame_alpha = None if alpha_tensor is None else alpha_tensor[idx].detach().cpu().numpy()
             palettized.append(
-                self._apply_palette_to_frame(frames_np[idx], palette, frame_alpha, not use_swatch)
+                self._apply_palette_to_frame(
+                    frames_np[idx], frame_alpha, swatch_source, fixed_palette, num_colors_int
+                )
             )
 
         result_tensor = torch.from_numpy(np.stack(palettized)).float() / 255.0
         return (result_tensor,)
+
+    @staticmethod
+    def _load_external_palette(swatch_path: str) -> np.ndarray:
+        path = (swatch_path or "").strip()
+        if not path:
+            raise ValueError("swatch_path is required when swatch_source is 'External Swatch'.")
+
+        swatch_image = np.array(Image.open(path).convert("RGBA"), dtype=np.uint8)
+        rgb = swatch_image[:, :, :3]
+        visible = swatch_image[:, :, 3] > 0
+        colors = rgb[visible] if np.any(visible) else rgb.reshape(-1, 3)
+        if colors.size == 0:
+            raise ValueError(f"Swatch image at {path!r} does not contain any visible palette colors.")
+        return np.unique(colors, axis=0).astype(np.uint8)
 
     @staticmethod
     def _to_rgba(image: np.ndarray) -> np.ndarray:
@@ -369,16 +403,42 @@ class ApplyPaletteNode:
     def _apply_palette_to_frame(
         self,
         image: np.ndarray,
-        palette: np.ndarray,
         alpha: np.ndarray | None,
-        no_swatch: bool,
+        swatch_source: str,
+        fixed_palette: np.ndarray | None,
+        num_colors: int,
     ) -> np.ndarray:
         rgba = self._to_rgba(image)
         embedded_alpha = rgba[:, :, 3]
         output_alpha = embedded_alpha if alpha is None else np.clip(np.round(alpha * 255.0), 0, 255).astype(np.uint8)
         flattened = self._flatten_over_white(rgba, output_alpha)
-        mapped = flattened if no_swatch else self._map_colors_dithered(flattened, palette)
+
+        if swatch_source == SWATCH_SOURCE_FROM_IMAGE:
+            palette = self._derive_palette(rgba, output_alpha, num_colors)
+        else:
+            palette = fixed_palette
+
+        mapped = self._map_colors_dithered(flattened, palette)
         return np.dstack((mapped, output_alpha))
+
+    @classmethod
+    def _derive_palette(cls, rgba: np.ndarray, alpha: np.ndarray, num_colors: int) -> np.ndarray:
+        # Fit on opaque pixels only so transparent background doesn't skew
+        # which colors get picked as the "best" ones in the image.
+        pixels = rgba[:, :, :3].reshape(-1, 3)
+        opaque = alpha.reshape(-1) > cls._OPAQUE_ALPHA_THRESHOLD
+        fit_pixels = pixels[opaque] if np.any(opaque) else pixels
+
+        kmeans = KMeans(
+            n_clusters=min(num_colors, len(fit_pixels)),
+            init="k-means++",
+            max_iter=cls._KMEANS_MAX_ITERATIONS,
+            tol=1e-3,
+            random_state=42,
+            n_init="auto",
+        )
+        kmeans.fit(fit_pixels.astype(np.float64))
+        return np.clip(np.round(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
 
     @staticmethod
     def _map_colors_dithered(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
