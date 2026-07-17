@@ -308,7 +308,7 @@ NUM_COLORS_OPTIONS = ("256",)
 
 class ApplyPaletteNode:
     RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("palettized_frames",)
+    RETURN_NAMES = ("frames",)
     FUNCTION = "apply_palette"
     CATEGORY = "color"
 
