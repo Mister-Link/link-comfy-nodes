@@ -303,6 +303,9 @@ def _srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
     return np.stack([lightness, a, b], axis=-1)
 
 
+NUM_COLORS_OPTIONS = ("256",)
+
+
 class ApplyPaletteNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("palettized_frames",)
@@ -314,9 +317,10 @@ class ApplyPaletteNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
+                "use_swatch": ("BOOLEAN", {"default": True}),
+                "num_colors": (NUM_COLORS_OPTIONS, {"default": NUM_COLORS_OPTIONS[0]}),
             },
             "optional": {
-                "swatch_opt": ("IMAGE",),
                 "alpha_opt": ("MASK",),
             },
         }
@@ -324,7 +328,8 @@ class ApplyPaletteNode:
     def apply_palette(
         self,
         frames: torch.Tensor,
-        swatch_opt: torch.Tensor | None = None,
+        use_swatch: bool,
+        num_colors: str,
         alpha_opt: torch.Tensor | None = None,
     ):
         frames_np = (
@@ -332,36 +337,19 @@ class ApplyPaletteNode:
         ).round().clip(0, 255).astype(np.uint8)
         alpha_tensor = self._prepare_alpha(alpha_opt, frames)
 
-        if swatch_opt is None:
-            palettes = [DEFAULT_GAME_PALETTE] * frames_np.shape[0]
-        else:
-            swatch_np = (
-                swatch_opt.detach().cpu().numpy() * 255.0
-            ).round().clip(0, 255).astype(np.uint8)
-            if swatch_np.shape[0] not in (1, frames_np.shape[0]):
-                raise ValueError("Swatch batch size must be 1 or match frame batch size.")
-            palettes = [
-                self._extract_palette(swatch_np[0 if swatch_np.shape[0] == 1 else idx])
-                for idx in range(frames_np.shape[0])
-            ]
+        # Only "256" exists today; num_colors is kept as a dropdown so
+        # future lower-color-count palettes can slot in here.
+        palette = DEFAULT_GAME_PALETTE
 
         palettized = []
         for idx in range(frames_np.shape[0]):
             frame_alpha = None if alpha_tensor is None else alpha_tensor[idx].detach().cpu().numpy()
-            palettized.append(self._apply_palette_to_frame(frames_np[idx], palettes[idx], frame_alpha))
+            palettized.append(
+                self._apply_palette_to_frame(frames_np[idx], palette, frame_alpha, not use_swatch)
+            )
 
         result_tensor = torch.from_numpy(np.stack(palettized)).float() / 255.0
         return (result_tensor,)
-
-    @staticmethod
-    def _extract_palette(image: np.ndarray) -> np.ndarray:
-        rgba = ApplyPaletteNode._to_rgba(image)
-        rgb = rgba[:, :, :3]
-        visible = rgba[:, :, 3] > 0
-        palette = rgb[visible] if np.any(visible) else rgb.reshape(-1, 3)
-        if palette.size == 0:
-            raise ValueError("Swatch image does not contain any visible palette colors.")
-        return np.unique(palette, axis=0).astype(np.uint8)
 
     @staticmethod
     def _to_rgba(image: np.ndarray) -> np.ndarray:
@@ -383,21 +371,14 @@ class ApplyPaletteNode:
         image: np.ndarray,
         palette: np.ndarray,
         alpha: np.ndarray | None,
+        no_swatch: bool,
     ) -> np.ndarray:
         rgba = self._to_rgba(image)
         embedded_alpha = rgba[:, :, 3]
         output_alpha = embedded_alpha if alpha is None else np.clip(np.round(alpha * 255.0), 0, 255).astype(np.uint8)
         flattened = self._flatten_over_white(rgba, output_alpha)
-        mapped = self._map_colors_dithered(flattened, palette)
+        mapped = flattened if no_swatch else self._map_colors_dithered(flattened, palette)
         return np.dstack((mapped, output_alpha))
-
-    @staticmethod
-    def _map_colors(colors: np.ndarray, palette: np.ndarray) -> np.ndarray:
-        colors_lab = _srgb_u8_to_lab(colors)
-        palette_lab = _srgb_u8_to_lab(palette)
-        delta = colors_lab[:, None, :] - palette_lab[None, :, :]
-        distances = np.sum(delta**2, axis=-1)
-        return palette[np.argmin(distances, axis=1)]
 
     @staticmethod
     def _map_colors_dithered(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
