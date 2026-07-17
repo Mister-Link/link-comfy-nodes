@@ -355,7 +355,7 @@ class ApplyPaletteNode:
         # redoing the work (or a disk read) per frame.
         fixed_palette = None
         if swatch_source == SWATCH_SOURCE_GAME_DEFAULT:
-            fixed_palette = DEFAULT_GAME_PALETTE
+            fixed_palette = self._reduce_palette(DEFAULT_GAME_PALETTE, num_colors_int)
         elif swatch_source == SWATCH_SOURCE_EXTERNAL:
             fixed_palette = self._load_external_palette(swatch_path)
 
@@ -428,16 +428,25 @@ class ApplyPaletteNode:
         pixels = rgba[:, :, :3].reshape(-1, 3)
         opaque = alpha.reshape(-1) > cls._OPAQUE_ALPHA_THRESHOLD
         fit_pixels = pixels[opaque] if np.any(opaque) else pixels
+        return cls._kmeans_colors(fit_pixels, num_colors)
 
+    @classmethod
+    def _reduce_palette(cls, palette: np.ndarray, num_colors: int) -> np.ndarray:
+        if num_colors >= len(palette):
+            return palette
+        return cls._kmeans_colors(palette, num_colors)
+
+    @classmethod
+    def _kmeans_colors(cls, colors: np.ndarray, num_colors: int) -> np.ndarray:
         kmeans = KMeans(
-            n_clusters=min(num_colors, len(fit_pixels)),
+            n_clusters=min(num_colors, len(colors)),
             init="k-means++",
             max_iter=cls._KMEANS_MAX_ITERATIONS,
             tol=1e-3,
             random_state=42,
             n_init="auto",
         )
-        kmeans.fit(fit_pixels.astype(np.float64))
+        kmeans.fit(colors.astype(np.float64))
         return np.clip(np.round(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
 
     @staticmethod

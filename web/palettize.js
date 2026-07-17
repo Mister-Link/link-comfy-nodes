@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 const NODE_NAME = "Palettize";
 const SOURCE_EXTERNAL = "External Swatch";
 const SOURCE_FROM_INPUT = "From Input";
-const MIN_HEIGHT_WITH_PATH = 30; // extra room so the swatch_path text field isn't cramped
+const EXTRA_HEIGHT_PER_FIELD = 34; // room for each conditional widget row so it isn't cramped against the node edge
 
 const findWidget = (node, name) => node.widgets?.find((widget) => widget.name === name);
 
@@ -27,12 +27,14 @@ function updateVisibility(node) {
   const numColorsWidget = findWidget(node, "num_colors");
 
   const showPath = sourceWidget.value === SOURCE_EXTERNAL;
+  const showNumColors = sourceWidget.value !== SOURCE_EXTERNAL;
   setWidgetVisible(pathWidget, showPath);
-  setWidgetVisible(numColorsWidget, sourceWidget.value === SOURCE_FROM_INPUT);
+  setWidgetVisible(numColorsWidget, showNumColors);
 
+  const visibleExtraFields = (showPath ? 1 : 0) + (showNumColors ? 1 : 0);
   const computed = node.computeSize();
   const width = Math.max(computed[0], node.size?.[0] ?? 0);
-  const height = showPath ? computed[1] + MIN_HEIGHT_WITH_PATH : computed[1];
+  const height = computed[1] + visibleExtraFields * EXTRA_HEIGHT_PER_FIELD;
   node.setSize([width, height]);
   node.setDirtyCanvas(true, true);
 }
