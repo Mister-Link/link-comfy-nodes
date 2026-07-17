@@ -2,7 +2,8 @@ import { app } from "../../scripts/app.js";
 
 const NODE_NAME = "Palettize";
 const SOURCE_EXTERNAL = "External Swatch";
-const SOURCE_FROM_IMAGE = "From Image";
+const SOURCE_FROM_INPUT = "From Input";
+const MIN_HEIGHT_WITH_PATH = 30; // extra room so the swatch_path text field isn't cramped
 
 const findWidget = (node, name) => node.widgets?.find((widget) => widget.name === name);
 
@@ -10,17 +11,11 @@ function setWidgetVisible(widget, visible) {
   if (!widget) {
     return;
   }
-  if (widget._lcOrigType === undefined) {
-    widget._lcOrigType = widget.type;
+  if (widget._lcOrigComputeSize === undefined) {
     widget._lcOrigComputeSize = widget.computeSize;
   }
-  if (visible) {
-    widget.type = widget._lcOrigType;
-    widget.computeSize = widget._lcOrigComputeSize;
-  } else {
-    widget.type = "lc_palettize_hidden";
-    widget.computeSize = () => [0, -4];
-  }
+  widget.hidden = !visible;
+  widget.computeSize = visible ? widget._lcOrigComputeSize : () => [0, -4];
 }
 
 function updateVisibility(node) {
@@ -31,10 +26,14 @@ function updateVisibility(node) {
   const pathWidget = findWidget(node, "swatch_path");
   const numColorsWidget = findWidget(node, "num_colors");
 
-  setWidgetVisible(pathWidget, sourceWidget.value === SOURCE_EXTERNAL);
-  setWidgetVisible(numColorsWidget, sourceWidget.value === SOURCE_FROM_IMAGE);
+  const showPath = sourceWidget.value === SOURCE_EXTERNAL;
+  setWidgetVisible(pathWidget, showPath);
+  setWidgetVisible(numColorsWidget, sourceWidget.value === SOURCE_FROM_INPUT);
 
-  node.setSize(node.computeSize());
+  const computed = node.computeSize();
+  const width = Math.max(computed[0], node.size?.[0] ?? 0);
+  const height = showPath ? computed[1] + MIN_HEIGHT_WITH_PATH : computed[1];
+  node.setSize([width, height]);
   node.setDirtyCanvas(true, true);
 }
 

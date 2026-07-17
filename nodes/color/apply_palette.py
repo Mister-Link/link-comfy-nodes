@@ -309,8 +309,8 @@ NUM_COLORS_OPTIONS = ("256",)
 
 SWATCH_SOURCE_GAME_DEFAULT = "Game Default"
 SWATCH_SOURCE_EXTERNAL = "External Swatch"
-SWATCH_SOURCE_FROM_IMAGE = "From Image"
-SWATCH_SOURCE_OPTIONS = (SWATCH_SOURCE_GAME_DEFAULT, SWATCH_SOURCE_EXTERNAL, SWATCH_SOURCE_FROM_IMAGE)
+SWATCH_SOURCE_FROM_INPUT = "From Input"
+SWATCH_SOURCE_OPTIONS = (SWATCH_SOURCE_GAME_DEFAULT, SWATCH_SOURCE_EXTERNAL, SWATCH_SOURCE_FROM_INPUT)
 
 
 class ApplyPaletteNode:
@@ -413,7 +413,7 @@ class ApplyPaletteNode:
         output_alpha = embedded_alpha if alpha is None else np.clip(np.round(alpha * 255.0), 0, 255).astype(np.uint8)
         flattened = self._flatten_over_white(rgba, output_alpha)
 
-        if swatch_source == SWATCH_SOURCE_FROM_IMAGE:
+        if swatch_source == SWATCH_SOURCE_FROM_INPUT:
             palette = self._derive_palette(rgba, output_alpha, num_colors)
         else:
             palette = fixed_palette
