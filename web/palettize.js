@@ -2,8 +2,7 @@ import { app } from "../../scripts/app.js";
 
 const NODE_NAME = "Palettize";
 const SOURCE_EXTERNAL = "External Swatch";
-const SOURCE_FROM_INPUT = "From Input";
-const EXTRA_HEIGHT_PER_FIELD = 34; // room for each conditional widget row so it isn't cramped against the node edge
+const MIN_NODE_WIDTH = 220; // a little wider than the intrinsic computed width so combo values aren't crowded
 
 const findWidget = (node, name) => node.widgets?.find((widget) => widget.name === name);
 
@@ -19,7 +18,7 @@ function setWidgetVisible(widget, visible) {
 }
 
 function updateVisibility(node) {
-  const sourceWidget = findWidget(node, "swatch_source");
+  const sourceWidget = findWidget(node, "swatch");
   if (!sourceWidget) {
     return;
   }
@@ -31,11 +30,13 @@ function updateVisibility(node) {
   setWidgetVisible(pathWidget, showPath);
   setWidgetVisible(numColorsWidget, showNumColors);
 
-  const visibleExtraFields = (showPath ? 1 : 0) + (showNumColors ? 1 : 0);
+  // node.computeSize() already reflects only the currently-visible widgets
+  // (widget.hidden is respected by LiteGraph's own layout pass), so the
+  // default size can just be set to that intrinsic minimum directly instead
+  // of padding it -- padding here was making the default bigger than what
+  // dragging the resize handle down to its own minimum would give you.
   const computed = node.computeSize();
-  const width = Math.max(computed[0], node.size?.[0] ?? 0);
-  const height = computed[1] + visibleExtraFields * EXTRA_HEIGHT_PER_FIELD;
-  node.setSize([width, height]);
+  node.setSize([Math.max(computed[0], MIN_NODE_WIDTH), computed[1]]);
   node.setDirtyCanvas(true, true);
 }
 
@@ -51,7 +52,17 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated?.apply(this, arguments);
 
-      const sourceWidget = findWidget(this, "swatch_source");
+      // Patch computeSize (not just the size set at creation time) so the
+      // wider floor also applies to the drag-to-shrink minimum, not just
+      // the initial default size.
+      const originalComputeSize = this.computeSize.bind(this);
+      this.computeSize = function (...args) {
+        const size = originalComputeSize(...args);
+        size[0] = Math.max(size[0], MIN_NODE_WIDTH);
+        return size;
+      };
+
+      const sourceWidget = findWidget(this, "swatch");
       if (sourceWidget) {
         const originalCallback = sourceWidget.callback;
         sourceWidget.callback = (...args) => {

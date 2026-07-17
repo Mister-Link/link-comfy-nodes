@@ -327,7 +327,7 @@ class ApplyPaletteNode:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "swatch_source": (SWATCH_SOURCE_OPTIONS, {"default": SWATCH_SOURCE_GAME_DEFAULT}),
+                "swatch": (SWATCH_SOURCE_OPTIONS, {"default": SWATCH_SOURCE_GAME_DEFAULT}),
                 "num_colors": (NUM_COLORS_OPTIONS, {"default": NUM_COLORS_OPTIONS[0]}),
             },
             "optional": {
@@ -339,7 +339,7 @@ class ApplyPaletteNode:
     def apply_palette(
         self,
         image: torch.Tensor,
-        swatch_source: str,
+        swatch: str,
         num_colors: str,
         swatch_path: str = "",
         alpha_opt: torch.Tensor | None = None,
@@ -354,9 +354,9 @@ class ApplyPaletteNode:
         # frame in the batch, so resolve them once up front instead of
         # redoing the work (or a disk read) per frame.
         fixed_palette = None
-        if swatch_source == SWATCH_SOURCE_GAME_DEFAULT:
+        if swatch == SWATCH_SOURCE_GAME_DEFAULT:
             fixed_palette = self._reduce_palette(DEFAULT_GAME_PALETTE, num_colors_int)
-        elif swatch_source == SWATCH_SOURCE_EXTERNAL:
+        elif swatch == SWATCH_SOURCE_EXTERNAL:
             fixed_palette = self._load_external_palette(swatch_path)
 
         palettized = []
@@ -364,7 +364,7 @@ class ApplyPaletteNode:
             frame_alpha = None if alpha_tensor is None else alpha_tensor[idx].detach().cpu().numpy()
             palettized.append(
                 self._apply_palette_to_frame(
-                    frames_np[idx], frame_alpha, swatch_source, fixed_palette, num_colors_int
+                    frames_np[idx], frame_alpha, swatch, fixed_palette, num_colors_int
                 )
             )
 
@@ -375,7 +375,7 @@ class ApplyPaletteNode:
     def _load_external_palette(swatch_path: str) -> np.ndarray:
         path = (swatch_path or "").strip()
         if not path:
-            raise ValueError("swatch_path is required when swatch_source is 'External Swatch'.")
+            raise ValueError("swatch_path is required when swatch is 'External Swatch'.")
 
         swatch_image = np.array(Image.open(path).convert("RGBA"), dtype=np.uint8)
         rgb = swatch_image[:, :, :3]
@@ -404,7 +404,7 @@ class ApplyPaletteNode:
         self,
         image: np.ndarray,
         alpha: np.ndarray | None,
-        swatch_source: str,
+        swatch: str,
         fixed_palette: np.ndarray | None,
         num_colors: int,
     ) -> np.ndarray:
@@ -413,7 +413,7 @@ class ApplyPaletteNode:
         output_alpha = embedded_alpha if alpha is None else np.clip(np.round(alpha * 255.0), 0, 255).astype(np.uint8)
         flattened = self._flatten_over_white(rgba, output_alpha)
 
-        if swatch_source == SWATCH_SOURCE_FROM_INPUT:
+        if swatch == SWATCH_SOURCE_FROM_INPUT:
             palette = self._derive_palette(rgba, output_alpha, num_colors)
         else:
             palette = fixed_palette
