@@ -61,6 +61,17 @@ class AutoCropperNode:
                         ),
                     },
                 ),
+                "pad_edge_pixel": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "If true, padding is filled by stretching the outermost edge pixels of "
+                            "the crop outward (like a replicated border). Overrides padding_color "
+                            "and use_image_padding when enabled."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "alpha": ("MASK",),
@@ -215,6 +226,7 @@ class AutoCropperNode:
         padding: int,
         padding_color: str,
         use_image_padding: bool,
+        pad_edge_pixel: bool = False,
         alpha: torch.Tensor = None,
     ):
         print(f"[AutoCropper] Processing {frames.shape[0]} frames using {method}...")
@@ -331,40 +343,110 @@ class AutoCropperNode:
                 padded_h = crop_height + (padding * 2)
                 padded_w = crop_width + (padding * 2)
 
-                r, g, b = self._hex_to_rgb(padding_color)
-
-                padded_frame = np.zeros(
-                    (padded_h, padded_w, C), dtype=cropped_frame.dtype
-                )
-                if C >= 3:
-                    padded_frame[:, :, 0] = r
-                    padded_frame[:, :, 1] = g
-                    padded_frame[:, :, 2] = b
-                if C == 4:
-                    padded_frame[:, :, 3] = 0.0
-
-                padded_alpha = np.zeros((padded_h, padded_w), dtype=cropped_alpha.dtype)
-
                 if use_image_padding:
                     src_x1 = x1 - padding
                     src_y1 = y1 - padding
                     src_x2 = x2 + padding
                     src_y2 = y2 + padding
 
-                    # Copy only the in-bounds part from the original frame.
-                    ix1 = max(0, src_x1)
-                    iy1 = max(0, src_y1)
-                    ix2 = min(W, src_x2)
-                    iy2 = min(H, src_y2)
+                    if pad_edge_pixel:
+                        # Pull real image pixels first; once the original frame's
+                        # edge is reached, extend the outermost real pixel outward
+                        # to fill the remaining out-of-bounds padding.
+                        border_left = max(0, -src_x1)
+                        border_top = max(0, -src_y1)
+                        border_right = max(0, src_x2 - W)
+                        border_bottom = max(0, src_y2 - H)
 
-                    if ix2 > ix1 and iy2 > iy1:
-                        dx1 = ix1 - src_x1
-                        dy1 = iy1 - src_y1
-                        dx2 = dx1 + (ix2 - ix1)
-                        dy2 = dy1 + (iy2 - iy1)
-                        padded_frame[dy1:dy2, dx1:dx2] = frame[iy1:iy2, ix1:ix2]
-                        padded_alpha[dy1:dy2, dx1:dx2] = alpha_frame[iy1:iy2, ix1:ix2]
+                        ext_frame = cv2.copyMakeBorder(
+                            frame,
+                            border_top,
+                            border_bottom,
+                            border_left,
+                            border_right,
+                            cv2.BORDER_REPLICATE,
+                        )
+                        ext_alpha = cv2.copyMakeBorder(
+                            alpha_frame,
+                            border_top,
+                            border_bottom,
+                            border_left,
+                            border_right,
+                            cv2.BORDER_REPLICATE,
+                        )
+
+                        ex1 = src_x1 + border_left
+                        ey1 = src_y1 + border_top
+                        padded_frame = ext_frame[
+                            ey1 : ey1 + padded_h, ex1 : ex1 + padded_w
+                        ]
+                        padded_alpha = ext_alpha[
+                            ey1 : ey1 + padded_h, ex1 : ex1 + padded_w
+                        ]
+                    else:
+                        r, g, b = self._hex_to_rgb(padding_color)
+
+                        padded_frame = np.zeros(
+                            (padded_h, padded_w, C), dtype=cropped_frame.dtype
+                        )
+                        if C >= 3:
+                            padded_frame[:, :, 0] = r
+                            padded_frame[:, :, 1] = g
+                            padded_frame[:, :, 2] = b
+                        if C == 4:
+                            padded_frame[:, :, 3] = 0.0
+
+                        padded_alpha = np.zeros(
+                            (padded_h, padded_w), dtype=cropped_alpha.dtype
+                        )
+
+                        # Copy only the in-bounds part from the original frame.
+                        ix1 = max(0, src_x1)
+                        iy1 = max(0, src_y1)
+                        ix2 = min(W, src_x2)
+                        iy2 = min(H, src_y2)
+
+                        if ix2 > ix1 and iy2 > iy1:
+                            dx1 = ix1 - src_x1
+                            dy1 = iy1 - src_y1
+                            dx2 = dx1 + (ix2 - ix1)
+                            dy2 = dy1 + (iy2 - iy1)
+                            padded_frame[dy1:dy2, dx1:dx2] = frame[iy1:iy2, ix1:ix2]
+                            padded_alpha[dy1:dy2, dx1:dx2] = alpha_frame[iy1:iy2, ix1:ix2]
+                elif pad_edge_pixel:
+                    padded_frame = cv2.copyMakeBorder(
+                        cropped_frame,
+                        padding,
+                        padding,
+                        padding,
+                        padding,
+                        cv2.BORDER_REPLICATE,
+                    )
+                    padded_alpha = cv2.copyMakeBorder(
+                        cropped_alpha,
+                        padding,
+                        padding,
+                        padding,
+                        padding,
+                        cv2.BORDER_REPLICATE,
+                    )
                 else:
+                    r, g, b = self._hex_to_rgb(padding_color)
+
+                    padded_frame = np.zeros(
+                        (padded_h, padded_w, C), dtype=cropped_frame.dtype
+                    )
+                    if C >= 3:
+                        padded_frame[:, :, 0] = r
+                        padded_frame[:, :, 1] = g
+                        padded_frame[:, :, 2] = b
+                    if C == 4:
+                        padded_frame[:, :, 3] = 0.0
+
+                    padded_alpha = np.zeros(
+                        (padded_h, padded_w), dtype=cropped_alpha.dtype
+                    )
+
                     padded_frame[
                         padding : padding + crop_height, padding : padding + crop_width
                     ] = cropped_frame
