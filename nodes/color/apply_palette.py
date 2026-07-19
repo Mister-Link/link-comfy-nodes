@@ -652,6 +652,7 @@ class ApplyPaletteNode:
     CATEGORY = "color"
 
     _KMEANS_MAX_ITERATIONS = 100
+    _KMEANS_PROGRESS_STAGES = 5
     _OPAQUE_ALPHA_THRESHOLD = 127
     _PROGRESS_CHUNK_ROWS = 16
 
@@ -683,19 +684,16 @@ class ApplyPaletteNode:
         alpha_tensor = self._prepare_alpha(alpha_opt, image)
         num_colors_int = int(num_colors)
 
-        # The game palette and the external swatch are the same for every
-        # frame in the batch, so resolve them once up front instead of
-        # redoing the work (or a disk read) per frame.
-        fixed_palette = None
-        if swatch == SWATCH_SOURCE_GAME_DEFAULT:
-            fixed_palette = GAME_PALETTES[num_colors]
-        elif swatch == SWATCH_SOURCE_EXTERNAL:
-            fixed_palette = self._load_external_palette(swatch_path)
-
         total_frames = frames_np.shape[0]
         chunk_rows = self._PROGRESS_CHUNK_ROWS
         chunks_per_frame = max(1, (frames_np.shape[1] + chunk_rows - 1) // chunk_rows)
-        total_progress_steps = total_frames * (chunks_per_frame + 1)
+        # "From Input" replaces the single pre-dither tick with one tick per
+        # KMeans refinement stage, since that fit is the slow, previously
+        # invisible part of the run; the other two sources resolve their
+        # palette near-instantly so a single tick is enough.
+        palette_resolve_ticks = self._KMEANS_PROGRESS_STAGES if swatch == SWATCH_SOURCE_FROM_INPUT else 1
+        setup_ticks = 1 if swatch == SWATCH_SOURCE_EXTERNAL else 0
+        total_progress_steps = setup_ticks + total_frames * (chunks_per_frame + palette_resolve_ticks)
         pbar = ProgressBar(total_progress_steps)
         progress_value = 0
 
@@ -706,6 +704,16 @@ class ApplyPaletteNode:
             nonlocal progress_value
             progress_value = min(progress_value + steps, total_progress_steps)
             pbar.update_absolute(progress_value, total_progress_steps)
+
+        # The game palette and the external swatch are the same for every
+        # frame in the batch, so resolve them once up front instead of
+        # redoing the work (or a disk read) per frame.
+        fixed_palette = None
+        if swatch == SWATCH_SOURCE_GAME_DEFAULT:
+            fixed_palette = GAME_PALETTES[num_colors]
+        elif swatch == SWATCH_SOURCE_EXTERNAL:
+            fixed_palette = self._load_external_palette(swatch_path)
+            advance_progress()
 
         palettized = []
         for idx in range(total_frames):
@@ -771,11 +779,11 @@ class ApplyPaletteNode:
         flattened = self._flatten_over_white(rgba, output_alpha)
 
         if swatch == SWATCH_SOURCE_FROM_INPUT:
-            palette = self._derive_palette(rgba, output_alpha, num_colors)
+            palette = self._derive_palette(rgba, output_alpha, num_colors, progress_callback)
         else:
             palette = fixed_palette
+            progress_callback()
 
-        progress_callback()
         mapped = self._map_colors_dithered(
             flattened,
             palette,
@@ -786,26 +794,47 @@ class ApplyPaletteNode:
         return np.dstack((mapped, output_alpha))
 
     @classmethod
-    def _derive_palette(cls, rgba: np.ndarray, alpha: np.ndarray, num_colors: int) -> np.ndarray:
+    def _derive_palette(
+        cls, rgba: np.ndarray, alpha: np.ndarray, num_colors: int, progress_callback
+    ) -> np.ndarray:
         # Fit on opaque pixels only so transparent background doesn't skew
         # which colors get picked as the "best" ones in the image.
         pixels = rgba[:, :, :3].reshape(-1, 3)
         opaque = alpha.reshape(-1) > cls._OPAQUE_ALPHA_THRESHOLD
         fit_pixels = pixels[opaque] if np.any(opaque) else pixels
-        return cls._kmeans_colors(fit_pixels, num_colors)
+        return cls._kmeans_colors(fit_pixels, num_colors, progress_callback)
 
     @classmethod
-    def _kmeans_colors(cls, colors: np.ndarray, num_colors: int) -> np.ndarray:
-        kmeans = KMeans(
-            n_clusters=min(num_colors, len(colors)),
-            init="k-means++",
-            max_iter=cls._KMEANS_MAX_ITERATIONS,
-            tol=1e-3,
-            random_state=42,
-            n_init="auto",
-        )
-        kmeans.fit(colors.astype(np.float64))
-        return np.clip(np.round(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
+    def _kmeans_colors(cls, colors: np.ndarray, num_colors: int, progress_callback) -> np.ndarray:
+        # A single blocking KMeans.fit() call over up to _KMEANS_MAX_ITERATIONS
+        # gives no feedback until it's entirely done, which reads as a stalled
+        # progress bar on any frame large enough for the fit to take a while.
+        # Splitting the iteration budget into stages and re-seeding each stage
+        # from the previous stage's centers (KMeans has no warm_start, so this
+        # is done by hand via the `init` array) makes the same fit emit one
+        # tick per stage instead of going dark for its entire duration.
+        colors_f64 = colors.astype(np.float64)
+        n_clusters = min(num_colors, len(colors))
+        stages = max(1, cls._KMEANS_PROGRESS_STAGES)
+        iters_per_stage = max(1, cls._KMEANS_MAX_ITERATIONS // stages)
+
+        centers: np.ndarray | str = "k-means++"
+        n_init = "auto"
+        for _ in range(stages):
+            kmeans = KMeans(
+                n_clusters=n_clusters,
+                init=centers,
+                max_iter=iters_per_stage,
+                tol=1e-3,
+                random_state=42,
+                n_init=n_init,
+            )
+            kmeans.fit(colors_f64)
+            centers = kmeans.cluster_centers_
+            n_init = 1
+            progress_callback()
+
+        return np.clip(np.round(centers), 0, 255).astype(np.uint8)
 
     @staticmethod
     def _map_colors_dithered(
