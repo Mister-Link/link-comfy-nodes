@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
-from numba import njit
 import comfy.model_management
 from comfy.utils import ProgressBar
 from PIL import Image
-from sklearn.cluster import KMeans
 
 GAME_PALETTES: dict[str, np.ndarray] = {
     "256": np.array([
@@ -517,7 +517,7 @@ GAME_PALETTES: dict[str, np.ndarray] = {
 
 
 def _srgb_u8_to_linear(rgb_u8: np.ndarray) -> np.ndarray:
-    rgb01 = rgb_u8.astype(np.float32) / 255.0
+    rgb01 = rgb_u8.astype(np.float64) / 255.0
     return np.where(
         rgb01 <= 0.04045,
         rgb01 / 12.92,
@@ -525,116 +525,52 @@ def _srgb_u8_to_linear(rgb_u8: np.ndarray) -> np.ndarray:
     )
 
 
-def _srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
-    # Matching in Lab (not raw/linear RGB) matters because hue lives entirely
-    # in the a/b channels there; a linear-RGB distance can rate a hue-shifted
-    # orange-brown chip "closer" to a rose/magenta skin-shadow tone than an
-    # actual near-hue rose chip, since raw R/G/B can be numerically close
-    # while looking nothing alike.
-    linear = _srgb_u8_to_linear(rgb_u8).astype(np.float64)
-    matrix = np.array(
-        [
-            [0.4124564, 0.3575761, 0.1804375],
-            [0.2126729, 0.7151522, 0.0721750],
-            [0.0193339, 0.1191920, 0.9503041],
-        ]
-    )
-    xyz = linear @ matrix.T
-    white = np.array([0.95047, 1.0, 1.08883])
-    scaled = xyz / white
-    delta = 6 / 29
+def _srgb_u8_to_oklab(rgb_u8: np.ndarray) -> np.ndarray:
+    # Oklab (not CIELAB) because its a/b axes stay closer to perceptually
+    # uniform hue/chroma across the whole lightness range, which matters
+    # both for matching (a linear-RGB or even a naive Lab distance can rate
+    # a hue-shifted chip "closer" than an actual near-hue one) and for
+    # k-means, where a centroid is literally an average position in this
+    # space -- a space where equal steps look like equal steps gives
+    # centroids that better represent "the color halfway between".
+    lin = _srgb_u8_to_linear(rgb_u8)
+    r, g, b = lin[..., 0], lin[..., 1], lin[..., 2]
 
-    fxyz = np.where(
-        scaled > delta**3,
-        np.cbrt(scaled),
-        scaled / (3 * delta**2) + 4 / 29,
-    )
-    fx, fy, fz = fxyz[:, 0], fxyz[:, 1], fxyz[:, 2]
-    lightness = 116 * fy - 16
-    a = 500 * (fx - fy)
-    b = 200 * (fy - fz)
-    return np.stack([lightness, a, b], axis=-1)
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+
+    l_, m_, s_ = np.cbrt(l), np.cbrt(m), np.cbrt(s)
+
+    lightness = 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_
+    a = 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_
+    b_ = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+    return np.stack([lightness, a, b_], axis=-1)
 
 
-_NEAR_EXACT_LAB_THRESHOLD = 24.0
+# Squared-Oklab-distance floor below which a pixel is treated as an
+# imperceptible match to its nearest palette entry and hard-snapped with no
+# dithering at all. This (not a per-pixel "firewall" bolted onto an
+# otherwise-unbounded diffusion process) is what keeps a genuinely flat or
+# near-flat region -- a solid background, a flat fill -- perfectly flat in
+# the output: see _map_colors_dithered for why the old Floyd-Steinberg
+# approach could speckle a flat white background with unrelated colors.
+_FLAT_MATCH_THRESHOLD = 0.0025
 
-
-@njit(cache=True)
-def _dither_lab_chunk(
-    lab: np.ndarray,
-    clean_lab: np.ndarray,
-    palette_lab: np.ndarray,
-    palette_u8: np.ndarray,
-    near_exact_threshold: float,
-    y_start: int,
-    y_end: int,
-    output: np.ndarray,
-) -> None:
-    height, width, _ = lab.shape
-    num_colors = palette_lab.shape[0]
-
-    for y in range(y_start, y_end):
-        for x in range(width):
-            cl0 = clean_lab[y, x, 0]
-            cl1 = clean_lab[y, x, 1]
-            cl2 = clean_lab[y, x, 2]
-
-            source_best = 0
-            source_best_dist = 1e18
-            for c in range(num_colors):
-                d0 = palette_lab[c, 0] - cl0
-                d1 = palette_lab[c, 1] - cl1
-                d2 = palette_lab[c, 2] - cl2
-                dist = d0 * d0 + d1 * d1 + d2 * d2
-                if dist < source_best_dist:
-                    source_best_dist = dist
-                    source_best = c
-
-            if source_best_dist < near_exact_threshold:
-                output[y, x, 0] = palette_u8[source_best, 0]
-                output[y, x, 1] = palette_u8[source_best, 1]
-                output[y, x, 2] = palette_u8[source_best, 2]
-                continue
-
-            w0 = lab[y, x, 0]
-            w1 = lab[y, x, 1]
-            w2 = lab[y, x, 2]
-
-            best = 0
-            best_dist = 1e18
-            for c in range(num_colors):
-                d0 = palette_lab[c, 0] - w0
-                d1 = palette_lab[c, 1] - w1
-                d2 = palette_lab[c, 2] - w2
-                dist = d0 * d0 + d1 * d1 + d2 * d2
-                if dist < best_dist:
-                    best_dist = dist
-                    best = c
-
-            output[y, x, 0] = palette_u8[best, 0]
-            output[y, x, 1] = palette_u8[best, 1]
-            output[y, x, 2] = palette_u8[best, 2]
-
-            e0 = w0 - palette_lab[best, 0]
-            e1 = w1 - palette_lab[best, 1]
-            e2 = w2 - palette_lab[best, 2]
-
-            if x + 1 < width:
-                lab[y, x + 1, 0] += e0 * (7 / 16)
-                lab[y, x + 1, 1] += e1 * (7 / 16)
-                lab[y, x + 1, 2] += e2 * (7 / 16)
-            if y + 1 < height:
-                if x - 1 >= 0:
-                    lab[y + 1, x - 1, 0] += e0 * (3 / 16)
-                    lab[y + 1, x - 1, 1] += e1 * (3 / 16)
-                    lab[y + 1, x - 1, 2] += e2 * (3 / 16)
-                lab[y + 1, x, 0] += e0 * (5 / 16)
-                lab[y + 1, x, 1] += e1 * (5 / 16)
-                lab[y + 1, x, 2] += e2 * (5 / 16)
-                if x + 1 < width:
-                    lab[y + 1, x + 1, 0] += e0 * (1 / 16)
-                    lab[y + 1, x + 1, 1] += e1 * (1 / 16)
-                    lab[y + 1, x + 1, 2] += e2 * (1 / 16)
+_BAYER_8 = np.array(
+    [
+        [0, 48, 12, 60, 3, 51, 15, 63],
+        [32, 16, 44, 28, 35, 19, 47, 31],
+        [8, 56, 4, 52, 11, 59, 7, 55],
+        [40, 24, 36, 20, 43, 27, 39, 23],
+        [2, 50, 14, 62, 1, 49, 13, 61],
+        [34, 18, 46, 30, 33, 17, 45, 29],
+        [10, 58, 6, 54, 9, 57, 5, 53],
+        [42, 26, 38, 22, 41, 25, 37, 21],
+    ],
+    dtype=np.float64,
+)
+_BAYER_8_NORM = (_BAYER_8 + 0.5) / 64.0
 
 
 NUM_COLORS_OPTIONS = ("256", "128", "64", "48")
@@ -653,8 +589,18 @@ class ApplyPaletteNode:
 
     _KMEANS_MAX_ITERATIONS = 100
     _KMEANS_PROGRESS_STAGES = 5
+    _KMEANS_SEED = 42
     _OPAQUE_ALPHA_THRESHOLD = 127
     _PROGRESS_CHUNK_ROWS = 16
+    _PALETTE_BUCKET_SIZE = 8
+    # Fraction of the target palette size reserved for a dedicated
+    # low-chroma cluster budget, separate from the chromatic budget. This is
+    # the fix for "From Input" palettes that used to leave a frame's actual
+    # background/near-neutral shades with no close match (they had to
+    # compete for slots against saturated hues on equal footing) -- see
+    # palette_forge.py for the full writeup.
+    _NEUTRAL_BUDGET_FRACTION = 0.1875
+    _NEUTRAL_CHROMA_THRESHOLD = 0.02
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -804,37 +750,158 @@ class ApplyPaletteNode:
         fit_pixels = pixels[opaque] if np.any(opaque) else pixels
         return cls._kmeans_colors(fit_pixels, num_colors, progress_callback)
 
+    @staticmethod
+    def _bucketed_weighted_colors(rgb_u8_flat: np.ndarray, bucket_size: int) -> tuple[np.ndarray, np.ndarray]:
+        """Return (mean_rgb[N,3] float, weight[N] float), bucketing to merge
+        near-duplicate shades (grain, dither noise, JPEG-ish artifacts)
+        before they compete for cluster budget individually. Uses
+        np.bincount (a single C-level scatter-add per channel) so this stays
+        fast even for a full-resolution frame's worth of pixels."""
+        pixels = rgb_u8_flat.astype(np.int64)
+        levels = -(-256 // bucket_size)  # ceil(256 / bucket_size)
+        binned = pixels // bucket_size
+        keys = (binned[:, 0] * levels + binned[:, 1]) * levels + binned[:, 2]
+        num_keys = levels * levels * levels
+
+        counts = np.bincount(keys, minlength=num_keys)
+        sum_r = np.bincount(keys, weights=pixels[:, 0].astype(np.float64), minlength=num_keys)
+        sum_g = np.bincount(keys, weights=pixels[:, 1].astype(np.float64), minlength=num_keys)
+        sum_b = np.bincount(keys, weights=pixels[:, 2].astype(np.float64), minlength=num_keys)
+
+        nonzero = counts > 0
+        counts = counts[nonzero]
+        means = np.stack([sum_r[nonzero], sum_g[nonzero], sum_b[nonzero]], axis=1) / counts[:, None]
+        return means, counts.astype(np.float64)
+
+    @staticmethod
+    def _kmeanspp_init(points: np.ndarray, weights: np.ndarray, k: int, seed: int) -> np.ndarray:
+        n = len(points)
+        if k <= 0:
+            return np.empty((0, 3))
+        if n <= k:
+            pad = k - n
+            if pad == 0:
+                return points.copy()
+            rng = np.random.default_rng(seed)
+            extra_idx = rng.choice(n, size=pad, replace=True) if n > 0 else np.array([], dtype=int)
+            if n == 0:
+                return np.zeros((k, 3))
+            jitter = rng.normal(scale=1e-4, size=(pad, 3))
+            return np.concatenate([points, points[extra_idx] + jitter], axis=0)
+
+        rng = np.random.default_rng(seed)
+        centers = np.empty((k, 3))
+        probs = weights / weights.sum()
+        centers[0] = points[rng.choice(n, p=probs)]
+        closest_sq = np.sum((points - centers[0]) ** 2, axis=1)
+        for i in range(1, k):
+            weighted_d = closest_sq * weights
+            total = weighted_d.sum()
+            idx = rng.choice(n, p=weighted_d / total) if total > 0 else rng.choice(n)
+            centers[i] = points[idx]
+            new_d = np.sum((points - centers[i]) ** 2, axis=1)
+            closest_sq = np.minimum(closest_sq, new_d)
+        return centers
+
+    @staticmethod
+    def _kmeans_lloyd_iterations(
+        points: np.ndarray, weights: np.ndarray, centers: np.ndarray, iters: int
+    ) -> np.ndarray:
+        if len(centers) == 0 or len(points) == 0:
+            return centers
+        for _ in range(iters):
+            dists = ((points[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            assign = np.argmin(dists, axis=1)
+            new_centers = centers.copy()
+            for c in range(len(centers)):
+                mask = assign == c
+                if mask.any():
+                    w = weights[mask]
+                    new_centers[c] = (points[mask] * w[:, None]).sum(axis=0) / w.sum()
+            if np.allclose(new_centers, centers, atol=1e-6):
+                centers = new_centers
+                break
+            centers = new_centers
+        return centers
+
+    @staticmethod
+    def _nearest_sampled_rgb(centers: np.ndarray, pool_rgb: np.ndarray, pool_oklab: np.ndarray) -> np.ndarray:
+        # Snap each Oklab cluster center to the nearest *actual sampled*
+        # sRGB color, rather than analytically inverting Oklab, guaranteeing
+        # every palette entry genuinely occurs in the source frame.
+        if len(centers) == 0:
+            return np.empty((0, 3), dtype=np.uint8)
+        if len(pool_rgb) == 0:
+            return np.zeros((len(centers), 3), dtype=np.uint8)
+        out = np.empty((len(centers), 3), dtype=np.uint8)
+        for i, center in enumerate(centers):
+            d = np.sum((pool_oklab - center) ** 2, axis=1)
+            out[i] = pool_rgb[np.argmin(d)]
+        return out
+
     @classmethod
     def _kmeans_colors(cls, colors: np.ndarray, num_colors: int, progress_callback) -> np.ndarray:
-        # A single blocking KMeans.fit() call over up to _KMEANS_MAX_ITERATIONS
-        # gives no feedback until it's entirely done, which reads as a stalled
-        # progress bar on any frame large enough for the fit to take a while.
-        # Splitting the iteration budget into stages and re-seeding each stage
-        # from the previous stage's centers (KMeans has no warm_start, so this
-        # is done by hand via the `init` array) makes the same fit emit one
-        # tick per stage instead of going dark for its entire duration.
-        colors_f64 = colors.astype(np.float64)
-        n_clusters = min(num_colors, len(colors))
+        # A single blocking fit over up to _KMEANS_MAX_ITERATIONS gives no
+        # feedback until it's entirely done, which reads as a stalled
+        # progress bar on any frame large enough for the fit to take a
+        # while. Running the iteration budget in stages and calling
+        # progress_callback once per stage (continuing from the previous
+        # stage's centers) keeps the bar moving instead of going dark for
+        # the whole fit.
+        #
+        # The palette is split into a dedicated neutral (low-chroma) budget
+        # and a chromatic budget, each clustered independently in Oklab
+        # space via weighted k-means. This is the actual fix for the
+        # "dithering hallucinates on a flat background" failure: previously
+        # the palette was one undifferentiated k-means fit in raw RGB, so a
+        # frame's background shade only got a close match if it happened to
+        # win enough slots against saturated colors on its own. Splitting
+        # the budget guarantees near-white/near-black content always has
+        # somewhere close to land.
+        means, weights = cls._bucketed_weighted_colors(colors, cls._PALETTE_BUCKET_SIZE)
+        oklab = _srgb_u8_to_oklab(means.astype(np.float64))
+
+        # Cheap insurance: make true white/black *candidates* the neutral
+        # cluster can snap to, without letting them dominate -- weight is
+        # tiny relative to real content, so actual background shades win
+        # wherever they exist.
+        anchor_rgb = np.array([[255, 255, 255], [0, 0, 0]], dtype=np.float64)
+        anchor_weight = max(1.0, weights.sum() * 0.001)
+        means = np.concatenate([means, anchor_rgb], axis=0)
+        weights = np.concatenate([weights, np.full(2, anchor_weight)])
+        oklab = np.concatenate([oklab, _srgb_u8_to_oklab(anchor_rgb)], axis=0)
+
+        chroma = np.hypot(oklab[:, 1], oklab[:, 2])
+        is_neutral = chroma < cls._NEUTRAL_CHROMA_THRESHOLD
+
+        neutral_budget = min(num_colors, max(4, round(num_colors * cls._NEUTRAL_BUDGET_FRACTION)))
+        chromatic_budget = max(0, num_colors - neutral_budget)
+
+        neutral_points, neutral_weights = oklab[is_neutral], weights[is_neutral]
+        chromatic_points, chromatic_weights = oklab[~is_neutral], weights[~is_neutral]
+
+        neutral_centers = cls._kmeanspp_init(neutral_points, neutral_weights, neutral_budget, cls._KMEANS_SEED)
+        chromatic_centers = cls._kmeanspp_init(
+            chromatic_points, chromatic_weights, chromatic_budget, cls._KMEANS_SEED + 1
+        )
+
         stages = max(1, cls._KMEANS_PROGRESS_STAGES)
         iters_per_stage = max(1, cls._KMEANS_MAX_ITERATIONS // stages)
-
-        centers: np.ndarray | str = "k-means++"
-        n_init = "auto"
         for _ in range(stages):
-            kmeans = KMeans(
-                n_clusters=n_clusters,
-                init=centers,
-                max_iter=iters_per_stage,
-                tol=1e-3,
-                random_state=42,
-                n_init=n_init,
+            neutral_centers = cls._kmeans_lloyd_iterations(
+                neutral_points, neutral_weights, neutral_centers, iters_per_stage
             )
-            kmeans.fit(colors_f64)
-            centers = kmeans.cluster_centers_
-            n_init = 1
+            chromatic_centers = cls._kmeans_lloyd_iterations(
+                chromatic_points, chromatic_weights, chromatic_centers, iters_per_stage
+            )
             progress_callback()
 
-        return np.clip(np.round(centers), 0, 255).astype(np.uint8)
+        neutral_rgb = cls._nearest_sampled_rgb(neutral_centers, means[is_neutral], neutral_points)
+        chromatic_rgb = cls._nearest_sampled_rgb(chromatic_centers, means[~is_neutral], chromatic_points)
+
+        combined = np.concatenate([neutral_rgb, chromatic_rgb], axis=0).astype(np.uint8)
+        combined = np.unique(combined, axis=0)
+        return combined[:num_colors]
 
     @staticmethod
     def _map_colors_dithered(
@@ -848,42 +915,68 @@ class ApplyPaletteNode:
         # shade that falls between two palette entries: a broad band of
         # similar midtones (e.g. a skin-shadow gradient) all snap to
         # whichever single chip is nearest, which reads as a flat, harsh
-        # blotch instead of a gradient. Floyd-Steinberg error diffusion in
-        # Lab space breaks that up by carrying each pixel's quantization
-        # error into its neighbors, so the region dithers between two close
-        # chips instead of hard-cutting to one.
+        # blotch instead of a gradient.
         #
-        # Error diffusion has no natural stopping point: in a perfectly flat
-        # region (e.g. a solid white background) the same tiny residual
-        # keeps accumulating pixel after pixel until it finally crosses into
-        # a completely different, unrelated palette chip (white -> pink),
-        # which reads as random colored speckling in what should be a flat
-        # fill. A source pixel that already lands within an imperceptible
-        # distance of a palette entry is quantized hard against its own
-        # (pre-diffusion) value and neither consumes incoming error nor
-        # emits new error, which firewalls flat regions from ever
-        # accumulating drift while leaving genuine gradients (which sit
-        # meaningfully far from any single chip) dithered.
+        # The previous fix for that was Floyd-Steinberg error diffusion,
+        # which has no natural floor: in a flat region the same tiny
+        # quantization residue keeps accumulating pixel after pixel until it
+        # finally crosses into a completely unrelated palette chip (white ->
+        # pink speckling). The "near-exact firewall" that used to guard
+        # against this only caught pixels that already happened to land
+        # close to *some* palette entry -- it had no notion of whether the
+        # surrounding region was actually flat, so a background shade that
+        # sat just outside that radius still diffused freely and could run
+        # away.
         #
-        # The per-pixel loop is JIT-compiled (numba): each pixel depends on
-        # the diffused error from its left/top neighbors, so it can't be
-        # vectorized, but compiling it to native code avoids the per-pixel
-        # numpy call overhead that dominates a plain Python loop -- roughly
-        # 25x faster, which matters here since this runs per frame.
-        palette_lab = _srgb_u8_to_lab(palette).astype(np.float64)
-        palette_u8 = palette.astype(np.uint8)
+        # This replaces diffusion with ordered (Bayer) dithering restricted
+        # to each pixel's own two nearest palette colors. Every pixel's
+        # choice depends only on a fixed spatial threshold pattern, never on
+        # a neighbor's accumulated error -- there is nothing to accumulate,
+        # so it is structurally impossible to land on a third, unrelated
+        # hue. Pixels that are already an imperceptibly close match
+        # (_FLAT_MATCH_THRESHOLD) hard-snap with no dithering, which is what
+        # keeps a genuinely flat background perfectly flat.
+        #
+        # Because each pixel's decision no longer depends on its neighbors,
+        # the whole frame resolves in one vectorized numpy pass -- no numba
+        # JIT loop needed. The chunked loop below exists purely to keep the
+        # progress bar and interrupt checks ticking at the same cadence as
+        # before.
         height, width, _ = image.shape
-        clean_lab = _srgb_u8_to_lab(image.reshape(-1, 3)).reshape(height, width, 3).astype(np.float64)
-        lab = clean_lab.copy()
+        palette_u8 = palette.astype(np.uint8)
+        palette_oklab = _srgb_u8_to_oklab(palette_u8.astype(np.float64))
+
+        unique_pixels, inverse = np.unique(image.reshape(-1, 3), axis=0, return_inverse=True)
+        unique_oklab = _srgb_u8_to_oklab(unique_pixels.astype(np.float64))
+
+        dists = ((unique_oklab[:, None, :] - palette_oklab[None, :, :]) ** 2).sum(axis=2)
+        if palette_oklab.shape[0] > 1:
+            order = np.argsort(dists, axis=1)
+            nearest_idx, second_idx = order[:, 0], order[:, 1]
+        else:
+            nearest_idx = np.zeros(len(unique_pixels), dtype=np.int64)
+            second_idx = nearest_idx
+        nearest_dist = np.take_along_axis(dists, nearest_idx[:, None], axis=1)[:, 0]
+        second_dist = np.take_along_axis(dists, second_idx[:, None], axis=1)[:, 0]
+
+        denom = np.maximum(nearest_dist + second_dist, 1e-12)
+        mix_to_second = np.where(nearest_dist < _FLAT_MATCH_THRESHOLD, 0.0, nearest_dist / denom)
+
+        px_nearest = nearest_idx[inverse].reshape(height, width)
+        px_second = second_idx[inverse].reshape(height, width)
+        px_mix = mix_to_second[inverse].reshape(height, width)
+
+        bayer_tiled = np.tile(
+            _BAYER_8_NORM, (math.ceil(height / 8), math.ceil(width / 8))
+        )[:height, :width]
 
         output = np.empty((height, width, 3), dtype=np.uint8)
         for y_start in range(0, height, chunk_rows):
             interrupt_callback()
             y_end = min(y_start + chunk_rows, height)
-            _dither_lab_chunk(
-                lab, clean_lab, palette_lab, palette_u8,
-                _NEAR_EXACT_LAB_THRESHOLD, y_start, y_end, output,
-            )
+            use_second = px_mix[y_start:y_end] > bayer_tiled[y_start:y_end]
+            chosen = np.where(use_second, px_second[y_start:y_end], px_nearest[y_start:y_end])
+            output[y_start:y_end] = palette_u8[chosen]
             progress_callback()
 
         return output
