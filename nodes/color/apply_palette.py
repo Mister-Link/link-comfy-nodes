@@ -2,267 +2,518 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from numba import njit
+import comfy.model_management
+from comfy.utils import ProgressBar
 from PIL import Image
 from sklearn.cluster import KMeans
 
-DEFAULT_GAME_PALETTE = np.array([
-    (202, 133, 161),
-    (189, 116, 143),
-    (175, 99, 128),
-    (254, 254, 255),
-    (252, 68, 142),
-    (163, 242, 5),
-    (184, 145, 33),
-    (64, 35, 56),
-    (116, 1, 1),
-    (134, 95, 74),
-    (136, 177, 1),
-    (74, 45, 35),
-    (245, 125, 163),
-    (124, 154, 174),
-    (97, 244, 254),
-    (83, 74, 115),
-    (245, 206, 153),
-    (88, 123, 45),
-    (6, 4, 3),
-    (44, 75, 54),
-    (203, 113, 66),
-    (196, 194, 194),
-    (125, 94, 24),
-    (184, 135, 94),
-    (104, 65, 45),
-    (236, 75, 125),
-    (64, 104, 135),
-    (52, 51, 124),
-    (35, 24, 35),
-    (253, 51, 132),
-    (37, 51, 95),
-    (85, 54, 34),
-    (54, 36, 34),
-    (204, 245, 234),
-    (153, 146, 144),
-    (144, 74, 44),
-    (74, 0, 1),
-    (225, 224, 225),
-    (76, 172, 14),
-    (167, 8, 67),
-    (223, 96, 125),
-    (222, 184, 74),
-    (214, 166, 114),
-    (94, 65, 54),
-    (144, 13, 36),
-    (73, 115, 75),
-    (65, 25, 24),
-    (104, 57, 73),
-    (195, 155, 33),
-    (47, 73, 135),
-    (226, 145, 75),
-    (55, 44, 55),
-    (204, 23, 95),
-    (194, 174, 155),
-    (154, 84, 138),
-    (175, 94, 55),
-    (163, 115, 84),
-    (115, 105, 104),
-    (134, 13, 75),
-    (125, 75, 54),
-    (84, 55, 45),
-    (64, 73, 125),
-    (92, 67, 16),
-    (95, 1, 3),
-    (114, 84, 65),
-    (115, 47, 42),
-    (114, 73, 45),
-    (144, 95, 65),
-    (232, 37, 114),
-    (163, 126, 31),
-    (194, 66, 106),
-    (184, 124, 146),
-    (74, 54, 73),
-    (255, 212, 32),
-    (44, 63, 85),
-    (62, 86, 35),
-    (35, 23, 16),
-    (176, 174, 173),
-    (24, 45, 35),
-    (104, 125, 115),
-    (56, 94, 63),
-    (154, 135, 115),
-    (154, 95, 54),
-    (252, 72, 143),
-    (205, 44, 114),
-    (133, 177, 37),
-    (95, 63, 44),
-    (114, 75, 54),
-    (84, 75, 75),
-    (103, 116, 83),
-    (156, 202, 185),
-    (94, 45, 34),
-    (55, 84, 105),
-    (252, 174, 205),
-    (246, 213, 203),
-    (207, 203, 85),
-    (74, 66, 106),
-    (85, 64, 54),
-    (124, 85, 65),
-    (45, 195, 205),
-    (234, 165, 105),
-    (135, 165, 154),
-    (93, 56, 36),
-    (174, 136, 32),
-    (105, 84, 75),
-    (54, 55, 104),
-    (84, 124, 146),
-    (115, 54, 35),
-    (125, 83, 56),
-    (174, 114, 75),
-    (233, 147, 91),
-    (245, 144, 176),
-    (114, 85, 22),
-    (84, 94, 86),
-    (215, 86, 122),
-    (95, 73, 55),
-    (145, 103, 74),
-    (66, 85, 123),
-    (156, 77, 97),
-    (251, 94, 155),
-    (105, 74, 55),
-    (164, 125, 104),
-    (134, 5, 26),
-    (204, 123, 76),
-    (134, 182, 196),
-    (135, 105, 95),
-    (94, 55, 44),
-    (125, 74, 45),
-    (234, 185, 32),
-    (245, 45, 126),
-    (104, 85, 103),
-    (43, 63, 114),
-    (123, 206, 13),
-    (133, 126, 124),
-    (152, 164, 105),
-    (187, 173, 73),
-    (95, 63, 36),
-    (75, 105, 43),
-    (134, 85, 55),
-    (216, 196, 135),
-    (155, 83, 46),
-    (154, 103, 65),
-    (235, 224, 184),
-    (144, 124, 114),
-    (91, 116, 15),
-    (186, 7, 81),
-    (214, 195, 176),
-    (195, 183, 175),
-    (173, 197, 65),
-    (115, 66, 44),
-    (145, 105, 84),
-    (175, 144, 115),
-    (85, 155, 155),
-    (125, 94, 74),
-    (75, 104, 126),
-    (174, 94, 76),
-    (95, 75, 65),
-    (195, 215, 225),
-    (84, 94, 144),
-    (95, 54, 85),
-    (251, 113, 166),
-    (198, 164, 184),
-    (173, 154, 135),
-    (135, 114, 95),
-    (252, 205, 224),
-    (154, 105, 75),
-    (105, 84, 65),
-    (65, 106, 104),
-    (144, 84, 45),
-    (104, 75, 64),
-    (204, 155, 105),
-    (135, 93, 65),
-    (242, 194, 135),
-    (175, 124, 85),
-    (155, 235, 214),
-    (244, 245, 154),
-    (192, 125, 26),
-    (75, 64, 75),
-    (183, 105, 64),
-    (143, 96, 74),
-    (57, 94, 123),
-    (104, 145, 165),
-    (116, 144, 133),
-    (42, 57, 104),
-    (85, 63, 46),
-    (222, 175, 125),
-    (105, 66, 54),
-    (196, 216, 203),
-    (113, 25, 65),
-    (114, 146, 176),
-    (226, 76, 134),
-    (165, 44, 93),
-    (245, 65, 136),
-    (204, 76, 114),
-    (244, 132, 167),
-    (153, 176, 194),
-    (164, 156, 163),
-    (135, 102, 26),
-    (251, 83, 148),
-    (163, 237, 6),
-    (203, 163, 37),
-    (75, 84, 135),
-    (54, 94, 73),
-    (133, 14, 65),
-    (134, 83, 46),
-    (145, 93, 55),
-    (194, 164, 136),
-    (133, 86, 64),
-    (105, 54, 35),
-    (194, 126, 84),
-    (184, 164, 145),
-    (63, 104, 67),
-    (156, 113, 84),
-    (165, 93, 55),
-    (74, 115, 144),
-    (174, 163, 155),
-    (67, 56, 94),
-    (93, 184, 175),
-    (103, 76, 17),
-    (95, 94, 93),
-    (125, 66, 53),
-    (144, 86, 54),
-    (104, 44, 35),
-    (225, 137, 83),
-    (105, 74, 46),
-    (254, 145, 194),
-    (35, 84, 93),
-    (145, 1, 25),
-    (123, 54, 44),
-    (194, 244, 84),
-    (223, 34, 107),
-    (135, 104, 84),
-    (144, 75, 54),
-    (54, 66, 63),
-    (55, 86, 114),
-    (184, 55, 104),
-    (1, 164, 215),
-    (165, 86, 53),
-    (134, 76, 54),
-    (125, 63, 37),
-    (34, 134, 53),
-    (165, 113, 75),
-    (214, 154, 27),
-    (252, 155, 195),
-    (173, 136, 115),
-    (164, 105, 65),
-    (94, 156, 123),
-    (94, 174, 205),
-    (116, 132, 85),
-    (125, 5, 26),
-    (44, 75, 62),
-    (205, 184, 165),
-    (44, 67, 123),
-    (144, 182, 44),
-    (225, 55, 125),
-    (251, 125, 173),
-], dtype=np.uint8)
+GAME_PALETTES: dict[str, np.ndarray] = {
+    "256": np.array([
+        (13, 26, 53),
+        (14, 85, 43),
+        (25, 15, 15),
+        (34, 65, 94),
+        (35, 52, 95),
+        (37, 82, 116),
+        (43, 15, 16),
+        (44, 25, 35),
+        (44, 61, 106),
+        (44, 135, 35),
+        (45, 65, 44),
+        (46, 43, 64),
+        (46, 154, 34),
+        (54, 65, 72),
+        (54, 94, 74),
+        (55, 36, 34),
+        (55, 63, 55),
+        (57, 83, 53),
+        (63, 95, 95),
+        (64, 135, 134),
+        (65, 13, 54),
+        (65, 24, 25),
+        (65, 54, 54),
+        (65, 115, 144),
+        (73, 55, 86),
+        (74, 73, 65),
+        (74, 105, 64),
+        (75, 54, 65),
+        (75, 84, 64),
+        (76, 85, 104),
+        (76, 184, 65),
+        (83, 37, 25),
+        (83, 66, 103),
+        (83, 146, 7),
+        (84, 53, 37),
+        (84, 56, 54),
+        (84, 72, 106),
+        (84, 74, 74),
+        (85, 2, 3),
+        (85, 55, 44),
+        (85, 63, 55),
+        (85, 86, 93),
+        (86, 62, 46),
+        (93, 25, 66),
+        (93, 45, 82),
+        (93, 46, 44),
+        (93, 46, 56),
+        (94, 53, 36),
+        (94, 55, 44),
+        (94, 65, 54),
+        (94, 65, 63),
+        (94, 75, 113),
+        (95, 63, 46),
+        (95, 74, 65),
+        (96, 72, 55),
+        (96, 83, 115),
+        (102, 76, 25),
+        (103, 56, 45),
+        (103, 65, 46),
+        (103, 155, 116),
+        (104, 65, 54),
+        (104, 75, 64),
+        (104, 136, 154),
+        (104, 163, 13),
+        (105, 53, 36),
+        (105, 64, 64),
+        (105, 73, 55),
+        (105, 84, 74),
+        (105, 85, 122),
+        (105, 95, 93),
+        (105, 115, 84),
+        (105, 123, 135),
+        (105, 175, 163),
+        (106, 33, 74),
+        (106, 114, 153),
+        (113, 65, 66),
+        (113, 66, 54),
+        (113, 206, 204),
+        (114, 27, 56),
+        (114, 46, 77),
+        (114, 55, 35),
+        (114, 65, 44),
+        (114, 75, 55),
+        (114, 76, 63),
+        (114, 86, 74),
+        (115, 45, 54),
+        (115, 54, 53),
+        (115, 56, 43),
+        (115, 83, 65),
+        (115, 93, 76),
+        (115, 154, 175),
+        (116, 1, 1),
+        (116, 75, 93),
+        (116, 82, 57),
+        (123, 74, 75),
+        (123, 76, 56),
+        (124, 15, 35),
+        (124, 64, 46),
+        (124, 76, 63),
+        (124, 82, 56),
+        (124, 95, 34),
+        (124, 96, 84),
+        (124, 104, 95),
+        (125, 6, 24),
+        (125, 85, 64),
+        (125, 93, 75),
+        (125, 174, 13),
+        (126, 103, 85),
+        (134, 6, 27),
+        (134, 85, 55),
+        (134, 87, 65),
+        (134, 96, 74),
+        (134, 104, 85),
+        (134, 106, 94),
+        (134, 123, 116),
+        (134, 145, 154),
+        (135, 93, 66),
+        (135, 114, 95),
+        (135, 133, 134),
+        (135, 164, 175),
+        (136, 36, 114),
+        (136, 65, 104),
+        (136, 74, 95),
+        (136, 102, 75),
+        (136, 174, 193),
+        (136, 182, 14),
+        (143, 95, 66),
+        (143, 116, 104),
+        (144, 14, 36),
+        (144, 85, 54),
+        (144, 94, 96),
+        (144, 95, 73),
+        (144, 105, 84),
+        (144, 114, 95),
+        (145, 35, 45),
+        (145, 36, 72),
+        (145, 103, 75),
+        (145, 124, 105),
+        (146, 112, 86),
+        (146, 113, 44),
+        (147, 191, 7),
+        (148, 231, 247),
+        (153, 105, 75),
+        (153, 116, 94),
+        (153, 127, 114),
+        (154, 103, 65),
+        (154, 106, 83),
+        (154, 183, 194),
+        (155, 105, 146),
+        (155, 113, 84),
+        (155, 125, 104),
+        (155, 134, 115),
+        (155, 146, 144),
+        (156, 73, 43),
+        (156, 122, 95),
+        (163, 126, 104),
+        (164, 35, 75),
+        (164, 114, 75),
+        (164, 116, 84),
+        (164, 125, 95),
+        (164, 135, 114),
+        (164, 194, 25),
+        (165, 94, 55),
+        (165, 144, 124),
+        (165, 163, 165),
+        (166, 33, 63),
+        (166, 94, 96),
+        (166, 133, 106),
+        (166, 155, 174),
+        (173, 135, 106),
+        (173, 137, 114),
+        (174, 114, 75),
+        (174, 136, 53),
+        (174, 146, 124),
+        (174, 186, 194),
+        (175, 99, 128),
+        (175, 104, 65),
+        (175, 104, 125),
+        (175, 114, 105),
+        (175, 124, 85),
+        (175, 143, 116),
+        (175, 152, 126),
+        (175, 155, 134),
+        (176, 104, 35),
+        (183, 55, 87),
+        (183, 206, 75),
+        (184, 145, 56),
+        (184, 156, 134),
+        (184, 162, 137),
+        (184, 173, 166),
+        (185, 115, 134),
+        (185, 124, 133),
+        (185, 124, 144),
+        (185, 125, 105),
+        (185, 135, 94),
+        (185, 153, 125),
+        (185, 165, 144),
+        (186, 116, 75),
+        (186, 215, 222),
+        (189, 116, 143),
+        (194, 37, 84),
+        (194, 65, 95),
+        (194, 124, 85),
+        (194, 125, 145),
+        (194, 166, 143),
+        (194, 174, 154),
+        (195, 135, 75),
+        (195, 135, 154),
+        (195, 155, 114),
+        (195, 156, 63),
+        (195, 164, 135),
+        (196, 215, 115),
+        (202, 133, 161),
+        (203, 134, 43),
+        (204, 104, 157),
+        (204, 134, 94),
+        (204, 134, 147),
+        (204, 134, 154),
+        (204, 144, 115),
+        (204, 144, 164),
+        (204, 174, 145),
+        (204, 185, 165),
+        (204, 196, 194),
+        (204, 244, 234),
+        (205, 74, 103),
+        (205, 103, 64),
+        (205, 163, 64),
+        (205, 182, 155),
+        (206, 144, 156),
+        (213, 195, 175),
+        (214, 144, 156),
+        (215, 144, 164),
+        (215, 174, 84),
+        (216, 155, 113),
+        (223, 232, 176),
+        (224, 75, 114),
+        (224, 164, 85),
+        (225, 164, 176),
+        (225, 174, 125),
+        (227, 93, 116),
+        (227, 183, 133),
+        (228, 228, 228),
+        (233, 97, 122),
+        (233, 222, 205),
+        (236, 53, 94),
+        (236, 104, 125),
+        (236, 114, 133),
+        (244, 124, 145),
+        (244, 194, 204),
+        (246, 105, 135),
+        (246, 153, 165),
+        (247, 115, 142),
+        (248, 252, 253),
+        (250, 248, 253),
+        (254, 144, 165),
+        (254, 255, 255),
+    ], dtype=np.uint8),
+    "128": np.array([
+        (13, 26, 53),
+        (25, 15, 15),
+        (35, 52, 95),
+        (37, 82, 116),
+        (43, 15, 16),
+        (44, 25, 35),
+        (44, 135, 35),
+        (45, 65, 44),
+        (46, 43, 64),
+        (54, 65, 72),
+        (55, 36, 34),
+        (63, 95, 95),
+        (65, 13, 54),
+        (65, 24, 25),
+        (65, 54, 54),
+        (74, 105, 64),
+        (75, 54, 65),
+        (76, 184, 65),
+        (83, 37, 25),
+        (83, 66, 103),
+        (84, 56, 54),
+        (84, 72, 106),
+        (84, 74, 74),
+        (85, 2, 3),
+        (85, 55, 44),
+        (85, 63, 55),
+        (93, 25, 66),
+        (93, 46, 56),
+        (94, 55, 44),
+        (94, 65, 54),
+        (94, 75, 113),
+        (95, 63, 46),
+        (95, 74, 65),
+        (103, 65, 46),
+        (104, 65, 54),
+        (104, 75, 64),
+        (104, 163, 13),
+        (105, 73, 55),
+        (105, 84, 74),
+        (105, 95, 93),
+        (113, 206, 204),
+        (114, 27, 56),
+        (114, 65, 44),
+        (114, 75, 55),
+        (114, 86, 74),
+        (115, 45, 54),
+        (115, 56, 43),
+        (115, 83, 65),
+        (115, 154, 175),
+        (116, 1, 1),
+        (123, 74, 75),
+        (124, 76, 63),
+        (124, 82, 56),
+        (124, 95, 34),
+        (124, 104, 95),
+        (125, 6, 24),
+        (125, 85, 64),
+        (125, 93, 75),
+        (134, 87, 65),
+        (134, 96, 74),
+        (134, 104, 85),
+        (134, 123, 116),
+        (135, 93, 66),
+        (135, 114, 95),
+        (143, 95, 66),
+        (144, 14, 36),
+        (144, 105, 84),
+        (144, 114, 95),
+        (145, 103, 75),
+        (145, 124, 105),
+        (146, 113, 44),
+        (148, 231, 247),
+        (153, 116, 94),
+        (154, 103, 65),
+        (154, 183, 194),
+        (155, 113, 84),
+        (155, 125, 104),
+        (155, 134, 115),
+        (155, 146, 144),
+        (156, 73, 43),
+        (164, 125, 95),
+        (164, 135, 114),
+        (164, 194, 25),
+        (165, 144, 124),
+        (174, 136, 53),
+        (175, 99, 128),
+        (175, 143, 116),
+        (175, 155, 134),
+        (183, 55, 87),
+        (184, 145, 56),
+        (184, 173, 166),
+        (185, 125, 105),
+        (185, 135, 94),
+        (185, 153, 125),
+        (185, 165, 144),
+        (186, 116, 75),
+        (186, 215, 222),
+        (189, 116, 143),
+        (194, 65, 95),
+        (194, 124, 85),
+        (194, 125, 145),
+        (194, 174, 154),
+        (195, 135, 154),
+        (195, 156, 63),
+        (195, 164, 135),
+        (202, 133, 161),
+        (203, 134, 43),
+        (204, 134, 154),
+        (204, 174, 145),
+        (204, 196, 194),
+        (204, 244, 234),
+        (205, 74, 103),
+        (205, 163, 64),
+        (206, 144, 156),
+        (213, 195, 175),
+        (215, 144, 164),
+        (216, 155, 113),
+        (224, 164, 85),
+        (225, 174, 125),
+        (227, 93, 116),
+        (228, 228, 228),
+        (233, 97, 122),
+        (236, 53, 94),
+        (236, 104, 125),
+        (244, 124, 145),
+        (246, 105, 135),
+        (254, 144, 165),
+        (254, 255, 255),
+    ], dtype=np.uint8),
+    "64": np.array([
+        (13, 26, 53),
+        (25, 15, 15),
+        (35, 52, 95),
+        (37, 82, 116),
+        (44, 25, 35),
+        (54, 65, 72),
+        (55, 36, 34),
+        (65, 13, 54),
+        (65, 24, 25),
+        (65, 54, 54),
+        (74, 105, 64),
+        (75, 54, 65),
+        (83, 66, 103),
+        (85, 2, 3),
+        (85, 55, 44),
+        (85, 63, 55),
+        (93, 25, 66),
+        (94, 55, 44),
+        (94, 65, 54),
+        (104, 75, 64),
+        (104, 163, 13),
+        (105, 73, 55),
+        (105, 95, 93),
+        (113, 206, 204),
+        (114, 75, 55),
+        (115, 56, 43),
+        (115, 83, 65),
+        (115, 154, 175),
+        (116, 1, 1),
+        (123, 74, 75),
+        (124, 95, 34),
+        (125, 85, 64),
+        (134, 96, 74),
+        (134, 104, 85),
+        (135, 93, 66),
+        (144, 14, 36),
+        (155, 113, 84),
+        (155, 134, 115),
+        (155, 146, 144),
+        (156, 73, 43),
+        (164, 194, 25),
+        (174, 136, 53),
+        (175, 99, 128),
+        (175, 143, 116),
+        (175, 155, 134),
+        (183, 55, 87),
+        (184, 173, 166),
+        (185, 135, 94),
+        (186, 116, 75),
+        (186, 215, 222),
+        (189, 116, 143),
+        (194, 125, 145),
+        (202, 133, 161),
+        (204, 174, 145),
+        (204, 244, 234),
+        (205, 163, 64),
+        (206, 144, 156),
+        (225, 174, 125),
+        (227, 93, 116),
+        (228, 228, 228),
+        (236, 53, 94),
+        (236, 104, 125),
+        (246, 105, 135),
+        (254, 255, 255),
+    ], dtype=np.uint8),
+    "48": np.array([
+        (25, 15, 15),
+        (35, 52, 95),
+        (54, 65, 72),
+        (55, 36, 34),
+        (65, 13, 54),
+        (65, 24, 25),
+        (74, 105, 64),
+        (75, 54, 65),
+        (83, 66, 103),
+        (85, 2, 3),
+        (85, 55, 44),
+        (93, 25, 66),
+        (94, 55, 44),
+        (94, 65, 54),
+        (104, 75, 64),
+        (104, 163, 13),
+        (105, 95, 93),
+        (113, 206, 204),
+        (114, 75, 55),
+        (115, 56, 43),
+        (115, 83, 65),
+        (115, 154, 175),
+        (116, 1, 1),
+        (124, 95, 34),
+        (125, 85, 64),
+        (134, 104, 85),
+        (144, 14, 36),
+        (155, 113, 84),
+        (155, 134, 115),
+        (155, 146, 144),
+        (156, 73, 43),
+        (164, 194, 25),
+        (174, 136, 53),
+        (175, 99, 128),
+        (175, 155, 134),
+        (183, 55, 87),
+        (184, 173, 166),
+        (186, 116, 75),
+        (189, 116, 143),
+        (202, 133, 161),
+        (204, 174, 145),
+        (205, 163, 64),
+        (225, 174, 125),
+        (228, 228, 228),
+        (236, 53, 94),
+        (236, 104, 125),
+        (246, 105, 135),
+        (254, 255, 255),
+    ], dtype=np.uint8),
+}
 
 
 def _srgb_u8_to_linear(rgb_u8: np.ndarray) -> np.ndarray:
@@ -305,7 +556,88 @@ def _srgb_u8_to_lab(rgb_u8: np.ndarray) -> np.ndarray:
     return np.stack([lightness, a, b], axis=-1)
 
 
-NUM_COLORS_OPTIONS = ("256",)
+_NEAR_EXACT_LAB_THRESHOLD = 4.0
+
+
+@njit(cache=True)
+def _dither_lab_chunk(
+    lab: np.ndarray,
+    clean_lab: np.ndarray,
+    palette_lab: np.ndarray,
+    palette_u8: np.ndarray,
+    near_exact_threshold: float,
+    y_start: int,
+    y_end: int,
+    output: np.ndarray,
+) -> None:
+    height, width, _ = lab.shape
+    num_colors = palette_lab.shape[0]
+
+    for y in range(y_start, y_end):
+        for x in range(width):
+            cl0 = clean_lab[y, x, 0]
+            cl1 = clean_lab[y, x, 1]
+            cl2 = clean_lab[y, x, 2]
+
+            source_best = 0
+            source_best_dist = 1e18
+            for c in range(num_colors):
+                d0 = palette_lab[c, 0] - cl0
+                d1 = palette_lab[c, 1] - cl1
+                d2 = palette_lab[c, 2] - cl2
+                dist = d0 * d0 + d1 * d1 + d2 * d2
+                if dist < source_best_dist:
+                    source_best_dist = dist
+                    source_best = c
+
+            if source_best_dist < near_exact_threshold:
+                output[y, x, 0] = palette_u8[source_best, 0]
+                output[y, x, 1] = palette_u8[source_best, 1]
+                output[y, x, 2] = palette_u8[source_best, 2]
+                continue
+
+            w0 = lab[y, x, 0]
+            w1 = lab[y, x, 1]
+            w2 = lab[y, x, 2]
+
+            best = 0
+            best_dist = 1e18
+            for c in range(num_colors):
+                d0 = palette_lab[c, 0] - w0
+                d1 = palette_lab[c, 1] - w1
+                d2 = palette_lab[c, 2] - w2
+                dist = d0 * d0 + d1 * d1 + d2 * d2
+                if dist < best_dist:
+                    best_dist = dist
+                    best = c
+
+            output[y, x, 0] = palette_u8[best, 0]
+            output[y, x, 1] = palette_u8[best, 1]
+            output[y, x, 2] = palette_u8[best, 2]
+
+            e0 = w0 - palette_lab[best, 0]
+            e1 = w1 - palette_lab[best, 1]
+            e2 = w2 - palette_lab[best, 2]
+
+            if x + 1 < width:
+                lab[y, x + 1, 0] += e0 * (7 / 16)
+                lab[y, x + 1, 1] += e1 * (7 / 16)
+                lab[y, x + 1, 2] += e2 * (7 / 16)
+            if y + 1 < height:
+                if x - 1 >= 0:
+                    lab[y + 1, x - 1, 0] += e0 * (3 / 16)
+                    lab[y + 1, x - 1, 1] += e1 * (3 / 16)
+                    lab[y + 1, x - 1, 2] += e2 * (3 / 16)
+                lab[y + 1, x, 0] += e0 * (5 / 16)
+                lab[y + 1, x, 1] += e1 * (5 / 16)
+                lab[y + 1, x, 2] += e2 * (5 / 16)
+                if x + 1 < width:
+                    lab[y + 1, x + 1, 0] += e0 * (1 / 16)
+                    lab[y + 1, x + 1, 1] += e1 * (1 / 16)
+                    lab[y + 1, x + 1, 2] += e2 * (1 / 16)
+
+
+NUM_COLORS_OPTIONS = ("256", "128", "64", "48")
 
 SWATCH_SOURCE_GAME_DEFAULT = "Game Default"
 SWATCH_SOURCE_EXTERNAL = "External Swatch"
@@ -321,6 +653,7 @@ class ApplyPaletteNode:
 
     _KMEANS_MAX_ITERATIONS = 100
     _OPAQUE_ALPHA_THRESHOLD = 127
+    _PROGRESS_CHUNK_ROWS = 16
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -355,16 +688,38 @@ class ApplyPaletteNode:
         # redoing the work (or a disk read) per frame.
         fixed_palette = None
         if swatch == SWATCH_SOURCE_GAME_DEFAULT:
-            fixed_palette = self._reduce_palette(DEFAULT_GAME_PALETTE, num_colors_int)
+            fixed_palette = GAME_PALETTES[num_colors]
         elif swatch == SWATCH_SOURCE_EXTERNAL:
             fixed_palette = self._load_external_palette(swatch_path)
 
+        total_frames = frames_np.shape[0]
+        chunk_rows = self._PROGRESS_CHUNK_ROWS
+        chunks_per_frame = max(1, (frames_np.shape[1] + chunk_rows - 1) // chunk_rows)
+        total_progress_steps = total_frames * (chunks_per_frame + 1)
+        pbar = ProgressBar(total_progress_steps)
+        progress_value = 0
+
+        def check_interrupted() -> None:
+            comfy.model_management.throw_exception_if_processing_interrupted()
+
+        def advance_progress(steps: int = 1) -> None:
+            nonlocal progress_value
+            progress_value = min(progress_value + steps, total_progress_steps)
+            pbar.update_absolute(progress_value, total_progress_steps)
+
         palettized = []
-        for idx in range(frames_np.shape[0]):
+        for idx in range(total_frames):
+            check_interrupted()
             frame_alpha = None if alpha_tensor is None else alpha_tensor[idx].detach().cpu().numpy()
             palettized.append(
                 self._apply_palette_to_frame(
-                    frames_np[idx], frame_alpha, swatch, fixed_palette, num_colors_int
+                    frames_np[idx],
+                    frame_alpha,
+                    swatch,
+                    fixed_palette,
+                    num_colors_int,
+                    progress_callback=advance_progress,
+                    interrupt_callback=check_interrupted,
                 )
             )
 
@@ -407,6 +762,8 @@ class ApplyPaletteNode:
         swatch: str,
         fixed_palette: np.ndarray | None,
         num_colors: int,
+        progress_callback,
+        interrupt_callback,
     ) -> np.ndarray:
         rgba = self._to_rgba(image)
         embedded_alpha = rgba[:, :, 3]
@@ -418,7 +775,14 @@ class ApplyPaletteNode:
         else:
             palette = fixed_palette
 
-        mapped = self._map_colors_dithered(flattened, palette)
+        progress_callback()
+        mapped = self._map_colors_dithered(
+            flattened,
+            palette,
+            chunk_rows=self._PROGRESS_CHUNK_ROWS,
+            progress_callback=progress_callback,
+            interrupt_callback=interrupt_callback,
+        )
         return np.dstack((mapped, output_alpha))
 
     @classmethod
@@ -429,12 +793,6 @@ class ApplyPaletteNode:
         opaque = alpha.reshape(-1) > cls._OPAQUE_ALPHA_THRESHOLD
         fit_pixels = pixels[opaque] if np.any(opaque) else pixels
         return cls._kmeans_colors(fit_pixels, num_colors)
-
-    @classmethod
-    def _reduce_palette(cls, palette: np.ndarray, num_colors: int) -> np.ndarray:
-        if num_colors >= len(palette):
-            return palette
-        return cls._kmeans_colors(palette, num_colors)
 
     @classmethod
     def _kmeans_colors(cls, colors: np.ndarray, num_colors: int) -> np.ndarray:
@@ -450,7 +808,13 @@ class ApplyPaletteNode:
         return np.clip(np.round(kmeans.cluster_centers_), 0, 255).astype(np.uint8)
 
     @staticmethod
-    def _map_colors_dithered(image: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    def _map_colors_dithered(
+        image: np.ndarray,
+        palette: np.ndarray,
+        chunk_rows: int,
+        progress_callback,
+        interrupt_callback,
+    ) -> np.ndarray:
         # Hard nearest-neighbor matching has no way to represent a source
         # shade that falls between two palette entries: a broad band of
         # similar midtones (e.g. a skin-shadow gradient) all snap to
@@ -459,29 +823,39 @@ class ApplyPaletteNode:
         # Lab space breaks that up by carrying each pixel's quantization
         # error into its neighbors, so the region dithers between two close
         # chips instead of hard-cutting to one.
-        palette_lab = _srgb_u8_to_lab(palette)
+        #
+        # Error diffusion has no natural stopping point: in a perfectly flat
+        # region (e.g. a solid white background) the same tiny residual
+        # keeps accumulating pixel after pixel until it finally crosses into
+        # a completely different, unrelated palette chip (white -> pink),
+        # which reads as random colored speckling in what should be a flat
+        # fill. A source pixel that already lands within an imperceptible
+        # distance of a palette entry is quantized hard against its own
+        # (pre-diffusion) value and neither consumes incoming error nor
+        # emits new error, which firewalls flat regions from ever
+        # accumulating drift while leaving genuine gradients (which sit
+        # meaningfully far from any single chip) dithered.
+        #
+        # The per-pixel loop is JIT-compiled (numba): each pixel depends on
+        # the diffused error from its left/top neighbors, so it can't be
+        # vectorized, but compiling it to native code avoids the per-pixel
+        # numpy call overhead that dominates a plain Python loop -- roughly
+        # 25x faster, which matters here since this runs per frame.
+        palette_lab = _srgb_u8_to_lab(palette).astype(np.float64)
+        palette_u8 = palette.astype(np.uint8)
         height, width, _ = image.shape
-        lab = _srgb_u8_to_lab(image.reshape(-1, 3)).reshape(height, width, 3).astype(np.float64)
+        clean_lab = _srgb_u8_to_lab(image.reshape(-1, 3)).reshape(height, width, 3).astype(np.float64)
+        lab = clean_lab.copy()
 
         output = np.empty((height, width, 3), dtype=np.uint8)
-        for y in range(height):
-            row = lab[y]
-            next_row = lab[y + 1] if y + 1 < height else None
-            for x in range(width):
-                working = row[x]
-                distances = np.sum((palette_lab - working) ** 2, axis=-1)
-                best = int(np.argmin(distances))
-                output[y, x] = palette[best]
-                error = working - palette_lab[best]
-
-                if x + 1 < width:
-                    row[x + 1] += error * (7 / 16)
-                if next_row is not None:
-                    if x - 1 >= 0:
-                        next_row[x - 1] += error * (3 / 16)
-                    next_row[x] += error * (5 / 16)
-                    if x + 1 < width:
-                        next_row[x + 1] += error * (1 / 16)
+        for y_start in range(0, height, chunk_rows):
+            interrupt_callback()
+            y_end = min(y_start + chunk_rows, height)
+            _dither_lab_chunk(
+                lab, clean_lab, palette_lab, palette_u8,
+                _NEAR_EXACT_LAB_THRESHOLD, y_start, y_end, output,
+            )
+            progress_callback()
 
         return output
 
