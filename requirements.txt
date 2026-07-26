@@ -10,3 +10,10 @@ pytorch_lightning
 requests
 curl_cffi
 numba
+clip @ git+https://github.com/openai/CLIP.git
+einops
+ftfy
+mambapy
+matplotlib
+regex
+scipy

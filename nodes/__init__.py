@@ -1,6 +1,12 @@
 """Node implementations grouped by domain."""
 
-from .color import ApplyPaletteNode, ColorParserNode, FarthestColorNode, MatchColorPaletteNode
+from .color import (
+    ApplyPaletteNode,
+    ColorParserNode,
+    FarthestColorNode,
+    MatchColorPaletteNode,
+    MatchColorsToReferenceNode,
+)
 from .image import (
     AddImageToBatchNode,
     AutoCropperNode,
@@ -14,7 +20,14 @@ from .image import (
     SpritesheetBuilderNode,
 )
 from .latent import ChangeLatentDimensions, SnapToDivisible
+from .motion import (
+    HybridMaMoMaskExportFBX,
+    HybridMaMoMaskGenerate,
+    HybridMaMoMaskLoader,
+    HybridMaMoMaskPreviewAnimation,
+)
 from .pixel_art.node import ConvertToPixelArt
+from .pixel_art.studio import PixelArtStudioNode
 from .preview import (
     FastImagePreviewNode,
     ImageCompareNode,
@@ -48,6 +61,10 @@ __all__ = [
     "DropdownSelectNode",
     "ChangeLatentDimensions",
     "SnapToDivisible",
+    "HybridMaMoMaskLoader",
+    "HybridMaMoMaskGenerate",
+    "HybridMaMoMaskPreviewAnimation",
+    "HybridMaMoMaskExportFBX",
     "AutoCropperNode",
     "BatchImageSave",
     "ColorParserNode",
