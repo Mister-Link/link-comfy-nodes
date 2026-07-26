@@ -8,13 +8,13 @@ const SPIRE_REFERENCE = {
   heightInches: 62.5,
   pixelWidth: 55,
   pixelHeight: 125,
-  defaultTargetWidthInches: 28,
-  defaultTargetHeightInches: 63,
+  width: 35,
+  height: 79,
 };
 const PRESET_DIMENSIONS = {
   Spirie: {
-    widthInches: SPIRE_REFERENCE.defaultTargetWidthInches,
-    heightInches: SPIRE_REFERENCE.defaultTargetHeightInches,
+    width: SPIRE_REFERENCE.width,
+    height: SPIRE_REFERENCE.height,
   },
 };
 
@@ -90,10 +90,10 @@ const drawPreview = (node, ctx) => {
 
   const ref = SPIRE_REFERENCE;
   const targetWidthInches = Number(
-    getWidgetValue(node, "target_width_inches", ref.defaultTargetWidthInches),
+    getWidgetValue(node, "target_width_inches", ref.width),
   );
   const targetHeightInches = Number(
-    getWidgetValue(node, "target_height_inches", ref.defaultTargetHeightInches),
+    getWidgetValue(node, "target_height_inches", ref.height),
   );
   const widthKnown = targetWidthInches > 0;
   const heightKnown = targetHeightInches > 0;
@@ -286,10 +286,10 @@ app.registerExtension({
           if (presetValues) {
             this._spriteScaleState.applyingPreset = true;
             if (widthWidget) {
-              widthWidget.value = presetValues.widthInches;
+              widthWidget.value = presetValues.width;
             }
             if (heightWidget) {
-              heightWidget.value = presetValues.heightInches;
+              heightWidget.value = presetValues.height;
             }
             this._spriteScaleState.applyingPreset = false;
           }

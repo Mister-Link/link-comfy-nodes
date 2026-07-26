@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 
 class SpriteScaleCalculatorNode:
     RETURN_TYPES = ("INT", "INT")
@@ -17,11 +15,11 @@ class SpriteScaleCalculatorNode:
     _SPIRE_PIXEL_HEIGHT = 125
     _SPIRE_WIDTH_INCHES = _SPIRE_PIXEL_WIDTH / _SPIRE_PIXELS_PER_INCH
     _SPIRE_HEIGHT_INCHES = _SPIRE_PIXEL_HEIGHT / _SPIRE_PIXELS_PER_INCH
-    _SPIRE_TARGET_WIDTH_INCHES = math.floor(_SPIRE_WIDTH_INCHES + 0.5)
-    _SPIRE_TARGET_HEIGHT_INCHES = math.floor(_SPIRE_HEIGHT_INCHES + 0.5)
+    _SPIRE_PRESET_WIDTH = 35
+    _SPIRE_PRESET_HEIGHT = 79
 
     _PRESETS = {
-        "Spirie": (_SPIRE_TARGET_WIDTH_INCHES, _SPIRE_TARGET_HEIGHT_INCHES),
+        "Spirie": (_SPIRE_PRESET_WIDTH, _SPIRE_PRESET_HEIGHT),
         "Custom": None,
     }
 
@@ -32,11 +30,11 @@ class SpriteScaleCalculatorNode:
                 "preset": (list(cls._PRESETS.keys()), {"default": "Spirie"}),
                 "target_width_inches": (
                     "INT",
-                    {"default": cls._SPIRE_TARGET_WIDTH_INCHES, "min": 0, "max": 10000, "step": 1},
+                    {"default": cls._SPIRE_PRESET_WIDTH, "min": 0, "max": 10000, "step": 1},
                 ),
                 "target_height_inches": (
                     "INT",
-                    {"default": cls._SPIRE_TARGET_HEIGHT_INCHES, "min": 0, "max": 10000, "step": 1},
+                    {"default": cls._SPIRE_PRESET_HEIGHT, "min": 0, "max": 10000, "step": 1},
                 ),
             },
         }
