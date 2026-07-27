@@ -1,2 +1,1 @@
-from .change_latent_dimensions import ChangeLatentDimensions
 from .snap_to_divisible import SnapToDivisible
