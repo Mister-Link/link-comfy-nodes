@@ -34,7 +34,7 @@ class LoopSCAILPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Looping/inpainting only applies when this is greater than 1. For values above 1, it must be WAN-valid: 1+n*4 (1, 5, 9, 13, ...).",
+                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Looping/inpainting only applies when this is greater than 1. The node only enforces that the resulting total frame count is WAN-valid: 1+n*4 (1, 5, 9, 13, ...).",
                     },
                 ),
                 "frame_overlap": (
@@ -56,28 +56,14 @@ class LoopSCAILPoseFramesNode:
         def is_wan_valid(count: int) -> bool:
             return count >= 1 and (count - 1) % 4 == 0
 
-        def nearest_wan_values(count: int) -> tuple[int, int]:
-            nearest_low = 1 + ((max(1, count) - 1) // 4) * 4
-            nearest_high = nearest_low + 4
-            return nearest_low, nearest_high
-
         input_frame_count = int(frames.shape[0])
 
         if blank_frames <= 1:
             if not is_wan_valid(input_frame_count):
-                nearest_low, nearest_high = nearest_wan_values(input_frame_count)
                 raise ValueError(
-                    f"frames input has {input_frame_count} frames. With blank_frames <= 1, "
-                    f"the input must be WAN-valid (1+n*4). Use {nearest_low} or {nearest_high}."
+                    "Could not construct a WAN-valid output frame count from the provided inputs."
                 )
             return (frames, input_frame_count, 0, 0)
-
-        if not is_wan_valid(blank_frames):
-            nearest_low, nearest_high = nearest_wan_values(blank_frames)
-            raise ValueError(
-                f"blank_frames={blank_frames} is not a valid WAN frame count (must be 1+n*4 or 0). "
-                f"Use {nearest_low} or {nearest_high}."
-            )
 
         overlap_frames = 4 if frame_overlap else 0
 
@@ -85,27 +71,6 @@ class LoopSCAILPoseFramesNode:
         split = input_frame_count // 2
         end_portion = frames[split:]
         start_portion = frames[:split]
-
-        # Cut frames adjacent to the blank region (before, then after, then before again)
-        # until [end_portion] + [blank_frames] + [start_portion] is WAN-valid.
-        excess = input_frame_count % 4
-        cut_before = True
-        for _ in range(excess):
-            if cut_before:
-                if end_portion.shape[0] == 0:
-                    raise ValueError(
-                        "Could not construct a WAN-valid output frame count: ran out of frames "
-                        "before the blank region while trimming."
-                    )
-                end_portion = end_portion[:-1]
-            else:
-                if start_portion.shape[0] == 0:
-                    raise ValueError(
-                        "Could not construct a WAN-valid output frame count: ran out of frames "
-                        "after the blank region while trimming."
-                    )
-                start_portion = start_portion[1:]
-            cut_before = not cut_before
 
         end_num_frames = end_portion.shape[0]
         start_num_frames = start_portion.shape[0]
