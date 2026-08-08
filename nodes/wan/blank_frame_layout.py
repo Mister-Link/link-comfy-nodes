@@ -3,21 +3,25 @@ from __future__ import annotations
 import torch
 
 
-class LoopSCAILPoseFramesNode:
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT")
+def _is_wan_valid(count: int) -> bool:
+    return count >= 1 and (count - 1) % 4 == 0
+
+
+class ShiftPoseFramesNode:
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "BOOLEAN")
     RETURN_NAMES = (
         "frames",
         "total_frames",
-        "overlap_frames",
         "shift",
+        "blank_frames",
+        "is_loop",
     )
     OUTPUT_TOOLTIPS = (
-        "Looped frame sequence ready for WAN SCAIL: [end portion] + [blank frames] + [start portion], "
-        "with optional overlap frames prepended/appended. Feed this into SCAIL as the pose video.",
-        "Actual total frame count of frames after trimming the source frames to keep the output WAN-valid.",
-        "Number of overlap frames added (0 when frame_overlap is off, 4 when on).",
-        "Amount to rotate the (overlap-trimmed) sequence left by to put original frame 1 back at position 1: "
-        "end_portion length + blank_frames.",
+        "Frame sequence shifted so the original seam sits near the middle, with loop blanks and overlap added when blank_frames is greater than 0.",
+        "Actual total frame count of the shifted output sequence.",
+        "Amount to rotate the overlap-trimmed sequence left by to restore original frame order.",
+        "Number of blank frames inserted into the shifted loop. Feed this into Unshift Pose Frames.",
+        "Whether loop blanks and overlap were added. Feed this into Unshift Pose Frames.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -34,70 +38,124 @@ class LoopSCAILPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Number of black inpaint frames placed in the middle of the loop. Looping/inpainting only applies when this is greater than 1. The node only enforces that the resulting total frame count is WAN-valid: 1+n*4 (1, 5, 9, 13, ...).",
-                    },
-                ),
-                "frame_overlap": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": (
-                            "When enabled, prepends the 2 frames immediately before the split point and appends "
-                            "the 2 frames immediately after it. These overlap frames give WAN smooth temporal "
-                            "context at both seam edges, which can improve loop smoothness. "
-                            "The total output will be total_frames + 4 when enabled."
-                        ),
+                        "tooltip": "Number of black inpaint frames placed in the middle of the shifted loop. When this is greater than 0, the node also adds 2 overlap frames at each end and only validates the final total frame count.",
                     },
                 ),
             }
         }
 
-    def calculate(self, frames: torch.Tensor, blank_frames: int, frame_overlap: bool):
-        def is_wan_valid(count: int) -> bool:
-            return count >= 1 and (count - 1) % 4 == 0
-
+    def calculate(self, frames: torch.Tensor, blank_frames: int):
         input_frame_count = int(frames.shape[0])
-
-        if blank_frames <= 1:
-            if not is_wan_valid(input_frame_count):
-                raise ValueError(
-                    "Could not construct a WAN-valid output frame count from the provided inputs."
-                )
-            return (frames, input_frame_count, 0, 0)
-
-        overlap_frames = 4 if frame_overlap else 0
-
-        # Shift left 50%: rotate so the true end/begin seam sits near the middle.
         split = input_frame_count // 2
         end_portion = frames[split:]
         start_portion = frames[:split]
+        end_num_frames = int(end_portion.shape[0])
+        start_num_frames = int(start_portion.shape[0])
+        is_loop = blank_frames > 0
 
-        end_num_frames = end_portion.shape[0]
-        start_num_frames = start_portion.shape[0]
-
-        if frame_overlap and (end_num_frames < 2 or start_num_frames < 2):
+        if is_loop and (end_num_frames < 2 or start_num_frames < 2):
             raise ValueError(
-                "frame_overlap requires at least 2 retained frames on both sides of the blank region."
+                "Shift Pose Frames with blank_frames > 0 requires at least 2 frames on both sides of the split."
             )
 
-        _, H, W, C = frames.shape
-        black = torch.zeros(blank_frames, H, W, C, dtype=frames.dtype, device=frames.device)
-        seq = torch.cat([end_portion, black, start_portion], dim=0)
-
-        if frame_overlap:
-            # segment 1 = end_portion (before blanks), segment 2 = start_portion (after blanks).
+        if is_loop:
+            _, height, width, channels = frames.shape
+            black = torch.zeros(
+                blank_frames,
+                height,
+                width,
+                channels,
+                dtype=frames.dtype,
+                device=frames.device,
+            )
+            seq = torch.cat([end_portion, black, start_portion], dim=0)
             prefix = start_portion[-2:]
             suffix = end_portion[:2]
-            looped_frames = torch.cat([prefix, seq, suffix], dim=0)
+            shifted_frames = torch.cat([prefix, seq, suffix], dim=0)
+            shift = end_num_frames + blank_frames
         else:
-            looped_frames = seq
+            shifted_frames = torch.cat([end_portion, start_portion], dim=0)
+            shift = end_num_frames
 
-        out_total = looped_frames.shape[0]
-        shift = end_num_frames + blank_frames
-
-        if not is_wan_valid(out_total):
+        out_total = int(shifted_frames.shape[0])
+        if not _is_wan_valid(out_total):
             raise ValueError(
                 "Could not construct a WAN-valid output frame count from the provided inputs."
             )
 
-        return (looped_frames, out_total, overlap_frames, shift)
+        return (shifted_frames, out_total, shift, blank_frames, is_loop)
+
+
+class UnshiftPoseFramesNode:
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("frames", "total_frames")
+    OUTPUT_TOOLTIPS = (
+        "Original frame order restored from Shift Pose Frames output, with overlap removed when is_loop is true.",
+        "Actual total frame count after unshifting.",
+    )
+    FUNCTION = "calculate"
+    CATEGORY = "animation/utils"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "shift": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 9999,
+                        "step": 1,
+                        "tooltip": "Shift value emitted by Shift Pose Frames.",
+                    },
+                ),
+                "blank_frames": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 9999,
+                        "step": 1,
+                        "tooltip": "Blank frame count emitted by Shift Pose Frames.",
+                    },
+                ),
+                "is_loop": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Loop flag emitted by Shift Pose Frames.",
+                    },
+                ),
+            }
+        }
+
+    def calculate(
+        self,
+        frames: torch.Tensor,
+        shift: int,
+        blank_frames: int,
+        is_loop: bool,
+    ):
+        work = frames
+
+        if is_loop:
+            if int(work.shape[0]) < 4:
+                raise ValueError(
+                    "Looped Shift Pose Frames input must include the 4 overlap frames."
+                )
+            work = work[2:-2]
+
+        work_count = int(work.shape[0])
+        if work_count == 0:
+            raise ValueError("No frames remain after removing overlap frames.")
+
+        shift_mod = shift % work_count
+        if shift_mod:
+            work = torch.cat([work[shift_mod:], work[:shift_mod]], dim=0)
+
+        return (work, int(work.shape[0]))
+
+
+LoopSCAILPoseFramesNode = ShiftPoseFramesNode

@@ -37,8 +37,9 @@ from .nodes import (
     SpritesheetBuilderNode,
     SpriteScaleCalculatorNode,
     SpritesheetPreviewNode,
-    LoopSCAILPoseFramesNode,
+    ShiftPoseFramesNode,
     ShiftImageBatchNode,
+    UnshiftPoseFramesNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
@@ -56,7 +57,7 @@ NODE_CLASS_MAPPINGS = {
     "Hex or 24 Bit Color": ColorParserNode,
     "Farthest Color": FarthestColorNode,
     "Match Colors to Reference": MatchColorsToReferenceNode,
-    "SCAIL Pose Frames": LoopSCAILPoseFramesNode,
+    "Shift Pose Frames": ShiftPoseFramesNode,
     "WAN Frame Calculator": WANFrameCalculatorNode,
     "Native Wan Pose Strength": NativeWanPoseStrength,
     "Pixelate": ImagePixelateNode,
@@ -82,6 +83,7 @@ NODE_CLASS_MAPPINGS = {
     "Fast Image Preview": FastImagePreviewNode,
     "Image Compare": ImageCompareNode,
     "Shift Image Batch": ShiftImageBatchNode,
+    "Unshift Pose Frames": UnshiftPoseFramesNode,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
 }
 
@@ -98,7 +100,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Hex or 24 Bit Color": "Convert Color Format",
     "Farthest Color": "Find Furthest Color",
     "Match Colors to Reference": "Match Colors to Reference",
-    "SCAIL Pose Frames": "SCAIL Pose Frames",
+    "Shift Pose Frames": "Shift Pose Frames",
     "WAN Frame Calculator": "WAN Frame Calculator",
     "Native Wan Pose Strength": "Native Wan Pose Strength",
     "Pixelate": "Pixelate",
@@ -124,6 +126,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Fast Image Preview": "Fast Image Preview",
     "Image Compare": "Image Compare",
     "Shift Image Batch": "Shift Image Batch",
+    "Unshift Pose Frames": "Unshift Pose Frames",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
 }
 

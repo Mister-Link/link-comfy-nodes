@@ -41,8 +41,9 @@ from .video import (
 )
 from .wan import (
     NativeWanPoseStrength,
-    LoopSCAILPoseFramesNode,
+    ShiftPoseFramesNode,
     ShiftImageBatchNode,
+    UnshiftPoseFramesNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
 )
@@ -50,7 +51,7 @@ from .wan import (
 __all__ = [
     "AddImageToBatchNode",
     "ApplyPaletteNode",
-    "LoopSCAILPoseFramesNode",
+    "ShiftPoseFramesNode",
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
     "DropdownSelectNode",
@@ -83,6 +84,7 @@ __all__ = [
     "SpritesheetBuilderNode",
     "SpritesheetPreviewNode",
     "ShiftImageBatchNode",
+    "UnshiftPoseFramesNode",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
 ]

@@ -1,4 +1,4 @@
-from .blank_frame_layout import LoopSCAILPoseFramesNode
+from .blank_frame_layout import ShiftPoseFramesNode, UnshiftPoseFramesNode
 from .frame_adjuster import WANFramesToAddAndCut
 from .frame_calculator import WANFrameCalculatorNode
 from .pose_strength import NativeWanPoseStrength
