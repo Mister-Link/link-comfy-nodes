@@ -36,6 +36,7 @@ class AutoCropperNode:
                         "non_black",
                         "anime",
                         "bg_sub",
+                        "shared_bg_sub",
                     ],
                     {"default": "bg_sub"},
                 ),
@@ -136,12 +137,14 @@ class AutoCropperNode:
         return mask
 
     def _detect_background_subtraction(self, frame_np, sensitivity):
-        h, w = frame_np.shape[:2]
         rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
 
-        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+        bg_color = self._estimate_corner_background(rgb)
 
-        # Sample background from corners (most reliable for uniform backgrounds)
+        return self._detect_background_from_color(rgb, bg_color, sensitivity)
+
+    def _estimate_corner_background(self, rgb):
+        h, w = rgb.shape[:2]
         corner_size = max(2, int(min(h, w) * 0.05))
         corners = [
             rgb[:corner_size, :corner_size],
@@ -150,19 +153,43 @@ class AutoCropperNode:
             rgb[-corner_size:, -corner_size:],
         ]
         corner_pixels = np.vstack([c.reshape(-1, 3) for c in corners])
-        bg_color = np.median(corner_pixels, axis=0)
+        return np.median(corner_pixels, axis=0)
 
-        # Simple threshold: pixels far enough from background are foreground
-        # sensitivity: 0.0 = very permissive (small threshold), 1.0 = very strict (large threshold)
+    def _estimate_batch_corner_background(self, frames_np):
+        rgb_frames = frames_np[..., :3] if frames_np.shape[-1] >= 3 else frames_np
+        if rgb_frames.ndim != 4:
+            raise ValueError(
+                f"Expected frames with shape (N, H, W, C), got {rgb_frames.shape}"
+            )
+
+        _, h, w, _ = rgb_frames.shape
+        corner_size = max(2, int(min(h, w) * 0.05))
+        corner_pixels = []
+        for frame in rgb_frames:
+            corner_pixels.extend(
+                [
+                    frame[:corner_size, :corner_size].reshape(-1, 3),
+                    frame[:corner_size, -corner_size:].reshape(-1, 3),
+                    frame[-corner_size:, :corner_size].reshape(-1, 3),
+                    frame[-corner_size:, -corner_size:].reshape(-1, 3),
+                ]
+            )
+        return np.median(np.vstack(corner_pixels), axis=0)
+
+    def _foreground_threshold(self, sensitivity, low, high):
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+        return low + (sensitivity * (high - low))
+
+    def _detect_background_from_color(self, rgb, bg_color, sensitivity):
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
         diff = np.linalg.norm(rgb - bg_color[None, None, :], axis=2)
 
-        # Map sensitivity to threshold range
-        # Low sensitivity: threshold ~0.02 (pick up any difference)
-        # High sensitivity: threshold ~0.25 (only major differences)
-        base_threshold = 0.02 + (sensitivity * 0.23)
+        base_threshold = self._foreground_threshold(sensitivity, 0.02, 0.25)
         fg_mask = (diff > base_threshold).astype(np.uint8) * 255
 
-        # Clean up: close small holes, erode to remove noise, dilate to restore size
+        return self._cleanup_foreground_mask(fg_mask)
+
+    def _cleanup_foreground_mask(self, fg_mask):
         close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_k)
 
@@ -176,12 +203,33 @@ class AutoCropperNode:
 
         return fg_mask
 
+    def _detect_shared_background_subtraction(
+        self, frame_np, shared_bg_color, sensitivity
+    ):
+        rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
+        diff = np.linalg.norm(rgb - shared_bg_color[None, None, :], axis=2)
+
+        base_threshold = self._foreground_threshold(
+            sensitivity, 40.0 / 255.0, 100.0 / 255.0
+        )
+        return (diff > base_threshold).astype(np.uint8) * 255
+
     def _mask_to_bbox(self, mask):
         coords = cv2.findNonZero(mask)
         if coords is None:
             return None
         x, y, w, h = cv2.boundingRect(coords)
         return x, y, x + w, y + h
+
+    def _mask_to_bbox_line_filtered(self, mask, min_line_pixels=4):
+        foreground = mask > 0
+        row_counts = foreground.sum(axis=1)
+        col_counts = foreground.sum(axis=0)
+        rows = np.flatnonzero(row_counts >= min_line_pixels)
+        cols = np.flatnonzero(col_counts >= min_line_pixels)
+        if rows.size == 0 or cols.size == 0:
+            return None
+        return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
 
     def _resize_with_padding(self, img, alpha, target_size):
         tw, th = target_size
@@ -236,6 +284,8 @@ class AutoCropperNode:
             method = "anime"
         elif method == "background_subtraction":
             method = "bg_sub"
+        elif method in ("sequence_bg_sub", "temporal_bg_sub", "shared_background"):
+            method = "shared_bg_sub"
         elif method in ("bbox_detection", "alpha_channel", "contour_detection"):
             method = "bbox"
         elif method in ("pose", "openpose", "nonblack"):
@@ -254,6 +304,9 @@ class AutoCropperNode:
             )
 
         num_frames, H, W, C = frames_np.shape
+        shared_bg_color = None
+        if method == "shared_bg_sub":
+            shared_bg_color = self._estimate_batch_corner_background(frames_np)
 
         if alpha is not None:
             alpha_np = alpha.cpu().numpy()
@@ -293,6 +346,10 @@ class AutoCropperNode:
                 mask = self._segment_frame_anime(frame, model, device, sensitivity)
             elif method == "bg_sub":
                 mask = self._detect_background_subtraction(frame, sensitivity)
+            elif method == "shared_bg_sub":
+                mask = self._detect_shared_background_subtraction(
+                    frame, shared_bg_color, sensitivity
+                )
             elif method == "bbox":
                 mask = self._detect_bbox(frame, sensitivity)
             elif method == "non_black":
@@ -300,7 +357,10 @@ class AutoCropperNode:
             else:
                 raise ValueError(f"Unknown method: {method}")
 
-            bbox = self._mask_to_bbox(mask)
+            if method == "shared_bg_sub":
+                bbox = self._mask_to_bbox_line_filtered(mask)
+            else:
+                bbox = self._mask_to_bbox(mask)
 
             if bbox is None:
                 continue
