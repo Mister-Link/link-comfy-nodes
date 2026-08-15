@@ -101,7 +101,11 @@ def _load_image(file_path: str):
     i = Image.open(file_path)
     # exif_transpose can only ever rotate, but rotating can swap width/height
     i = ImageOps.exif_transpose(i)
-    has_alpha = 'A' in i.getbands()
+    # Palette-mode ('P') PNGs -- the common export format for pixel art / sprite
+    # sheets -- carry transparency via a tRNS table that doesn't show up in
+    # getbands() until after converting to RGBA, so checking bands alone
+    # silently drops real per-pixel transparency on indexed images.
+    has_alpha = 'A' in i.getbands() or 'transparency' in i.info
     i = i.convert("RGBA" if has_alpha else "RGB")
     arr = np.array(i, dtype=np.float32) / 255.0
     if has_alpha:
