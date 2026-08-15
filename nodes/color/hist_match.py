@@ -86,14 +86,29 @@ class MatchColorsToReferenceNode:
                         )
                     },
                 ),
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": (
+                            "Optional per-pixel weighting for image_target's color "
+                            "statistics (e.g. a keyer's mask, so a still-present "
+                            "chroma background doesn't skew the mapping). Unconnected "
+                            "falls back to image_target's own embedded alpha channel "
+                            "if present, otherwise full weight everywhere (as if the "
+                            "mask were all white)."
+                        )
+                    },
+                ),
             },
         }
 
     # ------------------------------------------------------------------ util
 
     @staticmethod
-    def _resolve_weights(frames_u8: np.ndarray) -> np.ndarray:
-        """Per-frame opacity weights (N, H, W): embedded alpha or ones."""
+    def _resolve_weights(frames_u8: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
+        """Per-frame opacity weights (N, H, W): explicit mask, embedded alpha, or ones."""
+        if mask is not None:
+            return mask
         if frames_u8.shape[-1] == 4:
             return frames_u8[..., 3].astype(np.float32) / 255.0
         return np.ones(frames_u8.shape[:3], dtype=np.float32)
@@ -130,6 +145,7 @@ class MatchColorsToReferenceNode:
         strength: float = 1.0,
         frame_window: int = 9,
         image_ref: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
     ):
         if strength <= 0.0:
             return (image_target,)
@@ -137,8 +153,21 @@ class MatchColorsToReferenceNode:
         tgt_np = (
             (image_target.detach().cpu().numpy() * 255.0).round().clip(0, 255).astype(np.uint8)
         )
-        tgt_w = self._resolve_weights(tgt_np)
         n = tgt_np.shape[0]
+
+        tgt_mask_np = None
+        if mask is not None:
+            tgt_mask_np = mask.detach().cpu().numpy().astype(np.float32)
+            if tgt_mask_np.ndim == 4 and tgt_mask_np.shape[-1] == 1:
+                tgt_mask_np = tgt_mask_np[..., 0]
+            if tgt_mask_np.shape[0] == 1 and n > 1:
+                tgt_mask_np = np.repeat(tgt_mask_np, n, axis=0)
+            if tgt_mask_np.shape[0] != n:
+                raise ValueError(
+                    f"Mask batch size ({tgt_mask_np.shape[0]}) must be 1 or match target batch size ({n})."
+                )
+
+        tgt_w = self._resolve_weights(tgt_np, tgt_mask_np)
 
         tgt_stats = [self._weighted_lab_stats(tgt_np[i], tgt_w[i]) for i in range(n)]
         pooled = self._pool_stats(tgt_stats, frame_window)
