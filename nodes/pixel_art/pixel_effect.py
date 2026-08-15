@@ -5,6 +5,11 @@ import torch.nn.functional as F
 
 
 class PixelEffectModule(nn.Module):
+    # Width of the smooth opacity transition on either side of
+    # alpha_threshold -- see the note in forward() for why this replaced a
+    # hard binary threshold.
+    ALPHA_TRANSITION_SOFTNESS = 0.12
+
     def __init__(self):
         super(PixelEffectModule, self).__init__()
 
@@ -104,12 +109,32 @@ class PixelEffectModule(nn.Module):
         param_kernel_size,
         param_pixel_size,
         alpha_threshold=0.95,
+        vote_state=None,
+        prev_argmax=None,
+        vote_beta=0.0,
+        hysteresis_margin=0.0,
+        vote_boost=None,
     ):
         """
         Process RGB with alpha channel awareness.
         - RGB is padded with replicate (extends edge colors)
         - Alpha is padded with replicate (prevents edge darkening)
         - RGB is only output where alpha supports it
+
+        Temporal stabilization (video): the block color is chosen by a
+        winner-take-all argmax over color-family votes. On video, tiny
+        frame-to-frame noise can flip which family wins a block even where
+        the source is static, which reads as flickering blocks. Two
+        mechanisms damp this, both operating on the *selection* rather than
+        blurring the input:
+        - vote_beta: EMA of the per-block vote totals across frames
+          (vote_state carries the previous frame's smoothed votes).
+        - hysteresis_margin: the previously winning family (prev_argmax)
+          keeps a block unless a challenger's vote exceeds the incumbent's
+          by this relative margin.
+        Returns (result_rgb, result_alpha, vote_state, argmax); pass the
+        last two back in for the next frame. For single images leave the
+        defaults -- behavior is unchanged.
         """
         r, g, b = rgb[:, 0:1, :, :], rgb[:, 1:2, :, :], rgb[:, 2:3, :, :]
 
@@ -124,6 +149,13 @@ class PixelEffectModule(nn.Module):
 
         alpha_weighted_mask = alpha_norm.repeat(1, num_bins, 1, 1) * color_mask
         vote_weight = self.dominant_vote_weight(rgb, alpha_norm)
+        if vote_boost is not None:
+            # Optional per-pixel vote multiplier (1, 1, H, W). Lets callers
+            # amplify pixels that must not lose their block's winner-take-
+            # all vote despite being an area minority -- e.g. thin, high-
+            # contrast details like stems and outlines, which a pure area
+            # vote erases.
+            vote_weight = vote_weight * vote_boost
         vote_mask = vote_weight.repeat(1, num_bins, 1, 1) * color_mask
 
         # Weighted RGB accumulators per color family.
@@ -216,8 +248,33 @@ class PixelEffectModule(nn.Module):
             bias=None,
         )[0, :, :, :]
 
-        # Pick the dominant color family by vote strength.
-        _, alpha_argmax = torch.max(vote_conv, dim=0)
+        # Pick the dominant color family by vote strength, with optional
+        # temporal damping of the winner-take-all choice (see docstring).
+        vote_used = vote_conv
+        if (
+            vote_state is not None
+            and vote_beta > 0.0
+            and vote_state.shape == vote_conv.shape
+        ):
+            vote_used = vote_beta * vote_state + (1.0 - vote_beta) * vote_conv
+
+        _, alpha_argmax = torch.max(vote_used, dim=0)
+
+        if (
+            prev_argmax is not None
+            and hysteresis_margin > 0.0
+            and prev_argmax.shape == alpha_argmax.shape
+        ):
+            vote_hw = torch.permute(vote_used, dims=[1, 2, 0])
+            challenger_vote = vote_used.max(dim=0).values
+            incumbent_vote = self.select_by_idx(vote_hw, prev_argmax)
+            # Keep the incumbent unless the challenger clearly beats it.
+            # An incumbent with (near-)zero support has genuinely lost the
+            # block (content moved away) and must not be kept.
+            keep = (challenger_vote <= incumbent_vote * (1.0 + hysteresis_margin)) & (
+                incumbent_vote > 1e-6
+            )
+            alpha_argmax = torch.where(keep, prev_argmax, alpha_argmax)
         alpha_max = self.select_by_idx(
             torch.permute(alpha_conv, dims=[1, 2, 0]), alpha_argmax
         )
@@ -251,28 +308,33 @@ class PixelEffectModule(nn.Module):
         kernel_area = param_kernel_size * param_kernel_size
         alpha_density = alpha_coverage / kernel_area
 
-        # Threshold alpha for harsh pixel art edges
+        # Bias alpha density smoothly around alpha_threshold instead of
+        # hard-cutting it to a binary opaque/transparent mask. A pixel-art
+        # block that's mostly-but-not-fully covered by source content
+        # should come out partially transparent, reflecting how much of it
+        # is actually covered -- forcing every block to be either fully
+        # opaque or fully transparent throws that coverage information away
+        # and gives harder, less faithful edges than the source alpha
+        # actually has. alpha_threshold still acts as the center of the
+        # transition (a block right at that coverage level lands at ~50%
+        # alpha); ALPHA_TRANSITION_SOFTNESS controls how wide that graded
+        # zone is on either side of it.
         if alpha_threshold > 0:
-            alpha_density = (alpha_density > alpha_threshold).float()
+            lo = max(0.0, alpha_threshold - self.ALPHA_TRANSITION_SOFTNESS)
+            hi = min(1.0, alpha_threshold + self.ALPHA_TRANSITION_SOFTNESS)
+            t = ((alpha_density - lo) / max(hi - lo, 1e-6)).clamp(0.0, 1.0)
+            alpha_density = t * t * (3 - 2 * t)  # smoothstep
 
         result_alpha = alpha_density * 255.0
         result_alpha = result_alpha.unsqueeze(0).unsqueeze(0)
         result_alpha = F.interpolate(result_alpha, scale_factor=param_pixel_size)
 
-        # Discard nearly-transparent pixels entirely - they add noise without value
-        # If a pixel is mostly transparent, it shouldn't be output at all
-        alpha_mask = result_alpha / 255.0
-        min_alpha_for_output = 0.1  # Discard pixels with <10% opacity
+        # RGB is returned straight (NOT premultiplied by alpha). Earlier
+        # versions multiplied the graded alpha into RGB here, which baked
+        # black into every partially-covered block -- downstream nodes and
+        # encoders that composite using the alpha channel then darkened
+        # those pixels a second time. Transparency lives solely in
+        # result_alpha; result_rgb is the true block color everywhere the
+        # dominant bin had any support.
 
-        # Where alpha is too low, force it to zero (completely transparent)
-        result_alpha = torch.where(
-            alpha_mask > min_alpha_for_output,
-            result_alpha,
-            torch.zeros_like(result_alpha),
-        )
-
-        # Mask RGB by the (possibly zeroed) alpha
-        alpha_mask = result_alpha / 255.0
-        result_rgb = result_rgb * alpha_mask
-
-        return result_rgb, result_alpha
+        return result_rgb, result_alpha, vote_used, alpha_argmax

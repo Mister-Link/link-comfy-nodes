@@ -8,8 +8,8 @@ import torch
 
 
 class SpritesheetBuilderNode:
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("spritesheet", "alpha", "metadata")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING")
+    RETURN_NAMES = ("spritesheet", "frames", "metadata")
     FUNCTION = "build_spritesheet"
     CATEGORY = "image/transform"
     # Building one spritesheet requires every frame at once, even when they
@@ -30,7 +30,6 @@ class SpritesheetBuilderNode:
         return {
             "required": {
                 "frames": ("IMAGE",),
-                "alpha": ("MASK",),
                 "aspect_ratio": (list(cls._ASPECT_RATIOS.keys()),),
             }
         }
@@ -49,23 +48,7 @@ class SpritesheetBuilderNode:
             raise ValueError("Expected frames with shape (N, H, W, C)")
         return [tensor[i] for i in range(tensor.shape[0])]
 
-    @staticmethod
-    def _flatten_masks(value) -> list[torch.Tensor]:
-        if isinstance(value, (list, tuple)):
-            masks: list[torch.Tensor] = []
-            for item in value:
-                masks.extend(SpritesheetBuilderNode._flatten_masks(item))
-            return masks
-        tensor = value.detach().cpu().float()
-        if tensor.ndim == 4 and tensor.shape[-1] == 1:
-            tensor = tensor[..., 0]
-        if tensor.ndim == 2:
-            tensor = tensor.unsqueeze(0)
-        if tensor.ndim != 3:
-            raise ValueError("Expected alpha mask with shape (N, H, W)")
-        return [tensor[i] for i in range(tensor.shape[0])]
-
-    def build_spritesheet(self, frames, alpha=None, aspect_ratio="1:1 (Square)"):
+    def build_spritesheet(self, frames, aspect_ratio="1:1 (Square)"):
         if isinstance(aspect_ratio, (list, tuple)):
             aspect_ratio = aspect_ratio[0]
 
@@ -74,12 +57,6 @@ class SpritesheetBuilderNode:
             raise ValueError("Expected at least one frame")
         frame_count = len(frame_list)
 
-        alpha_list = None
-        if alpha is not None:
-            alpha_list = self._flatten_masks(alpha)
-            if len(alpha_list) != frame_count:
-                raise ValueError("Alpha mask count does not match frame count")
-
         target_ratio = self._aspect_ratio_value(aspect_ratio)
 
         # Frames may not all share the same size, so the grid cell is sized to
@@ -87,9 +64,10 @@ class SpritesheetBuilderNode:
         # their cell rather than being resized or cropped to match the rest.
         frame_width = max(frame.shape[1] for frame in frame_list)
         frame_height = max(frame.shape[0] for frame in frame_list)
-        use_alpha = alpha_list is not None or any(
-            frame.shape[-1] == 4 for frame in frame_list
-        )
+        # Alpha convention: embedded 4th channel only. If any frame carries
+        # alpha, the sheet gets an alpha channel (frames without one are
+        # fully opaque; grid gaps stay transparent).
+        use_alpha = any(frame.shape[-1] == 4 for frame in frame_list)
         frame_channels = 4 if use_alpha else 3
 
         columns, rows = self._closest_grid(
@@ -100,6 +78,14 @@ class SpritesheetBuilderNode:
 
         spritesheet = np.zeros(
             (sheet_height, sheet_width, frame_channels), dtype=np.float32
+        )
+        # Individual frames, normalized to one uniform batch: each frame
+        # sits top-left in a cell-sized canvas exactly as it does in the
+        # sheet (padding transparent when the sheet has alpha, black
+        # otherwise).
+        frames_out = np.zeros(
+            (frame_count, frame_height, frame_width, frame_channels),
+            dtype=np.float32,
         )
 
         for idx, frame in enumerate(frame_list):
@@ -112,21 +98,17 @@ class SpritesheetBuilderNode:
             x0 = col * frame_width
 
             spritesheet[y0 : y0 + h, x0 : x0 + w, :3] = frame_np[:, :, :3]
+            frames_out[idx, :h, :w, :3] = frame_np[:, :, :3]
             if frame_channels == 4:
-                if alpha_list is not None:
-                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = (
-                        alpha_list[idx].clamp(0, 1).numpy()
-                    )
-                elif frame_np.shape[-1] == 4:
-                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = frame_np[:, :, 3]
+                if frame_np.shape[-1] == 4:
+                    cell_alpha = frame_np[:, :, 3]
                 else:
-                    spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = 1.0
+                    cell_alpha = 1.0
+                spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = cell_alpha
+                frames_out[idx, :h, :w, 3] = cell_alpha
 
         result = torch.from_numpy(spritesheet).unsqueeze(0)
-        if frame_channels == 4:
-            alpha_mask = result[..., 3].clone()
-        else:
-            alpha_mask = torch.ones((1, sheet_height, sheet_width), dtype=result.dtype)
+        frames_tensor = torch.from_numpy(frames_out)
         metadata = {
             "spritesheet": {
                 "width": sheet_width,
@@ -138,7 +120,7 @@ class SpritesheetBuilderNode:
                 "frame_count": frame_count,
             }
         }
-        return (result, alpha_mask, json.dumps(metadata, indent=2))
+        return (result, frames_tensor, json.dumps(metadata, indent=2))
 
     @classmethod
     def _aspect_ratio_value(cls, aspect_ratio: str) -> float:
