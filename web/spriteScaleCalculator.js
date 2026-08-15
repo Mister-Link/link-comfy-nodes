@@ -4,13 +4,26 @@ const NODE_NAME = "Sprite Scale Calculator";
 const MIN_NODE_WIDTH = 350;
 const MIN_NODE_HEIGHT = 550;
 const SPIRE_REFERENCE = {
-  widthInches: 27.5,
-  heightInches: 62.5,
-  pixelWidth: 55,
-  pixelHeight: 125,
+  // Native resolution of the bundled silhouette art asset — unrelated to the
+  // preset's target size, only used to scale that fixed-resolution image to
+  // fit the preview box below.
+  assetPixelWidth: 55,
+  assetPixelHeight: 125,
+  // Preset target size in pixels (matches the Python node's default width/height).
   width: 35,
-  height: 79,
+  height: 80,
+  // Spirie is 5'0" tall, rendered at `height` px — calibrates the feet/inches
+  // preview label. Widget values are pixel targets, not inches.
+  heightInches: 60,
 };
+
+const INCHES_PER_UNIT = SPIRE_REFERENCE.heightInches / SPIRE_REFERENCE.height;
+
+const getRealWorldDimensions = (widthUnits, heightUnits) => ({
+  width: widthUnits * INCHES_PER_UNIT,
+  height: heightUnits * INCHES_PER_UNIT,
+});
+
 const PRESET_DIMENSIONS = {
   Spirie: {
     width: SPIRE_REFERENCE.width,
@@ -89,34 +102,29 @@ const drawPreview = (node, ctx) => {
   }
 
   const ref = SPIRE_REFERENCE;
-  const targetWidthInches = Number(
-    getWidgetValue(node, "target_width_inches", ref.width),
-  );
-  const targetHeightInches = Number(
-    getWidgetValue(node, "target_height_inches", ref.height),
-  );
-  const widthKnown = targetWidthInches > 0;
-  const heightKnown = targetHeightInches > 0;
-
-  const pixelsPerInchWidth = ref.pixelWidth / ref.widthInches;
-  const pixelsPerInchHeight = ref.pixelHeight / ref.heightInches;
+  const targetWidthUnits = Number(getWidgetValue(node, "width", ref.width));
+  const targetHeightUnits = Number(getWidgetValue(node, "height", ref.height));
+  const widthKnown = targetWidthUnits > 0;
+  const heightKnown = targetHeightUnits > 0;
 
   // Either (or both) dimensions may be unset (0) — the user may only know
   // one measurement. Keep the unknown side as null so we never draw a box
-  // that implies a size we don't actually have.
-  const targetPixelWidth = widthKnown
-    ? Math.max(1, Math.round(targetWidthInches * pixelsPerInchWidth))
-    : null;
-  const targetPixelHeight = heightKnown
-    ? Math.max(1, Math.round(targetHeightInches * pixelsPerInchHeight))
-    : null;
+  // that implies a size we don't actually have. Widget values are already
+  // pixel targets, so no unit conversion here (see INCHES_PER_UNIT below,
+  // used only for the feet/inches label).
+  const targetPixelWidth = widthKnown ? Math.max(1, Math.round(targetWidthUnits)) : null;
+  const targetPixelHeight = heightKnown ? Math.max(1, Math.round(targetHeightUnits)) : null;
+  const realWorldDimensions = getRealWorldDimensions(
+    widthKnown ? targetWidthUnits : 0,
+    heightKnown ? targetHeightUnits : 0,
+  );
 
   const margin = 18;
   const innerX = rect.x;
   const innerY = rect.y;
   const groundY = innerY + height - 28;
-  const maxVisualHeight = Math.max(ref.pixelHeight, targetPixelHeight ?? 0, 1);
-  const maxVisualWidth = Math.max(ref.pixelWidth, targetPixelWidth ?? 0, 1);
+  const maxVisualHeight = Math.max(ref.height, targetPixelHeight ?? 0, 1);
+  const maxVisualWidth = Math.max(ref.width, targetPixelWidth ?? 0, 1);
   const availableHeight = Math.max(80, height - 62);
   const availableWidth = Math.max(80, width - (margin * 2) - 18);
   const visualScale = Math.max(
@@ -126,13 +134,19 @@ const drawPreview = (node, ctx) => {
       availableWidth / maxVisualWidth,
     ),
   );
-  const refDrawW = Math.max(12, ref.pixelWidth * visualScale);
-  const refDrawH = Math.max(24, ref.pixelHeight * visualScale);
+  const refDrawW = Math.max(12, ref.width * visualScale);
+  const refDrawH = Math.max(24, ref.height * visualScale);
+  const silhouetteScaleX = ref.width / Math.max(1, ref.assetPixelWidth);
+  const silhouetteScaleY = ref.height / Math.max(1, ref.assetPixelHeight);
+  const silhouetteDrawW = refDrawW * silhouetteScaleX;
+  const silhouetteDrawH = refDrawH * silhouetteScaleY;
   const targetDrawW = targetPixelWidth !== null ? Math.max(12, targetPixelWidth * visualScale) : null;
   const targetDrawH = targetPixelHeight !== null ? Math.max(24, targetPixelHeight * visualScale) : null;
   const centerX = innerX + width / 2;
   const refX = centerX - refDrawW / 2;
   const refY = groundY - refDrawH;
+  const silhouetteX = centerX - silhouetteDrawW / 2;
+  const silhouetteY = groundY - silhouetteDrawH;
   const targetX = targetDrawW !== null ? centerX - targetDrawW / 2 : null;
   const targetY = targetDrawH !== null ? groundY - targetDrawH : null;
 
@@ -207,7 +221,9 @@ const drawPreview = (node, ctx) => {
   if (silhouetteImage) {
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(silhouetteImage, refX, refY, refDrawW, refDrawH);
+    // The silhouette asset's native resolution (55x125) doesn't match the
+    // preset's target size (35x80), so scale it to fit the preview box.
+    ctx.drawImage(silhouetteImage, silhouetteX, silhouetteY, silhouetteDrawW, silhouetteDrawH);
     ctx.restore();
   } else {
     ctx.fillStyle = "#d6cdc0";
@@ -220,8 +236,8 @@ const drawPreview = (node, ctx) => {
   const pixelLabel = pixelParts.length ? `${pixelParts.join("×")}px` : "";
 
   const dimensionParts = [];
-  if (widthKnown) dimensionParts.push(formatDimension(targetWidthInches));
-  if (heightKnown) dimensionParts.push(formatDimension(targetHeightInches));
+  if (widthKnown) dimensionParts.push(formatDimension(realWorldDimensions.width));
+  if (heightKnown) dimensionParts.push(formatDimension(realWorldDimensions.height));
   const dimensionLabel = dimensionParts.join(" × ");
 
   const label = [pixelLabel, dimensionLabel].filter(Boolean).join("  |  ");
@@ -274,8 +290,8 @@ app.registerExtension({
       };
 
       const presetWidget = getWidget(this, "preset");
-      const widthWidget = getWidget(this, "target_width_inches");
-      const heightWidget = getWidget(this, "target_height_inches");
+      const widthWidget = getWidget(this, "width");
+      const heightWidget = getWidget(this, "height");
 
       if (presetWidget) {
         const originalPresetCallback = presetWidget.callback;
