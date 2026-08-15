@@ -4,12 +4,9 @@ const NODE_NAME = "Sprite Scale Calculator";
 const MIN_NODE_WIDTH = 350;
 const MIN_NODE_HEIGHT = 550;
 const SPIRE_REFERENCE = {
-  // Native resolution of the bundled silhouette art asset — unrelated to the
-  // preset's target size, only used to scale that fixed-resolution image to
-  // fit the preview box below.
-  assetPixelWidth: 55,
-  assetPixelHeight: 125,
   // Preset target size in pixels (matches the Python node's default width/height).
+  // The silhouette art is stretched to fill this box exactly, regardless of
+  // its own source resolution, so it always lines up with the target box.
   width: 35,
   height: 80,
   // Spirie is 5'0" tall, rendered at `height` px — calibrates the feet/inches
@@ -136,17 +133,11 @@ const drawPreview = (node, ctx) => {
   );
   const refDrawW = Math.max(12, ref.width * visualScale);
   const refDrawH = Math.max(24, ref.height * visualScale);
-  const silhouetteScaleX = ref.width / Math.max(1, ref.assetPixelWidth);
-  const silhouetteScaleY = ref.height / Math.max(1, ref.assetPixelHeight);
-  const silhouetteDrawW = refDrawW * silhouetteScaleX;
-  const silhouetteDrawH = refDrawH * silhouetteScaleY;
   const targetDrawW = targetPixelWidth !== null ? Math.max(12, targetPixelWidth * visualScale) : null;
   const targetDrawH = targetPixelHeight !== null ? Math.max(24, targetPixelHeight * visualScale) : null;
   const centerX = innerX + width / 2;
   const refX = centerX - refDrawW / 2;
   const refY = groundY - refDrawH;
-  const silhouetteX = centerX - silhouetteDrawW / 2;
-  const silhouetteY = groundY - silhouetteDrawH;
   const targetX = targetDrawW !== null ? centerX - targetDrawW / 2 : null;
   const targetY = targetDrawH !== null ? groundY - targetDrawH : null;
 
@@ -221,9 +212,11 @@ const drawPreview = (node, ctx) => {
   if (silhouetteImage) {
     ctx.save();
     ctx.imageSmoothingEnabled = false;
-    // The silhouette asset's native resolution (55x125) doesn't match the
-    // preset's target size (35x80), so scale it to fit the preview box.
-    ctx.drawImage(silhouetteImage, silhouetteX, silhouetteY, silhouetteDrawW, silhouetteDrawH);
+    // Stretched to fill the reference box exactly (ref.width x ref.height,
+    // i.e. Spirie's true pixel size) regardless of the source art's own
+    // resolution, so it lines up 1:1 with the target box when target ==
+    // reference (e.g. the Spirie preset selected).
+    ctx.drawImage(silhouetteImage, refX, refY, refDrawW, refDrawH);
     ctx.restore();
   } else {
     ctx.fillStyle = "#d6cdc0";
