@@ -7,10 +7,15 @@ from sklearn.cluster import KMeans
 
 
 class ImagePixelateNode:
-    """Pixelate images via downscaling + k-means color quantization, with optional dithering and alpha-aware masking."""
+    """Pixelate images via downscaling + k-means color quantization, with optional dithering.
 
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("images", "mask")
+    Alpha convention: an embedded 4th channel (if present) gates the palette
+    fit and is carried through to the output; 3-channel input yields
+    3-channel output.
+    """
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
     FUNCTION = "image_pixelate"
     CATEGORY = "image/transform"
 
@@ -25,11 +30,40 @@ class ImagePixelateNode:
                 "pixelation_size": ("INT", {"default": 164, "min": 16, "max": 480, "step": 1}),
                 "num_colors": ("INT", {"default": 16, "min": 2, "max": 256, "step": 1}),
                 "init_mode": (["k-means++", "random", "none"],),
-                "dither": (["False", "True"],),
+                "dither": ("BOOLEAN", {"default": False}),
                 "dither_mode": (["FloydSteinberg", "Ordered"],),
             },
             "optional": {
-                "mask": ("MASK",),
+                "width": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 8192,
+                        "step": 1,
+                        "tooltip": (
+                            "Output width. 0 = keep source width. If only one of "
+                            "width/height is set, the other follows the source "
+                            "aspect ratio."
+                        ),
+                    },
+                ),
+                "height": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 8192,
+                        "step": 1,
+                        "tooltip": (
+                            "Output height. 0 = keep source height. Resizing scales "
+                            "the pixel grid with nearest to the ceiling integer "
+                            "multiple, then a box filter down to the exact size -- "
+                            "crisp uniform pixels at any scale, unlike raw nearest "
+                            "at fractional factors."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -39,16 +73,15 @@ class ImagePixelateNode:
         pixelation_size: int = 164,
         num_colors: int = 16,
         init_mode: str = "random",
-        mask: torch.Tensor | None = None,
-        dither: str = "False",
+        dither: bool = False,
         dither_mode: str = "FloydSteinberg",
+        width: int = 0,
+        height: int = 0,
     ):
-        dither_on = dither == "True"
-
         images_np = images.detach().cpu().numpy()
         has_alpha_channel = images_np.shape[-1] == 4
         pil_images = [Image.fromarray((img[..., :3] * 255).astype(np.uint8)) for img in images_np]
-        alpha_images = self._resolve_alpha_images(images_np, mask, has_alpha_channel)
+        alpha_images = self._resolve_alpha_images(images_np, has_alpha_channel)
 
         pixelated, pixelated_alpha = self._pixelate_batch(
             pil_images,
@@ -56,37 +89,61 @@ class ImagePixelateNode:
             pixelation_size,
             num_colors,
             init_mode,
-            dither_on,
+            dither,
             dither_mode,
+            target_width=width,
+            target_height=height,
         )
 
         result = torch.from_numpy(np.stack([np.asarray(img, dtype=np.float32) / 255.0 for img in pixelated]))
-        result_mask = torch.from_numpy(
-            np.stack([np.asarray(alpha, dtype=np.float32) / 255.0 for alpha in pixelated_alpha])
-        )
-        return (result, result_mask)
+        if has_alpha_channel:
+            result_alpha = torch.from_numpy(
+                np.stack([np.asarray(alpha, dtype=np.float32) / 255.0 for alpha in pixelated_alpha])
+            )
+            result = torch.cat([result, result_alpha.unsqueeze(-1)], dim=-1)
+        return (result,)
 
     @staticmethod
-    def _resolve_alpha_images(
-        images_np: np.ndarray, mask: torch.Tensor | None, has_alpha_channel: bool
-    ) -> list[Image.Image]:
+    def _resolve_alpha_images(images_np: np.ndarray, has_alpha_channel: bool) -> list[Image.Image]:
         batch, height, width = images_np.shape[0], images_np.shape[1], images_np.shape[2]
 
-        if mask is not None:
-            mask_np = mask.detach().cpu().numpy()
-            if mask_np.ndim == 4 and mask_np.shape[-1] == 1:
-                mask_np = mask_np[..., 0]
-            if mask_np.shape[0] != batch:
-                raise ValueError(f"Mask batch size ({mask_np.shape[0]}) does not match images ({batch})")
-            if mask_np.shape[1:3] != (height, width):
-                raise ValueError(f"Mask size {mask_np.shape[1:3]} does not match image size {(height, width)}")
-            alpha_np = mask_np
-        elif has_alpha_channel:
+        if has_alpha_channel:
             alpha_np = images_np[..., 3]
         else:
             alpha_np = np.ones((batch, height, width), dtype=np.float32)
 
         return [Image.fromarray((frame * 255).clip(0, 255).astype(np.uint8), mode="L") for frame in alpha_np]
+
+    @staticmethod
+    def _resolve_target_size(source_size: tuple[int, int], width: int, height: int) -> tuple[int, int]:
+        sw, sh = source_size
+        if width <= 0 and height <= 0:
+            return sw, sh
+        if width > 0 and height > 0:
+            return width, height
+        if width > 0:
+            return width, max(1, round(sh * width / sw))
+        return max(1, round(sw * height / sh)), height
+
+    @staticmethod
+    def _resize_pixel_art(img: Image.Image, target: tuple[int, int], resample_down) -> Image.Image:
+        """Resize a low-res pixel grid to an arbitrary size without wrecking it.
+
+        Raw NEAREST is only faithful at integer multiples of the pixel grid;
+        at fractional factors some pixels come out one screen-pixel wider
+        than their neighbors, which reads as a warped, uneven grid. Instead:
+        NEAREST up to the ceiling integer multiple (pixels stay square and
+        uniform), then a single box-filter pass down to the exact target.
+        """
+        tw, th = target
+        w, h = img.size
+        if (tw, th) == (w, h):
+            return img
+        k = max(1, -(-tw // w), -(-th // h))  # ceil of the larger axis ratio
+        up = img.resize((w * k, h * k), Image.NEAREST)
+        if up.size == (tw, th):
+            return up
+        return up.resize((tw, th), resample_down)
 
     def _pixelate_batch(
         self,
@@ -98,8 +155,14 @@ class ImagePixelateNode:
         dither: bool,
         dither_mode: str,
         random_state: int = 42,
+        target_width: int = 0,
+        target_height: int = 0,
     ) -> tuple[list[Image.Image], list[Image.Image]]:
         original_sizes = [image.size for image in images]
+        target_sizes = [
+            self._resolve_target_size(size, target_width, target_height)
+            for size in original_sizes
+        ]
 
         downscaled = []
         downscaled_alpha = []
@@ -123,9 +186,13 @@ class ImagePixelateNode:
         if dither:
             downscaled = [self._dither_image(image, dither_mode, num_colors) for image in downscaled]
 
-        pixelated = [image.resize(size, Image.NEAREST) for image, size in zip(downscaled, original_sizes)]
+        pixelated = [
+            self._resize_pixel_art(image, size, Image.BOX)
+            for image, size in zip(downscaled, target_sizes)
+        ]
         pixelated_alpha = [
-            alpha.resize(size, Image.NEAREST) for alpha, size in zip(downscaled_alpha, original_sizes)
+            self._resize_pixel_art(alpha, size, Image.BOX)
+            for alpha, size in zip(downscaled_alpha, target_sizes)
         ]
         return pixelated, pixelated_alpha
 
@@ -158,14 +225,13 @@ class ImagePixelateNode:
         kmeans.fit(fit_pixels)
         colors = kmeans.cluster_centers_.astype(np.uint8)
 
-        # Only quantize opaque pixels; transparent ones are blacked out
-        # instead of being assigned a nearest fitted color, so the
-        # background never soaks up one of the fitted palette colors.
-        quantized = np.zeros_like(pixels)
-        if opaque.any():
-            quantized[opaque] = colors[kmeans.predict(pixels[opaque])]
-        else:
-            quantized = colors[kmeans.predict(pixels)]
+        # Quantize every pixel with the opaque-fitted palette. The palette
+        # fit above already excludes transparent pixels, so the background
+        # can't soak up a palette slot -- but transparent pixels still get
+        # a real nearest color instead of being blacked out. Baking black
+        # into RGB under transparency caused dark fringing downstream
+        # whenever anything resampled or composited using the alpha.
+        quantized = colors[kmeans.predict(pixels)]
 
         return Image.fromarray(quantized.reshape(np_image.shape))
 
