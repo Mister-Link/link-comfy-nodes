@@ -57,16 +57,21 @@ class ReplaceAlpha:
         )
 
         rgb = frames[..., :3]
-        replace_regions = (mask_tensor > 0.5).unsqueeze(-1)
+        blend = mask_tensor.clamp(0.0, 1.0).unsqueeze(-1)
         color_broadcast = color_rgb.view(1, 1, 1, 3).expand_as(rgb)
-        new_rgb = torch.where(replace_regions, color_broadcast, rgb)
 
-        # Embed the result as an alpha-aware RGBA frame instead of a separate
-        # MASK output: color-filled (replaced) regions become transparent,
-        # preserved content stays opaque -- matches the embedded-alpha
-        # convention the rest of this node family (e.g. Match Colors to
-        # Reference) already reads automatically.
-        alpha = (1.0 - mask_tensor).clamp(0.0, 1.0)
-        result_frames = torch.cat([new_rgb, alpha.unsqueeze(-1)], dim=-1)
+        # Use the mask as a continuous blend weight so anti-aliased edges stay
+        # smooth instead of snapping at a binary threshold.
+        new_rgb = rgb * (1.0 - blend) + color_broadcast * blend
+
+        if frames.shape[-1] > 3:
+            original_alpha = frames[..., 3:4].clamp(0.0, 1.0)
+        else:
+            original_alpha = torch.ones_like(blend, dtype=frames.dtype)
+
+        # Replaced pixels transition toward an opaque solid fill; untouched
+        # pixels keep their original alpha.
+        alpha = original_alpha * (1.0 - blend) + blend
+        result_frames = torch.cat([new_rgb, alpha], dim=-1)
 
         return (result_frames,)
