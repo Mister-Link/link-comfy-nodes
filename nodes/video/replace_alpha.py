@@ -69,12 +69,10 @@ class ReplaceAlpha:
         else:
             original_alpha = torch.ones_like(blend, dtype=frames.dtype)
 
-        # Replaced pixels transition toward fully transparent (the color fill
-        # is a background stand-in, not real content) so alpha-aware
-        # downstream nodes -- e.g. Match Colors to Reference's per-frame Lab
-        # statistics -- can exclude it; untouched pixels keep their original
-        # alpha.
-        alpha = original_alpha * (1.0 - blend)
+        # Replaced pixels transition toward an opaque solid fill so the chosen
+        # background color remains visible, while untouched pixels keep their
+        # original alpha.
+        alpha = original_alpha * (1.0 - blend) + blend
         result_frames = torch.cat([new_rgb, alpha], dim=-1)
 
         return (result_frames,)
