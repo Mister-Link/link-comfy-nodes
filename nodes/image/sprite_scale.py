@@ -10,10 +10,12 @@ class SpriteScaleCalculatorNode:
     FUNCTION = "calculate_pixels"
     CATEGORY = "image/transform"
 
-    # Spirie is 5'0" (60") tall, rendered at 80px — the "width"/"height" widgets
-    # below are already pixel targets, not inches, so no reference-derived
-    # scale factor is applied to them (see web/spriteScaleCalculator.js for the
-    # inches-per-pixel math used only for the feet/inches preview label).
+    # "width"/"height" are an arbitrary world unit, not pixels directly --
+    # pixel_width/pixel_height scale them up by this factor. Spirie is 5'0"
+    # (60") tall, so the preset's height=80 units works out to 60/80 = 0.75
+    # inches/unit for the feet/inches preview label (web/spriteScaleCalculator.js);
+    # that calibration is independent of this pixel scale factor.
+    _PIXELS_PER_UNIT = 2.0
     _SPIRE_PRESET_WIDTH = 35
     _SPIRE_PRESET_HEIGHT = 80
 
@@ -44,8 +46,8 @@ class SpriteScaleCalculatorNode:
         width: int,
         height: int,
     ):
-        pixel_width = 0 if width <= 0 else max(1, width)
-        pixel_height = 0 if height <= 0 else max(1, height)
+        pixel_width = 0 if width <= 0 else max(1, round(width * self._PIXELS_PER_UNIT))
+        pixel_height = 0 if height <= 0 else max(1, round(height * self._PIXELS_PER_UNIT))
 
         return (
             int(pixel_width),

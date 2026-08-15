@@ -4,15 +4,23 @@ const NODE_NAME = "Sprite Scale Calculator";
 const MIN_NODE_WIDTH = 350;
 const MIN_NODE_HEIGHT = 550;
 const SPIRE_REFERENCE = {
-  // Preset target size in pixels (matches the Python node's default width/height).
-  // The silhouette art is stretched to fill this box exactly, regardless of
-  // its own source resolution, so it always lines up with the target box.
+  // Preset default for the width/height widgets, in the same arbitrary world
+  // unit the node accepts (matches the Python node's defaults). The
+  // silhouette art is stretched to fill the reference box built from these,
+  // regardless of its own source resolution, so it always lines up with the
+  // target box when target == reference.
   width: 35,
   height: 80,
-  // Spirie is 5'0" tall, rendered at `height` px — calibrates the feet/inches
-  // preview label. Widget values are pixel targets, not inches.
+  // Spirie is 5'0" tall at height=80 units — calibrates the feet/inches
+  // preview label. Independent of PIXELS_PER_UNIT below.
   heightInches: 60,
 };
+
+// Must match SpriteScaleCalculatorNode._PIXELS_PER_UNIT in sprite_scale.py --
+// pixel_width/pixel_height scale the width/height widgets by this factor, so
+// the preview's pixel label and box sizing need the same factor to stay
+// truthful about what the node actually outputs.
+const PIXELS_PER_UNIT = 2.0;
 
 const INCHES_PER_UNIT = SPIRE_REFERENCE.heightInches / SPIRE_REFERENCE.height;
 
@@ -106,11 +114,12 @@ const drawPreview = (node, ctx) => {
 
   // Either (or both) dimensions may be unset (0) — the user may only know
   // one measurement. Keep the unknown side as null so we never draw a box
-  // that implies a size we don't actually have. Widget values are already
-  // pixel targets, so no unit conversion here (see INCHES_PER_UNIT below,
-  // used only for the feet/inches label).
-  const targetPixelWidth = widthKnown ? Math.max(1, Math.round(targetWidthUnits)) : null;
-  const targetPixelHeight = heightKnown ? Math.max(1, Math.round(targetHeightUnits)) : null;
+  // that implies a size we don't actually have. Widget values are world
+  // units, scaled to actual pixels by PIXELS_PER_UNIT (matches the Python
+  // node's pixel_width/pixel_height outputs) -- separate from INCHES_PER_UNIT
+  // below, which only calibrates the feet/inches label.
+  const targetPixelWidth = widthKnown ? Math.max(1, Math.round(targetWidthUnits * PIXELS_PER_UNIT)) : null;
+  const targetPixelHeight = heightKnown ? Math.max(1, Math.round(targetHeightUnits * PIXELS_PER_UNIT)) : null;
   const realWorldDimensions = getRealWorldDimensions(
     widthKnown ? targetWidthUnits : 0,
     heightKnown ? targetHeightUnits : 0,
@@ -120,8 +129,10 @@ const drawPreview = (node, ctx) => {
   const innerX = rect.x;
   const innerY = rect.y;
   const groundY = innerY + height - 28;
-  const maxVisualHeight = Math.max(ref.height, targetPixelHeight ?? 0, 1);
-  const maxVisualWidth = Math.max(ref.width, targetPixelWidth ?? 0, 1);
+  const refPixelWidth = ref.width * PIXELS_PER_UNIT;
+  const refPixelHeight = ref.height * PIXELS_PER_UNIT;
+  const maxVisualHeight = Math.max(refPixelHeight, targetPixelHeight ?? 0, 1);
+  const maxVisualWidth = Math.max(refPixelWidth, targetPixelWidth ?? 0, 1);
   const availableHeight = Math.max(80, height - 62);
   const availableWidth = Math.max(80, width - (margin * 2) - 18);
   const visualScale = Math.max(
@@ -131,8 +142,8 @@ const drawPreview = (node, ctx) => {
       availableWidth / maxVisualWidth,
     ),
   );
-  const refDrawW = Math.max(12, ref.width * visualScale);
-  const refDrawH = Math.max(24, ref.height * visualScale);
+  const refDrawW = Math.max(12, refPixelWidth * visualScale);
+  const refDrawH = Math.max(24, refPixelHeight * visualScale);
   const targetDrawW = targetPixelWidth !== null ? Math.max(12, targetPixelWidth * visualScale) : null;
   const targetDrawH = targetPixelHeight !== null ? Math.max(24, targetPixelHeight * visualScale) : null;
   const centerX = innerX + width / 2;
