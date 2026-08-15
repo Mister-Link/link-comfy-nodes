@@ -7,8 +7,8 @@ from ...utils import parse_hex_color
 
 class ReplaceAlpha:
     CATEGORY: str = "Video/Masking"
-    RETURN_TYPES: tuple[str, ...] = ("IMAGE", "MASK")
-    RETURN_NAMES: tuple[str, ...] = ("frames", "alpha")
+    RETURN_TYPES: tuple[str, ...] = ("IMAGE",)
+    RETURN_NAMES: tuple[str, ...] = ("frames",)
     FUNCTION: str = "replace_alpha"
     OUTPUT_NODE: bool = False
 
@@ -17,59 +17,36 @@ class ReplaceAlpha:
         return {
             "required": {
                 "frames": ("IMAGE",),
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": (
+                            "White = replace with color, black = keep the "
+                            "original frame content untouched."
+                        )
+                    },
+                ),
                 "color": ("STRING", {"default": "#FFFFFF"}),
-            },
-            "optional": {
-                "alpha": ("MASK",),
-                "mask": ("MASK",),
-            },
+            }
         }
 
     def replace_alpha(
         self,
         frames: torch.Tensor,
+        mask: torch.Tensor,
         color: str,
-        alpha: torch.Tensor | None = None,
-        mask: torch.Tensor | None = None,
     ):
-        has_alpha_channel = frames.shape[-1] == 4
+        mask_tensor = mask
+        if mask_tensor.ndim == 4 and mask_tensor.shape[-1] == 1:
+            mask_tensor = mask_tensor[..., 0]
 
-        if alpha is None:
-            # No alpha supplied -- fall back to the frames' own embedded alpha
-            # channel (RGBA input), or full opacity if frames are plain RGB
-            # (nothing to key on, so replace_alpha becomes a no-op passthrough).
-            alpha_tensor = (
-                frames[..., 3]
-                if has_alpha_channel
-                else torch.ones(frames.shape[:3], device=frames.device, dtype=frames.dtype)
-            )
-        else:
-            alpha_tensor = alpha
-            if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
-                alpha_tensor = alpha_tensor[..., 0]
-
-        if mask is None:
-            # No mask supplied -- apply the replacement across the whole frame.
-            mask_tensor = torch.ones(frames.shape[:3], device=frames.device, dtype=frames.dtype)
-        else:
-            mask_tensor = mask
-            if mask_tensor.ndim == 4 and mask_tensor.shape[-1] == 1:
-                mask_tensor = mask_tensor[..., 0]
-
-        if (
-            frames.shape[0] != alpha_tensor.shape[0]
-            or frames.shape[0] != mask_tensor.shape[0]
-        ):
+        if frames.shape[0] != mask_tensor.shape[0]:
             raise ValueError(
-                f"Frame count mismatch: frames={frames.shape[0]}, alpha={alpha_tensor.shape[0]}, mask={mask_tensor.shape[0]}"
+                f"Frame count mismatch: frames={frames.shape[0]}, mask={mask_tensor.shape[0]}"
             )
-
-        if (
-            frames.shape[1:3] != alpha_tensor.shape[1:3]
-            or frames.shape[1:3] != mask_tensor.shape[1:3]
-        ):
+        if frames.shape[1:3] != mask_tensor.shape[1:3]:
             raise ValueError(
-                f"Frame size mismatch: frames={frames.shape[1:3]}, alpha={alpha_tensor.shape[1:3]}, mask={mask_tensor.shape[1:3]}"
+                f"Frame size mismatch: frames={frames.shape[1:3]}, mask={mask_tensor.shape[1:3]}"
             )
 
         r, g, b = parse_hex_color(color, fallback=(255, 255, 255))
@@ -79,21 +56,17 @@ class ReplaceAlpha:
             dtype=frames.dtype,
         )
 
-        result_alpha = alpha_tensor.clone()
-        result_frames = frames.clone()
-        rgb_frames = result_frames[..., :3]
-        replace_regions = mask_tensor > 0.5
-        if replace_regions.any():
-            alpha_3d = alpha_tensor.unsqueeze(-1)
-            blended_rgb = rgb_frames * alpha_3d + color_rgb * (1.0 - alpha_3d)
-            replace_regions_3d = replace_regions.unsqueeze(-1)
-            new_rgb = torch.where(replace_regions_3d, blended_rgb, rgb_frames)
-            if has_alpha_channel:
-                result_frames = torch.cat([new_rgb, result_frames[..., 3:]], dim=-1)
-            else:
-                result_frames = new_rgb
-            result_alpha = torch.where(
-                replace_regions, torch.ones_like(result_alpha), result_alpha
-            )
+        rgb = frames[..., :3]
+        replace_regions = (mask_tensor > 0.5).unsqueeze(-1)
+        color_broadcast = color_rgb.view(1, 1, 1, 3).expand_as(rgb)
+        new_rgb = torch.where(replace_regions, color_broadcast, rgb)
 
-        return (result_frames, result_alpha)
+        # Embed the result as an alpha-aware RGBA frame instead of a separate
+        # MASK output: color-filled (replaced) regions become transparent,
+        # preserved content stays opaque -- matches the embedded-alpha
+        # convention the rest of this node family (e.g. Match Colors to
+        # Reference) already reads automatically.
+        alpha = (1.0 - mask_tensor).clamp(0.0, 1.0)
+        result_frames = torch.cat([new_rgb, alpha.unsqueeze(-1)], dim=-1)
+
+        return (result_frames,)
