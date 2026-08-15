@@ -17,25 +17,44 @@ class ReplaceAlpha:
         return {
             "required": {
                 "frames": ("IMAGE",),
+                "color": ("STRING", {"default": "#FFFFFF"}),
+            },
+            "optional": {
                 "alpha": ("MASK",),
                 "mask": ("MASK",),
-                "color": ("STRING", {"default": "#FFFFFF"}),
-            }
+            },
         }
 
     def replace_alpha(
         self,
         frames: torch.Tensor,
-        alpha: torch.Tensor,
-        mask: torch.Tensor,
         color: str,
+        alpha: torch.Tensor | None = None,
+        mask: torch.Tensor | None = None,
     ):
-        alpha_tensor = alpha
-        mask_tensor = mask
-        if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
-            alpha_tensor = alpha_tensor[..., 0]
-        if mask_tensor.ndim == 4 and mask_tensor.shape[-1] == 1:
-            mask_tensor = mask_tensor[..., 0]
+        has_alpha_channel = frames.shape[-1] == 4
+
+        if alpha is None:
+            # No alpha supplied -- fall back to the frames' own embedded alpha
+            # channel (RGBA input), or full opacity if frames are plain RGB
+            # (nothing to key on, so replace_alpha becomes a no-op passthrough).
+            alpha_tensor = (
+                frames[..., 3]
+                if has_alpha_channel
+                else torch.ones(frames.shape[:3], device=frames.device, dtype=frames.dtype)
+            )
+        else:
+            alpha_tensor = alpha
+            if alpha_tensor.ndim == 4 and alpha_tensor.shape[-1] == 1:
+                alpha_tensor = alpha_tensor[..., 0]
+
+        if mask is None:
+            # No mask supplied -- apply the replacement across the whole frame.
+            mask_tensor = torch.ones(frames.shape[:3], device=frames.device, dtype=frames.dtype)
+        else:
+            mask_tensor = mask
+            if mask_tensor.ndim == 4 and mask_tensor.shape[-1] == 1:
+                mask_tensor = mask_tensor[..., 0]
 
         if (
             frames.shape[0] != alpha_tensor.shape[0]
@@ -62,7 +81,6 @@ class ReplaceAlpha:
 
         result_alpha = alpha_tensor.clone()
         result_frames = frames.clone()
-        has_alpha_channel = result_frames.shape[-1] == 4
         rgb_frames = result_frames[..., :3]
         replace_regions = mask_tensor > 0.5
         if replace_regions.any():
