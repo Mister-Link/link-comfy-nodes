@@ -5,25 +5,12 @@ import json
 import numpy as np
 import torch
 
-import folder_paths  # type: ignore[import-untyped]
-
-try:
-    from ...models.model_utils import load_anime_seg_model
-
-    ANIME_SEG_AVAILABLE = True
-except Exception as e:
-    ANIME_SEG_AVAILABLE = False
-    print(f"[AutoCropper] AnimeSegmentation not available: {e}")
-
 
 class AutoCropperNode:
     CATEGORY = "image/transform"
     RETURN_TYPES = ("IMAGE", "MASK", "STRING")
     RETURN_NAMES = ("cropped_frames", "cropped_alpha", "bbox")
     FUNCTION = "auto_crop"
-
-    _model = None
-    _device = None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -32,11 +19,9 @@ class AutoCropperNode:
                 "frames": ("IMAGE",),
                 "method": (
                     [
-                        "bbox",
-                        "non_black",
-                        "anime",
                         "bg_sub",
                         "shared_bg_sub",
+                        "trim_bars",
                     ],
                     {"default": "bg_sub"},
                 ),
@@ -67,9 +52,10 @@ class AutoCropperNode:
                     {
                         "default": False,
                         "tooltip": (
-                            "If true, padding is filled by stretching the outermost edge pixels of "
-                            "the crop outward (like a replicated border). Overrides padding_color "
-                            "and use_image_padding when enabled."
+                            "If true, padding is filled with the averaged color along each edge of "
+                            "the crop (not the literal edge pixels -- replicating exact pixels "
+                            "streaks if the edge has any per-pixel noise or dither). Overrides "
+                            "padding_color and use_image_padding when enabled."
                         ),
                     },
                 ),
@@ -79,65 +65,11 @@ class AutoCropperNode:
             },
         }
 
-    @classmethod
-    def _get_model(cls):
-        if not ANIME_SEG_AVAILABLE:
-            raise RuntimeError(
-                "AnimeSegmentation model not available. "
-                "Please ensure the models folder is properly set up."
-            )
-
-        if cls._model is None:
-            cls._device = "cuda" if torch.cuda.is_available() else "cpu"
-            cls._model = load_anime_seg_model(folder_paths, cls._device)
-
-        return cls._model, cls._device
-
-    @torch.no_grad()
-    def _segment_frame_anime(self, frame_np, model, device, sensitivity):
-        if frame_np.shape[2] == 4:
-            bgr = frame_np[:, :, :3]
-        else:
-            bgr = frame_np
-
-        bgr_cv2 = cv2.cvtColor((bgr * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
-        rgb = cv2.cvtColor(bgr_cv2, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-
-        tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).to(device)
-
-        pred = model(tensor)[0, 0].cpu().numpy()
-        mask = (pred > sensitivity).astype(np.uint8) * 255
-
-        num, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
-        if num > 1:
-            largest = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
-            mask = (labels == largest).astype(np.uint8) * 255
-
-        return mask
-
-    def _detect_bbox(self, frame_np, sensitivity):
-        frame_uint8 = (frame_np * 255).astype(np.uint8)
-        if frame_np.shape[2] >= 3:
-            rgb_channels = frame_uint8[:, :, :3]
-        else:
-            rgb_channels = frame_uint8
-        mask = (
-            np.any(rgb_channels > int(sensitivity * 255), axis=2).astype(np.uint8) * 255
-        )
-        return mask
-
-    def _detect_non_black(self, frame_np, sensitivity):
+    def _detect_background_subtraction(self, frame_np, sensitivity):
+        h, w = frame_np.shape[:2]
         rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
 
         sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
-        threshold = 0.01 + (sensitivity * 0.24)
-
-        max_channel = np.max(rgb, axis=2)
-        mask = (max_channel > threshold).astype(np.uint8) * 255
-        return mask
-
-    def _detect_background_subtraction(self, frame_np, sensitivity):
-        rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
 
         bg_color = self._estimate_corner_background(rgb)
 
@@ -184,12 +116,14 @@ class AutoCropperNode:
         sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
         diff = np.linalg.norm(rgb - bg_color[None, None, :], axis=2)
 
+        # Low sensitivity picks up smaller deviations from the shared background.
         base_threshold = self._foreground_threshold(sensitivity, 0.02, 0.25)
         fg_mask = (diff > base_threshold).astype(np.uint8) * 255
 
         return self._cleanup_foreground_mask(fg_mask)
 
     def _cleanup_foreground_mask(self, fg_mask):
+        # Clean up: close small holes, erode to remove noise, dilate to restore size
         close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_k)
 
@@ -203,16 +137,97 @@ class AutoCropperNode:
 
         return fg_mask
 
-    def _detect_shared_background_subtraction(
-        self, frame_np, shared_bg_color, sensitivity
-    ):
+    def _detect_shared_background_subtraction(self, frame_np, shared_bg_color, sensitivity):
         rgb = frame_np[:, :, :3] if frame_np.shape[2] >= 3 else frame_np
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
         diff = np.linalg.norm(rgb - shared_bg_color[None, None, :], axis=2)
 
+        # Shared-background crops are aimed at stable greenscreen/uniform-bg
+        # sequences, so they intentionally use a stricter threshold range than
+        # per-frame bg_sub. This avoids background spill/noise in one frame
+        # inflating the union crop for the whole batch.
         base_threshold = self._foreground_threshold(
             sensitivity, 40.0 / 255.0, 100.0 / 255.0
         )
         return (diff > base_threshold).astype(np.uint8) * 255
+
+    @staticmethod
+    def _detect_bar_extent(rgb_u8, edge, tolerance):
+        # Counts how many rows/columns from `edge` are part of a solid bar,
+        # stopping at the first one that isn't. Makes no assumption about
+        # bar thickness -- only that the bar starts exactly at the edge,
+        # which is what a letterbox/pillarbox bar is.
+        #
+        # A row/column only counts as "bar" if it passes two checks: it
+        # must be internally uniform (every pixel in it close to that
+        # row/column's own mean), AND that mean must match the sampled
+        # border color. Matching the border color alone isn't enough --
+        # on an edge with no actual bar, a row/column can average out
+        # close to the border color just by blending unrelated regions
+        # (e.g. a column that's part white bar and part green content
+        # averages to something that spuriously resembles other such
+        # columns), which reads as a bar where there isn't one. Requiring
+        # uniformity first rules that out: a blended column has high
+        # internal deviation regardless of what its average happens to be.
+        h, w, _ = rgb_u8.shape
+
+        if edge in ("top", "bottom"):
+            border_color = rgb_u8[0 if edge == "top" else -1].mean(axis=0)
+            indices = range(h) if edge == "top" else range(h - 1, -1, -1)
+            line = lambda i: rgb_u8[i]
+        else:
+            border_color = rgb_u8[:, 0 if edge == "left" else -1].mean(axis=0)
+            indices = range(w) if edge == "left" else range(w - 1, -1, -1)
+            line = lambda i: rgb_u8[:, i]
+
+        count = 0
+        for i in indices:
+            pixels = line(i).astype(np.float64)
+            mean_color = pixels.mean(axis=0)
+            internal_deviation = np.abs(pixels - mean_color).sum(axis=-1).max()
+            border_diff = np.abs(mean_color - border_color).sum()
+            if internal_deviation <= tolerance and border_diff <= tolerance:
+                count += 1
+            else:
+                break
+        return count
+
+    def _detect_trim_bars(self, frame_np, sensitivity):
+        # Solid-color letterbox/pillarbox bars, trimmed independently of any
+        # single global "background color": each edge is checked against
+        # its own sampled color, inward row by row (or column by column),
+        # so this only ever removes genuine full-width/height bars --
+        # unlike bg_sub, it can't be thrown off by interior content that
+        # happens to be close in color to the bar, or by a corner sample
+        # that happens to land on content instead of the bar.
+        frame_uint8 = (frame_np * 255).astype(np.uint8)
+        rgb = frame_uint8[:, :, :3] if frame_uint8.shape[2] >= 3 else frame_uint8
+        h, w = rgb.shape[:2]
+
+        sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
+        # Higher sensitivity = stricter match required to call a row/column
+        # part of the bar (trims less); lower sensitivity is more
+        # forgiving of a noisy/gradient bar (trims more). Tuned against a
+        # real solid bar: genuine bar rows differed from the sampled bar
+        # color by at most ~5; the antialiased seam row jumped to ~60+.
+        tolerance = 5.0 + (1.0 - sensitivity) * 45.0
+        feather = 1  # also trim the ~1px antialiased seam, not just the flat bar
+
+        mask = np.full((h, w), 255, dtype=np.uint8)
+        for edge in ("top", "bottom", "left", "right"):
+            extent = self._detect_bar_extent(rgb, edge, tolerance)
+            if extent <= 0:
+                continue
+            extent = min(extent + feather, h if edge in ("top", "bottom") else w)
+            if edge == "top":
+                mask[:extent, :] = 0
+            elif edge == "bottom":
+                mask[h - extent :, :] = 0
+            elif edge == "left":
+                mask[:, :extent] = 0
+            else:
+                mask[:, w - extent :] = 0
+        return mask
 
     def _mask_to_bbox(self, mask):
         coords = cv2.findNonZero(mask)
@@ -231,29 +246,48 @@ class AutoCropperNode:
             return None
         return int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1
 
-    def _resize_with_padding(self, img, alpha, target_size):
-        tw, th = target_size
-        h, w = img.shape[:2]
+    @staticmethod
+    def _edge_average_pad(image, top, bottom, left, right):
+        # cv2.copyMakeBorder(..., BORDER_REPLICATE) repeats the literal
+        # edge row/column outward. That's fine for a perfectly flat edge,
+        # but any per-pixel noise or dither pattern along that edge gets
+        # stretched into the padding wholesale, which reads as visible
+        # streaking (each noisy column/row keeps its own slightly-off
+        # value, repeated many times, instead of blending away). Filling
+        # each padding band with the *average* color along that edge
+        # avoids this: the padding is flat and streak-free regardless of
+        # how noisy the source edge is.
+        h, w = image.shape[:2]
+        out_shape = (h + top + bottom, w + left + right) + image.shape[2:]
+        out = np.empty(out_shape, dtype=image.dtype)
+        out[top : top + h, left : left + w] = image
 
-        scale = min(tw / w, th / h)
-        new_w = int(round(w * scale))
-        new_h = int(round(h * scale))
+        top_avg = image[0].mean(axis=0) if top > 0 else None
+        bottom_avg = image[-1].mean(axis=0) if bottom > 0 else None
+        left_avg = image[:, 0].mean(axis=0) if left > 0 else None
+        right_avg = image[:, -1].mean(axis=0) if right > 0 else None
 
-        resized_img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-        resized_alpha = cv2.resize(
-            alpha, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4
-        )
+        if top > 0:
+            out[:top, left : left + w] = top_avg
+        if bottom > 0:
+            out[top + h :, left : left + w] = bottom_avg
+        if left > 0:
+            out[top : top + h, :left] = left_avg
+        if right > 0:
+            out[top : top + h, left + w :] = right_avg
 
-        canvas_img = np.zeros((th, tw, img.shape[2]), dtype=img.dtype)
-        canvas_alpha = np.zeros((th, tw), dtype=alpha.dtype)
+        # Corners: blend the two adjacent edge averages so there's no seam
+        # between (e.g.) the top band's color and the left band's color.
+        if top > 0 and left > 0:
+            out[:top, :left] = (top_avg + left_avg) / 2
+        if top > 0 and right > 0:
+            out[:top, left + w :] = (top_avg + right_avg) / 2
+        if bottom > 0 and left > 0:
+            out[top + h :, :left] = (bottom_avg + left_avg) / 2
+        if bottom > 0 and right > 0:
+            out[top + h :, left + w :] = (bottom_avg + right_avg) / 2
 
-        x0 = (tw - new_w) // 2
-        y0 = (th - new_h) // 2
-
-        canvas_img[y0 : y0 + new_h, x0 : x0 + new_w] = resized_img
-        canvas_alpha[y0 : y0 + new_h, x0 : x0 + new_w] = resized_alpha
-
-        return canvas_img, canvas_alpha
+        return out
 
     def _hex_to_rgb(self, hex_color: str):
         hex_color = hex_color.lstrip("#")
@@ -280,21 +314,12 @@ class AutoCropperNode:
         print(f"[AutoCropper] Processing {frames.shape[0]} frames using {method}...")
 
         # Backward compatibility for older workflow values.
-        if method == "anime_seg":
-            method = "anime"
-        elif method == "background_subtraction":
+        if method == "background_subtraction":
             method = "bg_sub"
         elif method in ("sequence_bg_sub", "temporal_bg_sub", "shared_background"):
             method = "shared_bg_sub"
-        elif method in ("bbox_detection", "alpha_channel", "contour_detection"):
-            method = "bbox"
-        elif method in ("pose", "openpose", "nonblack"):
-            method = "non_black"
-
-        if method == "anime":
-            model, device = self._get_model()
-        else:
-            model, device = None, None
+        elif method in ("letterbox", "pillarbox", "trim", "bars"):
+            method = "trim_bars"
 
         frames_np = frames.cpu().numpy()
 
@@ -304,9 +329,6 @@ class AutoCropperNode:
             )
 
         num_frames, H, W, C = frames_np.shape
-        shared_bg_color = None
-        if method == "shared_bg_sub":
-            shared_bg_color = self._estimate_batch_corner_background(frames_np)
 
         if alpha is not None:
             alpha_np = alpha.cpu().numpy()
@@ -340,27 +362,29 @@ class AutoCropperNode:
 
         print(f"[AutoCropper] Analyzing frames with sensitivity {sensitivity}...")
         global_box = None
+        shared_bg_color = None
+
+        if method == "shared_bg_sub":
+            shared_bg_color = self._estimate_batch_corner_background(frames_np)
+            print(
+                "[AutoCropper] Using shared background color "
+                f"{np.round(shared_bg_color, 4).tolist()} across {num_frames} frames"
+            )
 
         for i, frame in enumerate(frames_np):
-            if method == "anime":
-                mask = self._segment_frame_anime(frame, model, device, sensitivity)
-            elif method == "bg_sub":
+            if method == "bg_sub":
                 mask = self._detect_background_subtraction(frame, sensitivity)
+                bbox = self._mask_to_bbox(mask)
             elif method == "shared_bg_sub":
                 mask = self._detect_shared_background_subtraction(
                     frame, shared_bg_color, sensitivity
                 )
-            elif method == "bbox":
-                mask = self._detect_bbox(frame, sensitivity)
-            elif method == "non_black":
-                mask = self._detect_non_black(frame, sensitivity)
+                bbox = self._mask_to_bbox_line_filtered(mask)
+            elif method == "trim_bars":
+                mask = self._detect_trim_bars(frame, sensitivity)
+                bbox = self._mask_to_bbox(mask)
             else:
                 raise ValueError(f"Unknown method: {method}")
-
-            if method == "shared_bg_sub":
-                bbox = self._mask_to_bbox_line_filtered(mask)
-            else:
-                bbox = self._mask_to_bbox(mask)
 
             if bbox is None:
                 continue
@@ -418,21 +442,11 @@ class AutoCropperNode:
                         border_right = max(0, src_x2 - W)
                         border_bottom = max(0, src_y2 - H)
 
-                        ext_frame = cv2.copyMakeBorder(
-                            frame,
-                            border_top,
-                            border_bottom,
-                            border_left,
-                            border_right,
-                            cv2.BORDER_REPLICATE,
+                        ext_frame = self._edge_average_pad(
+                            frame, border_top, border_bottom, border_left, border_right
                         )
-                        ext_alpha = cv2.copyMakeBorder(
-                            alpha_frame,
-                            border_top,
-                            border_bottom,
-                            border_left,
-                            border_right,
-                            cv2.BORDER_REPLICATE,
+                        ext_alpha = self._edge_average_pad(
+                            alpha_frame, border_top, border_bottom, border_left, border_right
                         )
 
                         ex1 = src_x1 + border_left
@@ -474,21 +488,11 @@ class AutoCropperNode:
                             padded_frame[dy1:dy2, dx1:dx2] = frame[iy1:iy2, ix1:ix2]
                             padded_alpha[dy1:dy2, dx1:dx2] = alpha_frame[iy1:iy2, ix1:ix2]
                 elif pad_edge_pixel:
-                    padded_frame = cv2.copyMakeBorder(
-                        cropped_frame,
-                        padding,
-                        padding,
-                        padding,
-                        padding,
-                        cv2.BORDER_REPLICATE,
+                    padded_frame = self._edge_average_pad(
+                        cropped_frame, padding, padding, padding, padding
                     )
-                    padded_alpha = cv2.copyMakeBorder(
-                        cropped_alpha,
-                        padding,
-                        padding,
-                        padding,
-                        padding,
-                        cv2.BORDER_REPLICATE,
+                    padded_alpha = self._edge_average_pad(
+                        cropped_alpha, padding, padding, padding, padding
                     )
                 else:
                     r, g, b = self._hex_to_rgb(padding_color)

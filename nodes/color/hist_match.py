@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ...utils import parse_hex_color
 from .palette_transfer import lab_to_rgb_u8, rgb_u8_to_lab
 
 
@@ -28,10 +29,19 @@ class MatchColorsToReferenceNode:
       no reference needed, but only anchors locally -- drift longer than
       the window survives. window=1 = identity.
 
-    Alpha awareness: an embedded 4th channel weights the statistics, so
-    transparent regions (e.g. a keyed-out chroma background still present
-    in RGB) don't skew the mapping. The target's alpha channel is joined
-    back onto the output untouched.
+    Alpha awareness: statistics are computed from each frame alpha-
+    composited onto background_color (a flat, per-frame-identical fill),
+    not from the raw transparent pixels. A small, animating foreground
+    (e.g. a keyed-out character) is too small and too frame-to-frame
+    variable a sample on its own for a stable mean/std estimate --
+    weighting the background out entirely (rather than filling it with a
+    constant) throws away the large, stable sample that made per-frame
+    statistics reliable in the first place, so the resulting mapping
+    jitters wildly. Compositing onto a fixed color keeps the sample big
+    and consistent across frames without that fill ever being visible:
+    the resulting transform is applied to the frame's real content, and
+    the frame's actual alpha (or embedded alpha channel) passes through
+    to the output completely untouched.
     """
 
     RETURN_TYPES = ("IMAGE",)
@@ -73,6 +83,18 @@ class MatchColorsToReferenceNode:
                         ),
                     },
                 ),
+                "background_color": (
+                    "STRING",
+                    {
+                        "default": "#FFFFFF",
+                        "tooltip": (
+                            "Flat fill used only to compute stable Lab statistics for "
+                            "transparent/masked-out regions -- never appears in the "
+                            "output, which keeps the frame's real alpha untouched. "
+                            "Ignored for frames with no alpha channel and no mask."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "image_ref": (
@@ -90,12 +112,13 @@ class MatchColorsToReferenceNode:
                     "MASK",
                     {
                         "tooltip": (
-                            "Optional per-pixel weighting for image_target's color "
-                            "statistics (e.g. a keyer's mask, so a still-present "
-                            "chroma background doesn't skew the mapping). Unconnected "
-                            "falls back to image_target's own embedded alpha channel "
-                            "if present, otherwise full weight everywhere (as if the "
-                            "mask were all white)."
+                            "Optional per-pixel opacity for image_target used when "
+                            "compositing onto background_color for statistics (e.g. "
+                            "a keyer's mask, so a still-present chroma background "
+                            "doesn't skew the mapping). White = real content, black "
+                            "= background. Unconnected falls back to image_target's "
+                            "own embedded alpha channel if present, otherwise the "
+                            "frame is used as-is (nothing to composite)."
                         )
                     },
                 ),
@@ -105,22 +128,36 @@ class MatchColorsToReferenceNode:
     # ------------------------------------------------------------------ util
 
     @staticmethod
-    def _resolve_weights(frames_u8: np.ndarray, mask: np.ndarray | None = None) -> np.ndarray:
-        """Per-frame opacity weights (N, H, W): explicit mask, embedded alpha, or ones."""
+    def _resolve_alpha(frames_u8: np.ndarray, mask: np.ndarray | None) -> np.ndarray | None:
+        """Per-frame opacity (N, H, W) in [0, 1] used only for background
+        compositing: explicit mask, embedded alpha channel, or None if
+        neither (nothing to composite -- use the frame's RGB as-is)."""
         if mask is not None:
             return mask
         if frames_u8.shape[-1] == 4:
             return frames_u8[..., 3].astype(np.float32) / 255.0
-        return np.ones(frames_u8.shape[:3], dtype=np.float32)
+        return None
 
     @staticmethod
-    def _weighted_lab_stats(frame_u8: np.ndarray, w: np.ndarray) -> np.ndarray:
-        """(2, 3) alpha-weighted per-channel (mean, std) in Lab."""
-        lab = rgb_u8_to_lab(frame_u8[..., :3]).reshape(-1, 3)
-        wr = w.reshape(-1, 1)
-        total = max(wr.sum(), 1e-12)
-        mean = (lab * wr).sum(axis=0) / total
-        var = ((lab - mean) ** 2 * wr).sum(axis=0) / total
+    def _composite_for_stats(
+        frame_u8: np.ndarray, alpha: np.ndarray | None, bg_rgb: np.ndarray
+    ) -> np.ndarray:
+        """RGB (u8) of frame alpha-composited onto a flat background color,
+        used only to compute stable statistics -- the real frame and its
+        alpha are untouched anywhere else."""
+        if alpha is None:
+            return frame_u8[..., :3]
+        rgb = frame_u8[..., :3].astype(np.float32)
+        a = alpha[..., None]
+        composited = rgb * a + bg_rgb[None, None, :] * (1.0 - a)
+        return composited.round().clip(0, 255).astype(np.uint8)
+
+    @staticmethod
+    def _lab_stats(rgb_u8: np.ndarray) -> np.ndarray:
+        """(2, 3) per-channel (mean, std) in Lab over every pixel."""
+        lab = rgb_u8_to_lab(rgb_u8).reshape(-1, 3)
+        mean = lab.mean(axis=0)
+        var = ((lab - mean) ** 2).mean(axis=0)
         return np.stack([mean, np.sqrt(np.maximum(var, 0.0))])
 
     @staticmethod
@@ -144,6 +181,7 @@ class MatchColorsToReferenceNode:
         image_target: torch.Tensor,
         strength: float = 1.0,
         frame_window: int = 9,
+        background_color: str = "#FFFFFF",
         image_ref: torch.Tensor | None = None,
         mask: torch.Tensor | None = None,
     ):
@@ -167,9 +205,18 @@ class MatchColorsToReferenceNode:
                     f"Mask batch size ({tgt_mask_np.shape[0]}) must be 1 or match target batch size ({n})."
                 )
 
-        tgt_w = self._resolve_weights(tgt_np, tgt_mask_np)
+        r, g, b = parse_hex_color(background_color, fallback=(255, 255, 255))
+        bg_rgb = np.array([r, g, b], dtype=np.float32)
 
-        tgt_stats = [self._weighted_lab_stats(tgt_np[i], tgt_w[i]) for i in range(n)]
+        tgt_alpha = self._resolve_alpha(tgt_np, tgt_mask_np)
+        tgt_stats = [
+            self._lab_stats(
+                self._composite_for_stats(
+                    tgt_np[i], tgt_alpha[i] if tgt_alpha is not None else None, bg_rgb
+                )
+            )
+            for i in range(n)
+        ]
         pooled = self._pool_stats(tgt_stats, frame_window)
 
         if image_ref is not None:
@@ -180,9 +227,13 @@ class MatchColorsToReferenceNode:
                 raise ValueError(
                     "Reference batch size must be 1 or match target batch size."
                 )
-            ref_w = self._resolve_weights(ref_np)
+            ref_alpha = self._resolve_alpha(ref_np, None)
             ref_stats = [
-                self._weighted_lab_stats(ref_np[i], ref_w[i])
+                self._lab_stats(
+                    self._composite_for_stats(
+                        ref_np[i], ref_alpha[i] if ref_alpha is not None else None, bg_rgb
+                    )
+                )
                 for i in range(ref_np.shape[0])
             ]
             # Anchored mode: pooled window stats describe the frame (steady
