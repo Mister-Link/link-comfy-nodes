@@ -144,7 +144,14 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     hideOnZoom: false,
   });
 
-  const computeHeight = () => items.length * ROW_HEIGHT + CHROME_HEIGHT;
+  // LiteGraph can render the node at a different UI scale than the CSS
+  // constants above. Measure the actual DOM so the add button remains inside
+  // the node instead of drifting below it as rows are added.
+  const computeHeight = () => {
+    const measuredHeight = root.scrollHeight;
+    const estimatedHeight = items.length * ROW_HEIGHT + CHROME_HEIGHT;
+    return Math.max(estimatedHeight, measuredHeight + 16);
+  };
 
   domWidget.computeSize = function (width) {
     return [width, computeHeight()];

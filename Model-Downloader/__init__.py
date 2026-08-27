@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import json
 import os
 import pty
@@ -25,7 +26,7 @@ event_loop = None
 
 
 def models_base_dir():
-    return os.path.join(os.path.expanduser("~"), "models")
+    return os.path.join(os.path.expanduser("~"), "ComfyUI", "models")
 
 
 class BandwidthThrottler:
@@ -229,16 +230,19 @@ class Downloader:
         return path.split("/")[-1]
 
     @staticmethod
-    def run_download(url, target_dir, download_id, filename, max_speed_mbps, loop):
+    def run_download(url, target_dir, download_id, filename, max_speed_mbps, loop, object_key=None):
         """Execute download using aria2c (converts HuggingFace blob URLs to resolve URLs)."""
         global current_download
         os.makedirs(target_dir, exist_ok=True)
 
         try:
-            direct_url = Downloader.convert_hf_url(url)
-            Downloader._download_with_aria2c(
-                direct_url, target_dir, download_id, filename, max_speed_mbps
-            )
+            if object_key:
+                Downloader._download_with_r2(object_key, target_dir, download_id, filename)
+            else:
+                direct_url = Downloader.convert_hf_url(url)
+                Downloader._download_with_aria2c(
+                    direct_url, target_dir, download_id, filename, max_speed_mbps
+                )
         except Exception as e:
             if download_id in active_downloads:
                 active_downloads[download_id]["status"] = "failed"
@@ -355,6 +359,40 @@ class Downloader:
             and os.path.exists(final_path)
             and os.path.getsize(final_path) > 0
         )
+
+        Downloader._finalize(download_id, filename, target_dir, success)
+
+    @staticmethod
+    def _download_with_r2(object_key, target_dir, download_id, filename):
+        """Download a model from the configured R2 bucket through the r2 CLI."""
+        final_path = os.path.join(target_dir, filename)
+        partial_path = final_path + ".part"
+        process = subprocess.Popen(
+            ["r2", "get", object_key, partial_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        while process.poll() is None:
+            if download_id not in active_downloads:
+                process.terminate()
+                return
+            active_downloads[download_id]["progress"] = (
+                "50" if os.path.exists(partial_path) else "5"
+            )
+            time.sleep(1)
+
+        _, stderr = process.communicate()
+        success = (
+            process.returncode == 0
+            and os.path.exists(partial_path)
+            and os.path.getsize(partial_path) > 0
+        )
+        if success:
+            os.replace(partial_path, final_path)
+        elif stderr:
+            print(f"r2 download failed for {object_key}: {stderr}")
 
         Downloader._finalize(download_id, filename, target_dir, success)
 
@@ -487,7 +525,8 @@ class DownloadQueue:
 
     @staticmethod
     async def add_to_queue(
-        url, target_dir, download_id, filename, max_speed_mbps, loop, shards=None
+        url, target_dir, download_id, filename, max_speed_mbps, loop, shards=None,
+        object_key=None
     ):
         """Add download to queue."""
         global current_download
@@ -500,6 +539,7 @@ class DownloadQueue:
                 "download_id": download_id,
                 "filename": filename,
                 "max_speed_mbps": max_speed_mbps,
+                "object_key": object_key,
             }
         )
 
@@ -536,13 +576,16 @@ class DownloadQueue:
         else:
             loop.run_in_executor(
                 None,
-                Downloader.run_download,
-                dl["url"],
-                dl["target_dir"],
-                dl["download_id"],
-                dl["filename"],
-                dl["max_speed_mbps"],
-                loop,
+                functools.partial(
+                    Downloader.run_download,
+                    dl["url"],
+                    dl["target_dir"],
+                    dl["download_id"],
+                    dl["filename"],
+                    dl["max_speed_mbps"],
+                    loop,
+                    object_key=dl.get("object_key"),
+                ),
             )
 
 
@@ -619,16 +662,27 @@ async def download_model(request):
         filename = body.get("filename")
         max_speed_mbps = body.get("max_speed_mbps")
 
-        if not url and not shards:
+        if not path or not filename:
             return web.json_response(
-                {"ok": False, "error": "URL or shards required"}, status=400
-            )
-        if not path:
-            return web.json_response(
-                {"ok": False, "error": "path required"}, status=400
+                {"ok": False, "error": "path and filename required"}, status=400
             )
 
         download_id = f"{filename}_{id(asyncio.current_task())}"
+        models_data, _ = ModelManager.load_models()
+        entry = next(
+            (m for m in (models_data or [])
+             if m.get("filename", "").lower() == filename.lower()),
+            None,
+        )
+        object_key = None
+        if entry and (entry.get("source") == "r2" or not entry.get("url")):
+            object_key = entry.get("object_key") or f"{entry.get('path', path).strip('/')}/{filename}"
+
+        if not object_key and not url:
+            return web.json_response(
+                {"ok": False, "error": "URL required for non-R2 model"}, status=400
+            )
+
         target_dir = os.path.join(models_base_dir(), path)
 
         active_downloads[download_id] = {
@@ -640,7 +694,8 @@ async def download_model(request):
 
         loop = asyncio.get_event_loop()
         await DownloadQueue.add_to_queue(
-            url, target_dir, download_id, filename, max_speed_mbps, loop, shards=shards
+            url, target_dir, download_id, filename, max_speed_mbps, loop,
+            shards=shards, object_key=object_key
         )
 
         return web.json_response({"ok": True, "download_id": download_id})

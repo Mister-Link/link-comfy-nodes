@@ -17,7 +17,7 @@ from .image import (
     SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
 )
-from .latent import SnapToDivisible
+from .latent import AspectToResolution, SnapToDivisible
 from .motion import (
     HybridMaMoMaskExportFBX,
     HybridMaMoMaskGenerate,
@@ -55,6 +55,7 @@ __all__ = [
     "AdvancedStringConcat",
     "AverageMaskRegionSizeNode",
     "DropdownSelectNode",
+    "AspectToResolution",
     "SnapToDivisible",
     "HybridMaMoMaskLoader",
     "HybridMaMoMaskGenerate",
