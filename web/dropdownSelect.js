@@ -17,6 +17,8 @@ function ensureStyles() {
     .lc-dropdown-select {
       box-sizing: border-box;
       width: 100%;
+      max-width: 100%;
+      min-width: 0;
       padding: 4px 2px 0;
       display: flex;
       flex-direction: column;
@@ -25,11 +27,17 @@ function ensureStyles() {
       font-size: 12px;
     }
     .lc-dropdown-select-rows {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 4px;
     }
     .lc-dropdown-select-row {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
       display: flex;
       align-items: center;
       gap: 4px;
@@ -76,6 +84,8 @@ function ensureStyles() {
       background: rgba(255, 80, 80, 0.2);
     }
     .lc-dropdown-select-add {
+      width: 100%;
+      max-width: 100%;
       box-sizing: border-box;
       border: 1px dashed rgba(255, 255, 255, 0.2);
       border-radius: 4px;
