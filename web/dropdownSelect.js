@@ -163,6 +163,20 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     return Math.max(estimatedHeight, measuredHeight + 16);
   };
 
+  // The DOM widget wrapper can be wider than the canvas node (especially when
+  // slots or zoom scaling are involved). Anchor the UI to the actual node
+  // width instead of allowing the wrapper's intrinsic width to leak through.
+  const syncWidthToNode = () => {
+    const nodeWidth = Number(node.size?.[0]);
+    const scale = Number(app.canvas?.ds?.scale) || 1;
+    if (!Number.isFinite(nodeWidth) || nodeWidth <= 0) {
+      return;
+    }
+    const contentWidth = Math.max(0, nodeWidth * scale - 20);
+    root.style.width = contentWidth + "px";
+    root.style.maxWidth = contentWidth + "px";
+  };
+
   domWidget.computeSize = function (width) {
     return [width, computeHeight()];
   };
@@ -171,6 +185,7 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
     const computed = node.computeSize();
     const width = Math.max(computed[0], node.size?.[0] ?? MIN_NODE_WIDTH, MIN_NODE_WIDTH);
     node.setSize([width, computed[1]]);
+    syncWidthToNode();
     node.setDirtyCanvas(true, true);
   };
 
@@ -196,6 +211,7 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
   };
 
   const renderRows = () => {
+    syncWidthToNode();
     rowsContainer.innerHTML = "";
     items.forEach((item, index) => {
       const row = document.createElement("div");
@@ -282,6 +298,7 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
   updateSelectionHighlight();
 
   return {
+    syncWidthToNode,
     refreshFromWidgets() {
       items = parseOptions(optionsWidget.value);
       selected = selectedWidget.value;
@@ -314,6 +331,13 @@ app.registerExtension({
       hideWidgetForGood(selectedWidget);
 
       this._dropdownSelectUI = buildDropdownSelectUI(this, optionsWidget, selectedWidget);
+
+      const onResize = this.onResize;
+      this.onResize = function () {
+        const result = onResize?.apply(this, arguments);
+        this._dropdownSelectUI?.syncWidthToNode();
+        return result;
+      };
 
       if ((this.size?.[0] ?? 0) < MIN_NODE_WIDTH) {
         this.setSize([MIN_NODE_WIDTH, this.size?.[1] ?? 0]);
