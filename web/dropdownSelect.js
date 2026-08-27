@@ -168,7 +168,9 @@ function buildDropdownSelectUI(node, optionsWidget, selectedWidget) {
   // width instead of allowing the wrapper's intrinsic width to leak through.
   const syncWidthToNode = () => {
     const nodeWidth = Number(node.size?.[0]);
-    const scale = Number(app.canvas?.ds?.scale) || 1;
+    const graphScale = Number(app.canvas?.ds?.scale) || 1;
+    const pixelRatio = Number(window.devicePixelRatio) || 1;
+    const scale = graphScale * pixelRatio;
     if (!Number.isFinite(nodeWidth) || nodeWidth <= 0) {
       return;
     }
