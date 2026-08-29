@@ -37,6 +37,7 @@ from .nodes import (
     SnapToDivisible,
     SpritesheetBuilderNode,
     SpriteScaleCalculatorNode,
+    NormalizeSpriteEntityHeightNode,
     SpritesheetPreviewNode,
     ShiftPoseFramesNode,
     ShiftImageBatchNode,
