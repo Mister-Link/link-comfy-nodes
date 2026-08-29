@@ -128,10 +128,15 @@ class StabilizeFramesNode:
                 "spriteSourceSize": {"x": dst_x, "y": dst_y, "w": w, "h": h},
             })
 
+        # `pivot_x/y` is the internal thick-core anchor used to remove
+        # generation drift. Runtime entities in the game are historically
+        # positioned at the center of their frame, so expose that independent
+        # render pivot while retaining the core anchor for diagnostics.
         metadata = {
             "format": "link-comfy-nodes/stabilization-v1",
             "sourceSize": {"w": output_w, "h": output_h},
-            "pivot": {"x": pivot_x, "y": pivot_y},
+            "pivot": {"x": round(output_w / 2), "y": round(output_h / 2)},
+            "stabilizationPivot": {"x": pivot_x, "y": pivot_y},
             "frames": manifest_frames,
         }
         return (
