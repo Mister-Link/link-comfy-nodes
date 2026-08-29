@@ -8,15 +8,33 @@ import torch
 class StabilizeSpriteSequenceNode:
     """Normalize entity size and ground position across a frame sequence.
 
-    Per-frame alpha-bbox detection is noisy on its own (a stray hair wisp or
-    antialiased fringe pixel can swing the detected bbox by several pixels
-    frame to frame), and cropping to an integer pixel box before resizing
-    compounds that with rounding jitter. This avoids both: it tracks each
-    frame's entity center/ground/height across the whole sequence, smooths
-    those three signals temporally to remove per-frame detection noise, then
-    warps each frame onto the canvas with a single subpixel-accurate affine
-    transform (scale + translate) instead of a discrete crop-then-resize.
+    Fully automatic -- no tunables. Three things make this work without any
+    knobs to fiddle with:
+
+      1. Mask polarity is auto-detected per frame by sampling the border
+         (whichever value dominates the border is background, regardless of
+         whether that's 0 or 1). Assuming a fixed polarity broke badly on a
+         mask where the background was 1 and the subject 0 -- the "content"
+         bbox came out as basically the whole canvas, so nothing actually
+         got cropped tighter.
+      2. target_height is derived automatically: the tightest height that
+         fills the canvas as much as possible without clipping any frame's
+         (temporally smoothed) width against the canvas width.
+      3. Per-frame alpha-bbox detection is noisy on its own (a stray hair
+         wisp or antialiased fringe pixel can swing the detected bbox by
+         several pixels frame to frame), and cropping to an integer pixel
+         box before resizing compounds that with rounding jitter. This
+         tracks each frame's entity center/ground/height across the whole
+         sequence, smooths those three signals temporally to remove
+         per-frame detection noise, then warps each frame onto the canvas
+         with a single subpixel-accurate affine transform (scale +
+         translate) instead of a discrete crop-then-resize.
     """
+
+    SMOOTH_WINDOW = 5
+    FILL_MARGIN = 0.98
+    ANCHOR_X_FRAC = 0.5
+    ANCHOR_Y_FRAC = 0.98
 
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("images", "masks")
@@ -33,59 +51,27 @@ class StabilizeSpriteSequenceNode:
                 "pixel_height": ("INT", {"default": 160, "min": 1, "max": 16384, "step": 1}),
                 "upscaled_width": ("INT", {"default": 512, "min": 1, "max": 65536, "step": 1}),
                 "upscaled_height": ("INT", {"default": 1152, "min": 1, "max": 65536, "step": 1}),
-                "target_height_frac": (
-                    "FLOAT",
-                    {
-                        "default": 0.78,
-                        "min": 0.01,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": "Entity height as a fraction of upscaled_height after normalization.",
-                    },
-                ),
-                "anchor_x_frac": (
-                    "FLOAT",
-                    {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
-                "anchor_y_frac": (
-                    "FLOAT",
-                    {
-                        "default": 0.92,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": "Where the entity's ground contact point lands, as a fraction down the canvas.",
-                    },
-                ),
-                "smooth_window": (
-                    "INT",
-                    {
-                        "default": 5,
-                        "min": 1,
-                        "max": 63,
-                        "step": 2,
-                        "tooltip": "Frames averaged together when tracking center/ground/height. Larger = smoother but laggier.",
-                    },
-                ),
-                "alpha_threshold": (
-                    "FLOAT",
-                    {"default": 0.04, "min": 0.0, "max": 1.0, "step": 0.01},
-                ),
             }
         }
 
     @staticmethod
-    def _largest_component_bbox(mask_frame, threshold):
-        mask_u8 = (mask_frame > threshold).astype(np.uint8)
-        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    def _foreground_bbox(mask_frame):
+        h, w = mask_frame.shape
+        border = np.concatenate(
+            [mask_frame[0, :], mask_frame[-1, :], mask_frame[:, 0], mask_frame[:, -1]]
+        )
+        bg_value = float(np.median(border))
+        fg = (np.abs(mask_frame - bg_value) > 0.5).astype(np.uint8)
+        num_labels, _, stats, _ = cv2.connectedComponentsWithStats(fg, connectivity=8)
         if num_labels <= 1:
-            return None
+            return None, bg_value
         largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        x, y, w, h, _ = stats[largest]
-        return x, y, x + w, y + h
+        x, y, w2, h2, _ = stats[largest]
+        return (x, y, x + w2, y + h2), bg_value
 
-    @staticmethod
-    def _smooth(signal, window):
+    @classmethod
+    def _smooth(cls, signal):
+        window = cls.SMOOTH_WINDOW
         if window <= 1:
             return signal
         pad = window // 2
@@ -93,20 +79,7 @@ class StabilizeSpriteSequenceNode:
         kernel = np.ones(window) / window
         return np.convolve(padded, kernel, mode="valid")
 
-    def stabilize(
-        self,
-        image,
-        mask,
-        pixel_width,
-        pixel_height,
-        upscaled_width,
-        upscaled_height,
-        target_height_frac=0.78,
-        anchor_x_frac=0.5,
-        anchor_y_frac=0.92,
-        smooth_window=5,
-        alpha_threshold=0.04,
-    ):
+    def stabilize(self, image, mask, pixel_width, pixel_height, upscaled_width, upscaled_height):
         images = image.detach().cpu().numpy().astype(np.float32)
         masks = mask.detach().cpu().numpy().astype(np.float32)
         if masks.ndim == 4 and masks.shape[-1] == 1:
@@ -121,37 +94,48 @@ class StabilizeSpriteSequenceNode:
         num_frames, _, _, num_channels = images.shape
         canvas_w, canvas_h = int(upscaled_width), int(upscaled_height)
         output_w, output_h = int(pixel_width), int(pixel_height)
-        target_height = canvas_h * float(target_height_frac)
-        anchor_x = canvas_w * float(anchor_x_frac)
-        anchor_y = canvas_h * float(anchor_y_frac)
 
         raw_center_x = np.zeros(num_frames, dtype=np.float64)
         raw_ground_y = np.zeros(num_frames, dtype=np.float64)
         raw_height = np.zeros(num_frames, dtype=np.float64)
+        raw_width = np.zeros(num_frames, dtype=np.float64)
+        bg_values = np.zeros(num_frames, dtype=np.float64)
 
         for i in range(num_frames):
             frame_mask = masks[0 if masks.shape[0] == 1 else i]
-            bbox = self._largest_component_bbox(frame_mask, alpha_threshold)
+            bbox, bg_value = self._foreground_bbox(frame_mask)
             if bbox is None:
-                h, w = frame_mask.shape
-                x1, y1, x2, y2 = 0, 0, w, h
+                fh, fw = frame_mask.shape
+                x1, y1, x2, y2 = 0, 0, fw, fh
             else:
                 x1, y1, x2, y2 = bbox
             raw_center_x[i] = (x1 + x2) / 2.0
             raw_ground_y[i] = y2
             raw_height[i] = max(1, y2 - y1)
+            raw_width[i] = max(1, x2 - x1)
+            bg_values[i] = bg_value
 
-        window = max(1, int(smooth_window))
-        smooth_center_x = self._smooth(raw_center_x, window)
-        smooth_ground_y = self._smooth(raw_ground_y, window)
-        smooth_height = self._smooth(raw_height, window)
+        smooth_center_x = self._smooth(raw_center_x)
+        smooth_ground_y = self._smooth(raw_ground_y)
+        smooth_height = self._smooth(raw_height)
+        smooth_width = self._smooth(raw_width)
 
-        border_value = (0.0,) * num_channels
+        # Tightest target_height that fills the canvas as much as possible
+        # without ever clipping any frame's (smoothed) width against canvas_w.
+        max_target_height = float(canvas_h)
+        for i in range(num_frames):
+            aspect = smooth_width[i] / smooth_height[i]
+            max_target_height = min(max_target_height, canvas_w / aspect)
+        target_height = max_target_height * self.FILL_MARGIN
+
+        anchor_x = canvas_w * self.ANCHOR_X_FRAC
+        anchor_y = canvas_h * self.ANCHOR_Y_FRAC
 
         out_images, out_masks = [], []
         for i in range(num_frames):
             frame = images[i]
             frame_mask = masks[0 if masks.shape[0] == 1 else i]
+            bg_value = bg_values[0 if masks.shape[0] == 1 else i]
 
             scale = target_height / smooth_height[i]
             tx = anchor_x - smooth_center_x[i] * scale
@@ -164,7 +148,7 @@ class StabilizeSpriteSequenceNode:
                 (canvas_w, canvas_h),
                 flags=cv2.INTER_LANCZOS4,
                 borderMode=cv2.BORDER_CONSTANT,
-                borderValue=border_value,
+                borderValue=(0.0,) * num_channels,
             )
             warped_mask = cv2.warpAffine(
                 frame_mask,
@@ -172,7 +156,7 @@ class StabilizeSpriteSequenceNode:
                 (canvas_w, canvas_h),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0.0,
+                borderValue=float(bg_value),
             )
 
             out_images.append(cv2.resize(warped_frame, (output_w, output_h), interpolation=cv2.INTER_AREA))
