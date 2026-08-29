@@ -89,11 +89,29 @@ class SpritesheetBuilderNode:
             placement = manifest["frames"]
             trimmed = []
             for index, frame in enumerate(frame_list):
-                rect = placement[index].get("spriteSourceSize", {})
-                x, y = int(rect.get("x", -1)), int(rect.get("y", -1))
-                w, h = int(rect.get("w", 0)), int(rect.get("h", 0))
-                if x < 0 or y < 0 or w < 1 or h < 1 or x + w > frame.shape[1] or y + h > frame.shape[0]:
-                    raise ValueError(f"Invalid spriteSourceSize for frame {index}")
+                # The image arriving through ComfyUI is authoritative for the
+                # crop. It can differ by a pixel from metadata generated before
+                # graph serialization or a node reload, so never reject a valid
+                # alpha-bearing frame solely because its saved rectangle is
+                # marginally outside the current canvas.
+                frame_np = frame.numpy()
+                if frame_np.shape[-1] == 4:
+                    ys, xs = np.where(frame_np[..., 3] > 0.02)
+                else:
+                    ys, xs = np.array([]), np.array([])
+
+                if xs.size:
+                    x, y = int(xs.min()), int(ys.min())
+                    w, h = int(xs.max()) + 1 - x, int(ys.max()) + 1 - y
+                else:
+                    rect = placement[index].get("spriteSourceSize", {})
+                    x, y = int(rect.get("x", 0)), int(rect.get("y", 0))
+                    x = max(0, min(x, frame.shape[1] - 1))
+                    y = max(0, min(y, frame.shape[0] - 1))
+                    w = max(1, min(int(rect.get("w", frame.shape[1])), frame.shape[1] - x))
+                    h = max(1, min(int(rect.get("h", frame.shape[0])), frame.shape[0] - y))
+
+                placement[index]["spriteSourceSize"] = {"x": x, "y": y, "w": w, "h": h}
                 trimmed.append(frame[y:y + h, x:x + w])
             frame_list = trimmed
 
