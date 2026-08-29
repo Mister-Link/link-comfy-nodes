@@ -165,6 +165,7 @@ class SpritesheetBuilderNode:
                 record["sourceSize"] = manifest["sourceSize"]
                 record["spriteSourceSize"] = placement[index]["spriteSourceSize"]
                 record["pivot"] = manifest["pivot"]
+                record["motionOffset"] = placement[index].get("motionOffset", {"x": 0, "y": 0})
             frame_metadata.append(record)
 
         result = torch.from_numpy(spritesheet).unsqueeze(0)
