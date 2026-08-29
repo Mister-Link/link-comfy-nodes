@@ -75,18 +75,18 @@ class MatchColorsToReferenceNode:
     def INPUT_TYPES(cls):
         return {"required": {
             "image_target": ("IMAGE",),
-            "preset": (["Balanced", "Gentle", "Strong", "Stable video"], {"default": "Balanced"}),
-            "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+            "strength": ("FLOAT", {"default": 0.88, "min": 0.0, "max": 1.0, "step": 0.01}),
+            "max_fit_samples": ("INT", {"default": 60000, "min": 1000, "max": 500000, "step": 1000}),
+            "per_bin_cap": ("INT", {"default": 300, "min": 1, "max": 10000, "step": 10}),
+            "bin_L": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 50.0, "step": 0.5}),
+            "bin_ab": ("FLOAT", {"default": 6.0, "min": 0.1, "max": 50.0, "step": 0.5}),
+            "trim_low": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 49.0, "step": 0.1}),
+            "trim_high": ("FLOAT", {"default": 99.5, "min": 51.0, "max": 100.0, "step": 0.1}),
+            "seed": ("INT", {"default": 7, "min": 0, "max": 0x7fffffff}),
         }, "optional": {"image_ref": ("IMAGE",)}}
 
-    PRESETS = {
-        "Balanced": (60000, 300, 4.0, 6.0, 0.5, 99.5),
-        "Gentle": (60000, 300, 4.0, 6.0, 0.5, 99.5),
-        "Strong": (60000, 400, 3.5, 5.0, 0.25, 99.75),
-        "Stable video": (50000, 200, 5.0, 8.0, 1.0, 99.0),
-    }
-
-    def match(self, image_target, preset="Balanced", strength=1.0, image_ref=None):
+    def match(self, image_target, strength=0.88, max_fit_samples=60000,
+              per_bin_cap=300, bin_L=4.0, bin_ab=6.0, trim_low=0.5, trim_high=99.5, seed=7, image_ref=None):
         if strength <= 0.0:
             return (image_target,)
         target = image_target.detach().cpu().numpy().clip(0.0, 1.0)
@@ -96,10 +96,9 @@ class MatchColorsToReferenceNode:
         if reference.shape[0] not in (1, target.shape[0]):
             raise ValueError("Reference batch must contain one image or match the target batch size.")
         results = []
-        max_fit_samples, per_bin_cap, bin_l, bin_ab, trim_low, trim_high = self.PRESETS.get(preset, self.PRESETS["Balanced"])
         for i, frame in enumerate(target):
             ref = reference[0 if reference.shape[0] == 1 else i]
-            target_lab, moved_lab = _transform(ref[..., :3], frame[..., :3], max_fit_samples, per_bin_cap, bin_l, bin_ab, trim_low, trim_high, 7 + i * 2)
+            target_lab, moved_lab = _transform(ref[..., :3], frame[..., :3], int(max_fit_samples), int(per_bin_cap), float(bin_L), float(bin_ab), float(trim_low), float(trim_high), int(seed) + i * 2)
             out = _lab_to_rgb_float(target_lab * (1.0 - float(strength)) + moved_lab * float(strength))
             if frame.shape[-1] == 4:
                 out = np.dstack((out, frame[..., 3]))
