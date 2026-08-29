@@ -6,7 +6,7 @@ import torch
 
 
 class NormalizeSpriteEntityHeightNode:
-    """Scale masked entities to a standard height while preserving frame canvases."""
+    """Fit cropped frames into the calculator's upscaled canvas, then reduce them."""
 
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("images", "masks")
@@ -19,30 +19,33 @@ class NormalizeSpriteEntityHeightNode:
             "required": {
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
+                "pixel_width": ("INT", {"default": 70, "min": 1, "max": 16384, "step": 1}),
                 "pixel_height": ("INT", {"default": 160, "min": 1, "max": 16384, "step": 1}),
+                "upscaled_width": ("INT", {"default": 512, "min": 1, "max": 65536, "step": 1}),
+                "upscaled_height": ("INT", {"default": 1152, "min": 1, "max": 65536, "step": 1}),
                 "anchor": (["center", "bottom_center", "top_center"], {"default": "center"}),
             }
         }
 
     @staticmethod
-    def _bounds(mask: np.ndarray):
-        # ComfyUI's MASK convention here is inverted: 0 is entity/content,
-        # 1 is empty/transparent background (as emitted by Frames).
-        ys, xs = np.where(mask < 0.5)
-        if xs.size == 0:
+    def _offset(canvas_w, canvas_h, content_w, content_h, anchor):
+        x = (canvas_w - content_w) // 2
+        if anchor == "bottom_center":
+            y = canvas_h - content_h
+        elif anchor == "top_center":
+            y = 0
+        else:
+            y = (canvas_h - content_h) // 2
+        return max(0, x), max(0, y)
+
+    @staticmethod
+    def _mask_bbox(mask_frame, threshold=0.02):
+        ys, xs = np.where(mask_frame > threshold)
+        if ys.size == 0:
             return None
         return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
-    @staticmethod
-    def _anchor(bounds, anchor):
-        x0, y0, x1, y1 = bounds
-        if anchor == "bottom_center":
-            return (0.5 * (x0 + x1 - 1), float(y1 - 1))
-        if anchor == "top_center":
-            return (0.5 * (x0 + x1 - 1), float(y0))
-        return (0.5 * (x0 + x1 - 1), 0.5 * (y0 + y1 - 1))
-
-    def normalize(self, image, mask, pixel_height, anchor="center"):
+    def normalize(self, image, mask, pixel_width, pixel_height, upscaled_width, upscaled_height, anchor="center"):
         images = image.detach().cpu().numpy().astype(np.float32)
         masks = mask.detach().cpu().numpy().astype(np.float32)
         if masks.ndim == 4 and masks.shape[-1] == 1:
@@ -54,32 +57,41 @@ class NormalizeSpriteEntityHeightNode:
         if masks.shape[1:] != images.shape[1:3]:
             raise ValueError("Mask dimensions must match image dimensions.")
 
+        canvas_w, canvas_h = int(upscaled_width), int(upscaled_height)
+        output_w, output_h = int(pixel_width), int(pixel_height)
+
         out_images, out_masks = [], []
         for i, frame in enumerate(images):
             frame_mask = masks[0 if masks.shape[0] == 1 else i]
-            bounds = self._bounds(frame_mask)
-            if bounds is None:
-                out_images.append(frame.copy())
-                out_masks.append(frame_mask.copy())
-                continue
-            x0, y0, x1, y1 = bounds
-            scale = float(pixel_height) / max(1, y1 - y0)
-            ax, ay = self._anchor(bounds, anchor)
-            matrix = np.array(
-                [[scale, 0.0, ax - scale * ax], [0.0, scale, ay - scale * ay]],
-                dtype=np.float32,
-            )
-            h, w = frame.shape[:2]
-            resized = cv2.warpAffine(
-                frame, matrix, (w, h), flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REPLICATE,
-            )
-            resized_mask = cv2.warpAffine(
-                frame_mask, matrix, (w, h), flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT, borderValue=1,
-            )
-            out_images.append(resized)
-            out_masks.append(np.clip(resized_mask, 0.0, 1.0))
+
+            # Crop to this frame's own alpha content first -- each frame in a
+            # sequence can have a different amount of transparent padding
+            # around the entity (e.g. a jump pose rendered smaller within
+            # the same canvas), so a bbox shared across the batch (as
+            # AutoCropper produces) doesn't equalize apparent entity size.
+            # Fitting per-frame content into the canvas, rather than the
+            # whole per-frame image, is what actually normalizes height.
+            bbox = self._mask_bbox(frame_mask)
+            if bbox is None:
+                content, content_mask = frame, frame_mask
+            else:
+                x1, y1, x2, y2 = bbox
+                content, content_mask = frame[y1:y2, x1:x2], frame_mask[y1:y2, x1:x2]
+
+            content_h, content_w = content.shape[:2]
+            fit = min(canvas_w / content_w, canvas_h / content_h)
+            fitted_w = max(1, min(canvas_w, round(content_w * fit)))
+            fitted_h = max(1, min(canvas_h, round(content_h * fit)))
+            offset_x, offset_y = self._offset(canvas_w, canvas_h, fitted_w, fitted_h, anchor)
+
+            fitted = cv2.resize(content, (fitted_w, fitted_h), interpolation=cv2.INTER_LANCZOS4)
+            fitted_mask = cv2.resize(content_mask, (fitted_w, fitted_h), interpolation=cv2.INTER_LINEAR)
+            canvas = np.zeros((canvas_h, canvas_w, frame.shape[2]), dtype=np.float32)
+            canvas_mask = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+            canvas[offset_y:offset_y + fitted_h, offset_x:offset_x + fitted_w] = fitted
+            canvas_mask[offset_y:offset_y + fitted_h, offset_x:offset_x + fitted_w] = fitted_mask
+            out_images.append(cv2.resize(canvas, (output_w, output_h), interpolation=cv2.INTER_AREA))
+            out_masks.append(cv2.resize(canvas_mask, (output_w, output_h), interpolation=cv2.INTER_AREA))
 
         output_images = torch.from_numpy(np.stack(out_images)).to(image.device).clamp(0.0, 1.0)
         output_masks = torch.from_numpy(np.stack(out_masks)).to(mask.device).clamp(0.0, 1.0)

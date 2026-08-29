@@ -2,10 +2,12 @@ from __future__ import annotations
 
 
 class SpriteScaleCalculatorNode:
-    RETURN_TYPES = ("INT", "INT")
+    RETURN_TYPES = ("INT", "INT", "INT", "INT")
     RETURN_NAMES = (
         "pixel_width",
         "pixel_height",
+        "upscaled_width",
+        "upscaled_height",
     )
     FUNCTION = "calculate_pixels"
     CATEGORY = "image/transform"
@@ -20,8 +22,18 @@ class SpriteScaleCalculatorNode:
     _SPIRE_PRESET_HEIGHT = 80
 
     _PRESETS = {
-        "Spirie": (_SPIRE_PRESET_WIDTH, _SPIRE_PRESET_HEIGHT),
-        "Custom": None,
+        "Spirie": {
+            "width": _SPIRE_PRESET_WIDTH,
+            "height": _SPIRE_PRESET_HEIGHT,
+            "upscaled_width": 512,
+            "upscaled_height": 1152,
+        },
+        # Custom dimensions currently use the same canvas until a separate
+        # named character preset defines another canonical large size.
+        "Custom": {
+            "upscaled_width": 512,
+            "upscaled_height": 1152,
+        },
     }
 
     @classmethod
@@ -48,8 +60,11 @@ class SpriteScaleCalculatorNode:
     ):
         pixel_width = 0 if width <= 0 else max(1, round(width * self._PIXELS_PER_UNIT))
         pixel_height = 0 if height <= 0 else max(1, round(height * self._PIXELS_PER_UNIT))
+        preset_values = self._PRESETS.get(preset, self._PRESETS["Custom"])
 
         return (
             int(pixel_width),
             int(pixel_height),
+            int(preset_values["upscaled_width"]),
+            int(preset_values["upscaled_height"]),
         )
