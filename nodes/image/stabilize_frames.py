@@ -94,7 +94,12 @@ class StabilizeFramesNode:
             content_alpha = scaled_alpha[y1:y2, x1:x2]
             local_anchor_x, local_anchor_y = _core_anchor(content_alpha)
             h, w = content_alpha.shape
-            prepared.append((content, content_alpha, local_anchor_x, local_anchor_y))
+            # This is the original high-resolution core position before the
+            # frame is re-anchored. Its sequence-relative movement is emitted
+            # as metadata so runtime playback can restore intentional bobbing.
+            source_anchor_x = cx1 + local_anchor_x
+            source_anchor_y = cy1 + local_anchor_y
+            prepared.append((content, content_alpha, local_anchor_x, local_anchor_y, source_anchor_x, source_anchor_y))
             max_left = max(max_left, local_anchor_x)
             max_right = max(max_right, w - local_anchor_x)
             max_top = max(max_top, local_anchor_y)
@@ -105,18 +110,22 @@ class StabilizeFramesNode:
         # frame at -1 or one pixel beyond a no-padding canvas.
         pivot_x = int(np.ceil(max_left))
         pivot_y = int(np.ceil(max_top))
+        reference_anchor_x = float(np.median([entry[4] for entry in prepared]))
+        reference_anchor_y = float(np.median([entry[5] for entry in prepared]))
         placements = []
         output_w = output_h = 0
-        for content, content_alpha, local_x, local_y in prepared:
+        for content, content_alpha, local_x, local_y, source_x, source_y in prepared:
             h, w = content_alpha.shape
             dst_x = round(pivot_x - local_x)
             dst_y = round(pivot_y - local_y)
-            placements.append((content, content_alpha, dst_x, dst_y))
+            motion_x = round(source_x - reference_anchor_x)
+            motion_y = round(source_y - reference_anchor_y)
+            placements.append((content, content_alpha, dst_x, dst_y, motion_x, motion_y))
             output_w = max(output_w, dst_x + w)
             output_h = max(output_h, dst_y + h)
 
         result, output_masks, manifest_frames = [], [], []
-        for index, (content, content_alpha, dst_x, dst_y) in enumerate(placements):
+        for index, (content, content_alpha, dst_x, dst_y, motion_x, motion_y) in enumerate(placements):
             h, w = content_alpha.shape
             canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, :3] = content
@@ -126,6 +135,7 @@ class StabilizeFramesNode:
             manifest_frames.append({
                 "index": index,
                 "spriteSourceSize": {"x": dst_x, "y": dst_y, "w": w, "h": h},
+                "motionOffset": {"x": motion_x, "y": motion_y},
             })
 
         # `pivot_x/y` is the internal thick-core anchor used to remove

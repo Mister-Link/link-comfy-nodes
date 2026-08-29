@@ -100,6 +100,12 @@ class SpritesheetBuilderNode:
                 "x": round(manifest["pivot"]["x"] * scale_x),
                 "y": round(manifest["pivot"]["y"] * scale_y),
             }
+            for record in manifest["frames"]:
+                motion = record.get("motionOffset", {})
+                record["motionOffset"] = {
+                    "x": round(motion.get("x", 0) * scale_x),
+                    "y": round(motion.get("y", 0) * scale_y),
+                }
             placement = manifest["frames"]
             trimmed = []
             for index, frame in enumerate(frame_list):
