@@ -100,19 +100,25 @@ class StabilizeFramesNode:
             max_top = max(max_top, local_anchor_y)
             max_bottom = max(max_bottom, h - local_anchor_y)
 
-        # The shared canvas is the exact union needed around the common pivot.
-        # Do not add padding: the builder trims and records placement metadata.
-        output_w = round(max_left + max_right)
-        output_h = round(max_top + max_bottom)
-        pivot_x = round(max_left)
-        pivot_y = round(max_top)
-
-        result, output_masks, manifest_frames = [], [], []
-        for index, (content, content_alpha, local_x, local_y) in enumerate(prepared):
+        # Use the exact integer union of the rounded placements. Rounding the
+        # floating-point core anchor independently can otherwise put an edge
+        # frame at -1 or one pixel beyond a no-padding canvas.
+        pivot_x = int(np.ceil(max_left))
+        pivot_y = int(np.ceil(max_top))
+        placements = []
+        output_w = output_h = 0
+        for content, content_alpha, local_x, local_y in prepared:
             h, w = content_alpha.shape
-            canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
             dst_x = round(pivot_x - local_x)
             dst_y = round(pivot_y - local_y)
+            placements.append((content, content_alpha, dst_x, dst_y))
+            output_w = max(output_w, dst_x + w)
+            output_h = max(output_h, dst_y + h)
+
+        result, output_masks, manifest_frames = [], [], []
+        for index, (content, content_alpha, dst_x, dst_y) in enumerate(placements):
+            h, w = content_alpha.shape
+            canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, :3] = content
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, 3] = content_alpha
             result.append(canvas)
