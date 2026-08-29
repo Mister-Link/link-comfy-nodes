@@ -26,7 +26,9 @@ class NormalizeSpriteEntityHeightNode:
 
     @staticmethod
     def _bounds(mask: np.ndarray):
-        ys, xs = np.where(mask > 0.5)
+        # ComfyUI's MASK convention here is inverted: 0 is entity/content,
+        # 1 is empty/transparent background (as emitted by Frames).
+        ys, xs = np.where(mask < 0.5)
         if xs.size == 0:
             return None
         return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
@@ -74,7 +76,7 @@ class NormalizeSpriteEntityHeightNode:
             )
             resized_mask = cv2.warpAffine(
                 frame_mask, matrix, (w, h), flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=1,
             )
             out_images.append(resized)
             out_masks.append(np.clip(resized_mask, 0.0, 1.0))
