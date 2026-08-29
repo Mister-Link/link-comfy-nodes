@@ -42,8 +42,8 @@ def _core_anchor(alpha: np.ndarray):
 
 class StabilizeFramesNode:
     CATEGORY = "Image/Animation"
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("frames",)
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("frames", "masks")
     FUNCTION = "stabilize"
 
     @classmethod
@@ -106,6 +106,7 @@ class StabilizeFramesNode:
         anchor_y = round(max_top + margin_y)
 
         result = []
+        output_masks = []
         for content, content_alpha, local_x, local_y in prepared:
             h, w = content_alpha.shape
             canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
@@ -114,6 +115,10 @@ class StabilizeFramesNode:
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, :3] = content
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, 3] = content_alpha
             result.append(canvas)
+            output_masks.append(canvas[..., 3])
 
-        return (torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype),)
+        return (
+            torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype),
+            torch.from_numpy(np.stack(output_masks)).to(device=mask.device, dtype=mask.dtype),
+        )
 
