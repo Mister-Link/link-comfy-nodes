@@ -29,22 +29,15 @@ def _foreground(mask: np.ndarray):
     return alpha, (x, y, x + w, y + h)
 
 
-def _registration_signal(alpha: np.ndarray) -> np.ndarray:
-    binary = (alpha > 0.20).astype(np.uint8)
-    distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    return cv2.GaussianBlur(distance, (0, 0), 4).astype(np.float32)
+def _registration_signal(frame: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    luminance = frame[..., :3] @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    return (0.35 * alpha + 0.65 * luminance * alpha).astype(np.float32)
 
 
-def _correction_to_reference(reference: np.ndarray, current: np.ndarray) -> tuple[float, float]:
-    warp = np.eye(2, 3, dtype=np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-5)
-    try:
-        score, warp = cv2.findTransformECC(reference, current, warp, cv2.MOTION_TRANSLATION, criteria)
-        if not np.isfinite(score) or score < 0.50:
-            return 0.0, 0.0
-        return -float(warp[0, 2]), -float(warp[1, 2])
-    except cv2.error:
-        return 0.0, 0.0
+def _pairwise_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, float, float]:
+    window = cv2.createHanningWindow((previous.shape[1], previous.shape[0]), cv2.CV_32F)
+    shift, response = cv2.phaseCorrelate(previous, current, window)
+    return float(shift[0]), float(shift[1]), float(response)
 
 
 class StabilizeFramesNode:
@@ -55,18 +48,14 @@ class StabilizeFramesNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "image": ("IMAGE",),
-                "mask": ("MASK",),
-                "stabilization_strength": ("FLOAT", {"default": 0.90, "min": 0.0, "max": 1.0, "step": 0.05}),
-            }
-        }
+        return {"required": {
+            "image": ("IMAGE",),
+            "mask": ("MASK",),
+        }}
 
-    def stabilize(self, image: torch.Tensor, mask: torch.Tensor, stabilization_strength: float = 0.90):
+    def stabilize(self, image: torch.Tensor, mask: torch.Tensor):
         frames = image.detach().cpu().numpy().astype(np.float32)
         masks = mask.detach().cpu().numpy().astype(np.float32)
-        strength = float(np.clip(stabilization_strength, 0.0, 1.0))
         if masks.ndim == 4:
             masks = masks[..., 0]
         if masks.shape[0] == 1 and frames.shape[0] > 1:
@@ -86,59 +75,53 @@ class StabilizeFramesNode:
         scale = min(REFERENCE_CANVAS_W / max(widths), REFERENCE_CANVAS_H / max(heights)) * FILL_MARGIN
         scaled_frames, scaled_alphas = [], []
         for frame, alpha in zip(frames, alphas):
-            scaled_w = max(1, round(frame.shape[1] * scale))
-            scaled_h = max(1, round(frame.shape[0] * scale))
-            scaled_frames.append(cv2.resize(frame, (scaled_w, scaled_h), interpolation=cv2.INTER_LANCZOS4))
-            scaled_alphas.append(cv2.resize(alpha, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR))
+            size = (max(1, round(frame.shape[1] * scale)), max(1, round(frame.shape[0] * scale)))
+            scaled_frames.append(cv2.resize(frame, size, interpolation=cv2.INTER_LANCZOS4))
+            scaled_alphas.append(cv2.resize(alpha, size, interpolation=cv2.INTER_LINEAR))
 
-        signals = [_registration_signal(alpha) for alpha in scaled_alphas]
-        reference = signals[len(signals) // 2]
-        corrections = [_correction_to_reference(reference, signal) for signal in signals]
+        # Register adjacent frames around the complete loop. This is global,
+        # feature-independent motion estimation; no object-specific anchor.
+        signals = [_registration_signal(frame, alpha) for frame, alpha in zip(scaled_frames, scaled_alphas)]
+        edges = np.asarray([_pairwise_shift(a, b) for a, b in zip(signals, signals[1:] + signals[:1])], dtype=np.float32)
+        edges[:, :2] /= max(scale, 1e-8)
+        edges[:, :2] -= np.mean(edges[:, :2], axis=0)
+        positions = np.zeros((len(frames), 2), dtype=np.float32)
+        for i, edge in enumerate(edges[:-1], start=1):
+            positions[i] = positions[i - 1] + edge[:2]
+        positions -= np.median(positions, axis=0)
+        corrections = -positions
+        # The image is moved by `corrections` to remove the source motion.
+        # The game later adds this inverse displacement back per frame, after
+        # pixelization and spritesheet trimming.
+        motion_offsets = positions
 
-        raw_motion_x = np.asarray([-x for x, _ in corrections], dtype=np.float32)
-        raw_motion_y = np.asarray([-y for _, y in corrections], dtype=np.float32)
-        raw_motion_x -= np.median(raw_motion_x)
-        raw_motion_y -= np.median(raw_motion_y)
-        residual_scale = 1.0 - strength
-
+        margin = int(max(64, np.ceil(np.max(np.abs(corrections))) + 4))
         prepared = []
-        for frame, alpha, (correction_x, correction_y), motion_x, motion_y in zip(scaled_frames, scaled_alphas, corrections, raw_motion_x, raw_motion_y):
-            transform = np.array([[1.0, 0.0, correction_x], [0.0, 1.0, correction_y]], dtype=np.float32)
-            corrected_frame = cv2.warpAffine(frame, transform, (frame.shape[1], frame.shape[0]), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
-            corrected_alpha = cv2.warpAffine(alpha, transform, (alpha.shape[1], alpha.shape[0]), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-            ys, xs = np.where(corrected_alpha > 0.02)
-            if ys.size == 0:
-                raise ValueError("Registration moved a frame completely outside its canvas")
-            x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
-            prepared.append((corrected_frame[y1:y2, x1:x2, :3], corrected_alpha[y1:y2, x1:x2], float(motion_x * residual_scale), float(motion_y * residual_scale)))
+        for frame, alpha, (dx, dy) in zip(scaled_frames, scaled_alphas, corrections):
+            h, w = frame.shape[:2]
+            transform = np.float32([[1, 0, dx + margin], [0, 1, dy + margin]])
+            corrected_frame = cv2.warpAffine(frame, transform, (w + 2 * margin, h + 2 * margin), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
+            corrected_alpha = cv2.warpAffine(alpha, transform, (w + 2 * margin, h + 2 * margin), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+            prepared.append((corrected_frame, corrected_alpha))
 
-        max_width = max(alpha.shape[1] for _, alpha, _, _ in prepared)
-        max_height = max(alpha.shape[0] for _, alpha, _, _ in prepared)
-        pivot_x = int(np.ceil(max_width / 2.0))
-        pivot_y = int(np.ceil(max_height / 2.0))
-        placements, output_w, output_h = [], 0, 0
-        for content, content_alpha, motion_x, motion_y in prepared:
-            h, w = content_alpha.shape
-            dst_x, dst_y = round(pivot_x - w / 2.0), round(pivot_y - h / 2.0)
-            placements.append((content, content_alpha, dst_x, dst_y, motion_x, motion_y))
-            output_w, output_h = max(output_w, dst_x + w), max(output_h, dst_y + h)
-
+        union = np.max(np.stack([alpha for _, alpha in prepared]), axis=0)
+        ys, xs = np.where(union > 0.02)
+        if ys.size == 0:
+            raise ValueError("Registration moved all frames outside their canvas")
+        x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
         result, output_masks, manifest_frames = [], [], []
-        for index, (content, content_alpha, dst_x, dst_y, motion_x, motion_y) in enumerate(placements):
-            h, w = content_alpha.shape
-            canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
-            canvas[dst_y:dst_y + h, dst_x:dst_x + w, :3] = content
-            canvas[dst_y:dst_y + h, dst_x:dst_x + w, 3] = content_alpha
-            result.append(canvas)
-            output_masks.append(canvas[..., 3])
-            manifest_frames.append({"index": index, "spriteSourceSize": {"x": dst_x, "y": dst_y, "w": w, "h": h}, "motionOffset": {"x": motion_x, "y": motion_y}})
+        for index, ((frame, alpha), (motion_x, motion_y)) in enumerate(zip(prepared, motion_offsets)):
+            cropped = frame[y1:y2, x1:x2, :3]
+            cropped_alpha = alpha[y1:y2, x1:x2]
+            result.append(np.concatenate([cropped, cropped_alpha[..., None]], axis=-1))
+            output_masks.append(cropped_alpha)
+            manifest_frames.append({
+                "index": index,
+                "spriteSourceSize": {"x": 0, "y": 0, "w": x2 - x1, "h": y2 - y1},
+                "motionOffset": {"x": float(motion_x), "y": float(motion_y)},
+            })
 
-        metadata = {
-            "format": "link-comfy-nodes/stabilization-v1",
-            "sourceSize": {"w": output_w, "h": output_h},
-            "pivot": {"x": round(output_w / 2), "y": round(output_h / 2)},
-            "stabilizationStrength": strength,
-            "frames": manifest_frames,
-        }
-        return (torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype), torch.from_numpy(np.stack(output_masks)).to(device=mask.device, dtype=mask.dtype), json.dumps(metadata))
-
+        metadata = {"format": "link-comfy-nodes/stabilization-v1", "sourceSize": {"w": x2 - x1, "h": y2 - y1}, "pivot": {"x": round((x2 - x1) / 2), "y": round((y2 - y1) / 2)}, "frames": manifest_frames}
+        output = torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype)
+        output_masks = torch.from_numpy(np.stack(output_masks)).to(device=mask.device, dtype=mask.dtype)
+        return output, output_masks, json.dumps(metadata)
