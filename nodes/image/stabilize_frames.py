@@ -97,8 +97,8 @@ class StabilizeFramesNode:
             # This is the original high-resolution core position before the
             # frame is re-anchored. Its sequence-relative movement is emitted
             # as metadata so runtime playback can restore intentional bobbing.
-            source_anchor_x = cx1 + local_anchor_x
-            source_anchor_y = cy1 + local_anchor_y
+            source_anchor_x = x1 + local_anchor_x
+            source_anchor_y = y1 + local_anchor_y
             prepared.append((content, content_alpha, local_anchor_x, local_anchor_y, source_anchor_x, source_anchor_y))
             max_left = max(max_left, local_anchor_x)
             max_right = max(max_right, w - local_anchor_x)
