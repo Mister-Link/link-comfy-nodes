@@ -30,7 +30,7 @@ class SpritesheetBuilderNode:
                 "aspect_ratio": (list(cls._ASPECT_RATIOS.keys()),),
             },
             "optional": {
-                "stabilization_metadata": ("STRING", {"default": "", "multiline": False}),
+                "stabilization_metadata": ("STRING", {"forceInput": True}),
             },
         }
 
