@@ -16,6 +16,7 @@ from .image import (
     ResizeImageAndMaskBySideNode,
     SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
+    StabilizeFramesNode,
 )
 from .latent import AspectToResolution, SnapToDivisible
 from .motion import (
@@ -83,6 +84,7 @@ __all__ = [
     "SaveFolderAsZip",
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
+    "StabilizeFramesNode",
     "SpritesheetPreviewNode",
     "ShiftImageBatchNode",
     "UnshiftPoseFramesNode",
