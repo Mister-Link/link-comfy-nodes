@@ -15,7 +15,6 @@ from .image import (
     LoadFolderNode,
     ResizeImageAndMaskBySideNode,
     SpriteScaleCalculatorNode,
-    StabilizeSpriteSequenceNode,
     SpritesheetBuilderNode,
 )
 from .latent import AspectToResolution, SnapToDivisible
@@ -81,7 +80,6 @@ __all__ = [
     "ReplaceAlpha",
     "ResizeImageAndMaskBySideNode",
     "SpriteScaleCalculatorNode",
-    "StabilizeSpriteSequenceNode",
     "SaveFolderAsZip",
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
