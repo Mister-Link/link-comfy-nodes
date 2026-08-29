@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import cv2
 import numpy as np
 import torch
@@ -42,8 +44,8 @@ def _core_anchor(alpha: np.ndarray):
 
 class StabilizeFramesNode:
     CATEGORY = "Image/Animation"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("frames", "masks")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("frames", "masks", "stabilization_metadata")
     FUNCTION = "stabilize"
 
     @classmethod
@@ -86,39 +88,49 @@ class StabilizeFramesNode:
             scaled_alpha = cv2.resize(alpha, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
             ys, xs = np.where(scaled_alpha > 0.02)
             if ys.size == 0:
-                continue
+                raise ValueError(f"Mask for frame {i} contains no foreground after cleanup")
             x1, y1, x2, y2 = xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
             content = scaled_frame[y1:y2, x1:x2, :3]
             content_alpha = scaled_alpha[y1:y2, x1:x2]
-            anchor_x, anchor_y = _core_anchor(content_alpha)
+            local_anchor_x, local_anchor_y = _core_anchor(content_alpha)
             h, w = content_alpha.shape
-            prepared.append((content, content_alpha, anchor_x, anchor_y))
-            max_left = max(max_left, anchor_x)
-            max_right = max(max_right, w - anchor_x)
-            max_top = max(max_top, anchor_y)
-            max_bottom = max(max_bottom, h - anchor_y)
+            prepared.append((content, content_alpha, local_anchor_x, local_anchor_y))
+            max_left = max(max_left, local_anchor_x)
+            max_right = max(max_right, w - local_anchor_x)
+            max_top = max(max_top, local_anchor_y)
+            max_bottom = max(max_bottom, h - local_anchor_y)
 
-        margin_x = round((max_left + max_right) * 0.05)
-        margin_y = round((max_top + max_bottom) * 0.05)
-        output_w = round(max_left + max_right + 2 * margin_x)
-        output_h = round(max_top + max_bottom + 2 * margin_y)
-        anchor_x = round(max_left + margin_x)
-        anchor_y = round(max_top + margin_y)
+        # The shared canvas is the exact union needed around the common pivot.
+        # Do not add padding: the builder trims and records placement metadata.
+        output_w = round(max_left + max_right)
+        output_h = round(max_top + max_bottom)
+        pivot_x = round(max_left)
+        pivot_y = round(max_top)
 
-        result = []
-        output_masks = []
-        for content, content_alpha, local_x, local_y in prepared:
+        result, output_masks, manifest_frames = [], [], []
+        for index, (content, content_alpha, local_x, local_y) in enumerate(prepared):
             h, w = content_alpha.shape
             canvas = np.zeros((output_h, output_w, 4), dtype=np.float32)
-            dst_x = round(anchor_x - local_x)
-            dst_y = round(anchor_y - local_y)
+            dst_x = round(pivot_x - local_x)
+            dst_y = round(pivot_y - local_y)
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, :3] = content
             canvas[dst_y:dst_y + h, dst_x:dst_x + w, 3] = content_alpha
             result.append(canvas)
             output_masks.append(canvas[..., 3])
+            manifest_frames.append({
+                "index": index,
+                "spriteSourceSize": {"x": dst_x, "y": dst_y, "w": w, "h": h},
+            })
 
+        metadata = {
+            "format": "link-comfy-nodes/stabilization-v1",
+            "sourceSize": {"w": output_w, "h": output_h},
+            "pivot": {"x": pivot_x, "y": pivot_y},
+            "frames": manifest_frames,
+        }
         return (
             torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype),
             torch.from_numpy(np.stack(output_masks)).to(device=mask.device, dtype=mask.dtype),
+            json.dumps(metadata),
         )
 

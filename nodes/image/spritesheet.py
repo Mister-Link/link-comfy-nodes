@@ -12,9 +12,6 @@ class SpritesheetBuilderNode:
     RETURN_NAMES = ("spritesheet", "frames", "metadata")
     FUNCTION = "build_spritesheet"
     CATEGORY = "image/transform"
-    # Building one spritesheet requires every frame at once, even when they
-    # arrive as a list of variable-sized images (e.g. from Load Folder), so
-    # this must run as a single call rather than being mapped per list item.
     INPUT_IS_LIST = True
 
     _ASPECT_RATIOS = {
@@ -31,7 +28,10 @@ class SpritesheetBuilderNode:
             "required": {
                 "frames": ("IMAGE",),
                 "aspect_ratio": (list(cls._ASPECT_RATIOS.keys()),),
-            }
+            },
+            "optional": {
+                "stabilization_metadata": ("STRING", {"default": "", "multiline": False}),
+            },
         }
 
     @staticmethod
@@ -48,64 +48,86 @@ class SpritesheetBuilderNode:
             raise ValueError("Expected frames with shape (N, H, W, C)")
         return [tensor[i] for i in range(tensor.shape[0])]
 
-    def build_spritesheet(self, frames, aspect_ratio="1:1 (Square)"):
-        if isinstance(aspect_ratio, (list, tuple)):
-            aspect_ratio = aspect_ratio[0]
+    @staticmethod
+    def _one_value(value, default=""):
+        if isinstance(value, (list, tuple)):
+            return value[0] if value else default
+        return value if value is not None else default
 
+    @classmethod
+    def _parse_stabilization_metadata(cls, value, frame_count: int):
+        raw = cls._one_value(value, "")
+        if not raw:
+            return None
+        try:
+            manifest = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("stabilization_metadata must be valid JSON") from exc
+        if manifest.get("format") != "link-comfy-nodes/stabilization-v1":
+            raise ValueError("Unsupported stabilization metadata format")
+        records = manifest.get("frames")
+        if not isinstance(records, list) or len(records) != frame_count:
+            raise ValueError("Stabilization metadata frame count must match the image batch")
+        source_size = manifest.get("sourceSize", {})
+        pivot = manifest.get("pivot", {})
+        if int(source_size.get("w", 0)) < 1 or int(source_size.get("h", 0)) < 1:
+            raise ValueError("Stabilization metadata is missing sourceSize")
+        if "x" not in pivot or "y" not in pivot:
+            raise ValueError("Stabilization metadata is missing pivot")
+        return manifest
+
+    def build_spritesheet(self, frames, aspect_ratio="1:1 (Square)", stabilization_metadata=""):
+        aspect_ratio = self._one_value(aspect_ratio, "1:1 (Square)")
         frame_list = self._flatten_frames(frames)
         if not frame_list:
             raise ValueError("Expected at least one frame")
         frame_count = len(frame_list)
+        manifest = self._parse_stabilization_metadata(stabilization_metadata, frame_count)
+
+        placement = None
+        if manifest is not None:
+            placement = manifest["frames"]
+            trimmed = []
+            for index, frame in enumerate(frame_list):
+                rect = placement[index].get("spriteSourceSize", {})
+                x, y = int(rect.get("x", -1)), int(rect.get("y", -1))
+                w, h = int(rect.get("w", 0)), int(rect.get("h", 0))
+                if x < 0 or y < 0 or w < 1 or h < 1 or x + w > frame.shape[1] or y + h > frame.shape[0]:
+                    raise ValueError(f"Invalid spriteSourceSize for frame {index}")
+                trimmed.append(frame[y:y + h, x:x + w])
+            frame_list = trimmed
 
         target_ratio = self._aspect_ratio_value(aspect_ratio)
-
-        # Frames may not all share the same size, so the grid cell is sized to
-        # fit the largest frame; smaller frames are placed in the top-left of
-        # their cell rather than being resized or cropped to match the rest.
         frame_width = max(frame.shape[1] for frame in frame_list)
         frame_height = max(frame.shape[0] for frame in frame_list)
-        # Alpha convention: embedded 4th channel only. If any frame carries
-        # alpha, the sheet gets an alpha channel (frames without one are
-        # fully opaque; grid gaps stay transparent).
         use_alpha = any(frame.shape[-1] == 4 for frame in frame_list)
         frame_channels = 4 if use_alpha else 3
 
-        columns, rows = self._closest_grid(
-            frame_count, target_ratio, frame_width, frame_height
-        )
+        columns, rows = self._closest_grid(frame_count, target_ratio, frame_width, frame_height)
         sheet_width = frame_width * columns
         sheet_height = frame_height * rows
+        spritesheet = np.zeros((sheet_height, sheet_width, frame_channels), dtype=np.float32)
+        frames_out = np.zeros((frame_count, frame_height, frame_width, frame_channels), dtype=np.float32)
+        frame_metadata = []
 
-        spritesheet = np.zeros(
-            (sheet_height, sheet_width, frame_channels), dtype=np.float32
-        )
-        # Individual frames, normalized to one uniform batch: each frame
-        # sits top-left in a cell-sized canvas exactly as it does in the
-        # sheet (padding transparent when the sheet has alpha, black
-        # otherwise).
-        frames_out = np.zeros(
-            (frame_count, frame_height, frame_width, frame_channels),
-            dtype=np.float32,
-        )
-
-        for idx, frame in enumerate(frame_list):
+        for index, frame in enumerate(frame_list):
             frame_np = frame.numpy()
-            h, w = frame_np.shape[0], frame_np.shape[1]
-
-            row = idx // columns
-            col = idx % columns
-            y0 = row * frame_height
-            x0 = col * frame_width
-
-            spritesheet[y0 : y0 + h, x0 : x0 + w, :3] = frame_np[:, :, :3]
-            frames_out[idx, :h, :w, :3] = frame_np[:, :, :3]
+            h, w = frame_np.shape[:2]
+            row, col = divmod(index, columns)
+            y0, x0 = row * frame_height, col * frame_width
+            spritesheet[y0:y0 + h, x0:x0 + w, :3] = frame_np[:, :, :3]
+            frames_out[index, :h, :w, :3] = frame_np[:, :, :3]
             if frame_channels == 4:
-                if frame_np.shape[-1] == 4:
-                    cell_alpha = frame_np[:, :, 3]
-                else:
-                    cell_alpha = 1.0
-                spritesheet[y0 : y0 + h, x0 : x0 + w, 3] = cell_alpha
-                frames_out[idx, :h, :w, 3] = cell_alpha
+                alpha = frame_np[:, :, 3] if frame_np.shape[-1] == 4 else 1.0
+                spritesheet[y0:y0 + h, x0:x0 + w, 3] = alpha
+                frames_out[index, :h, :w, 3] = alpha
+
+            record = {"index": index, "frame": {"x": x0, "y": y0, "w": w, "h": h}}
+            if manifest is not None:
+                record["sourceSize"] = manifest["sourceSize"]
+                record["spriteSourceSize"] = placement[index]["spriteSourceSize"]
+                record["pivot"] = manifest["pivot"]
+            frame_metadata.append(record)
 
         result = torch.from_numpy(spritesheet).unsqueeze(0)
         frames_tensor = torch.from_numpy(frames_out)
@@ -118,8 +140,14 @@ class SpritesheetBuilderNode:
                 "frame_width": frame_width,
                 "frame_height": frame_height,
                 "frame_count": frame_count,
-            }
+            },
+            "frames": frame_metadata,
         }
+        if manifest is not None:
+            metadata["stabilization"] = {
+                "sourceSize": manifest["sourceSize"],
+                "pivot": manifest["pivot"],
+            }
         return (result, frames_tensor, json.dumps(metadata, indent=2))
 
     @classmethod
@@ -128,21 +156,11 @@ class SpritesheetBuilderNode:
         return width / height
 
     @staticmethod
-    def _closest_grid(
-        frame_count: int, target_ratio: float, frame_width: int, frame_height: int
-    ) -> tuple[int, int]:
-        best_cols = 1
-        best_rows = frame_count
-        best_diff = float("inf")
-
+    def _closest_grid(frame_count: int, target_ratio: float, frame_width: int, frame_height: int) -> tuple[int, int]:
+        best_cols, best_rows, best_diff = 1, frame_count, float("inf")
         for cols in range(1, frame_count + 1):
             rows = math.ceil(frame_count / cols)
-            ratio = (cols * frame_width) / (rows * frame_height)
-            diff = abs(ratio - target_ratio)
-
+            diff = abs((cols * frame_width) / (rows * frame_height) - target_ratio)
             if diff < best_diff:
-                best_diff = diff
-                best_cols = cols
-                best_rows = rows
-
+                best_cols, best_rows, best_diff = cols, rows, diff
         return best_cols, best_rows
