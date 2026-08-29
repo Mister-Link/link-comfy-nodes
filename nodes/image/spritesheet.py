@@ -86,6 +86,20 @@ class SpritesheetBuilderNode:
 
         placement = None
         if manifest is not None:
+            # A resize/pixel-art node may sit between Stabilize Frames and this
+            # builder. Compose that resize into the canonical canvas and pivot
+            # before recording atlas metadata, otherwise the engine receives a
+            # full-resolution pivot for a reduced frame.
+            declared_size = manifest["sourceSize"]
+            incoming_w = frame_list[0].shape[1]
+            incoming_h = frame_list[0].shape[0]
+            scale_x = incoming_w / declared_size["w"]
+            scale_y = incoming_h / declared_size["h"]
+            manifest["sourceSize"] = {"w": incoming_w, "h": incoming_h}
+            manifest["pivot"] = {
+                "x": round(manifest["pivot"]["x"] * scale_x),
+                "y": round(manifest["pivot"]["y"] * scale_y),
+            }
             placement = manifest["frames"]
             trimmed = []
             for index, frame in enumerate(frame_list):
