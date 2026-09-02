@@ -80,7 +80,11 @@ class ShiftPoseFramesNode:
         out_total = int(shifted_frames.shape[0])
         if not _is_wan_valid(out_total):
             raise ValueError(
-                "Could not construct a WAN-valid output frame count from the provided inputs."
+                f"Shift Pose Frames received {input_frame_count} input frames and "
+                f"{blank_frames} blank frames, producing {out_total} total frames "
+                "(including 4 overlap frames when looping). WAN requires a frame "
+                "count of 1 + (4*n): 1, 5, 9, 13, ... Adjust the input or blank "
+                "frame count."
             )
 
         return (shifted_frames, out_total, shift, blank_frames, is_loop)
