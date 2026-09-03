@@ -5,7 +5,6 @@ from .color import (
     ColorParserNode,
     FarthestColorNode,
     MatchColorsToReferenceNode,
-    MatchColorsToReferenceV2Node,
 )
 from .image import (
     AddImageToBatchNode,
@@ -75,7 +74,6 @@ __all__ = [
     "ImageRotatorNode",
     "KSamplerAdvancedDual",
     "LoadFolderNode",
-    "MatchColorsToReferenceV2Node",
     "NativeWanPoseStrength",
     "PreviewAsMarkdown",
     "StringToListNode",
