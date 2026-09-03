@@ -20,7 +20,7 @@ class ShiftPoseFramesNode:
         "Frame sequence shifted so the original seam sits near the middle, with loop blanks and overlap added, when blank_frames is greater than 0. Passed through unchanged when blank_frames is 0.",
         "Actual total frame count of the shifted output sequence.",
         "Amount to rotate the overlap-trimmed sequence left by to restore original frame order. 0 when blank_frames is 0.",
-        "Number of blank frames inserted into the shifted loop. Feed this into Unshift Pose Frames.",
+        "Number of blank frames inserted into the shifted loop, for reference.",
         "Whether loop blanks and overlap were added. Feed this into Unshift Pose Frames.",
     )
     FUNCTION = "calculate"
@@ -115,16 +115,6 @@ class UnshiftPoseFramesNode:
                         "tooltip": "Shift value emitted by Shift Pose Frames.",
                     },
                 ),
-                "blank_frames": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 9999,
-                        "step": 1,
-                        "tooltip": "Blank frame count emitted by Shift Pose Frames.",
-                    },
-                ),
                 "is_loop": (
                     "BOOLEAN",
                     {
@@ -139,7 +129,6 @@ class UnshiftPoseFramesNode:
         self,
         frames: torch.Tensor,
         shift: int,
-        blank_frames: int,
         is_loop: bool,
     ):
         work = frames
