@@ -17,9 +17,9 @@ class ShiftPoseFramesNode:
         "is_loop",
     )
     OUTPUT_TOOLTIPS = (
-        "Frame sequence shifted so the original seam sits near the middle, with loop blanks and overlap added when blank_frames is greater than 0.",
+        "Frame sequence shifted so the original seam sits near the middle, with loop blanks and overlap added, when blank_frames is greater than 0. Passed through unchanged when blank_frames is 0.",
         "Actual total frame count of the shifted output sequence.",
-        "Amount to rotate the overlap-trimmed sequence left by to restore original frame order.",
+        "Amount to rotate the overlap-trimmed sequence left by to restore original frame order. 0 when blank_frames is 0.",
         "Number of blank frames inserted into the shifted loop. Feed this into Unshift Pose Frames.",
         "Whether loop blanks and overlap were added. Feed this into Unshift Pose Frames.",
     )
@@ -38,7 +38,7 @@ class ShiftPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Number of black inpaint frames placed in the middle of the shifted loop. When this is greater than 0, the node also adds 2 overlap frames at each end and only validates the final total frame count.",
+                        "tooltip": "Number of black inpaint frames placed in the middle of the shifted loop. When this is greater than 0, the node also adds 2 overlap frames at each end and only validates the final total frame count. Set to 0 to pass the frames through untouched, with no shift and no blanks.",
                     },
                 ),
             }
@@ -74,8 +74,8 @@ class ShiftPoseFramesNode:
             shifted_frames = torch.cat([prefix, seq, suffix], dim=0)
             shift = end_num_frames + blank_frames
         else:
-            shifted_frames = torch.cat([end_portion, start_portion], dim=0)
-            shift = end_num_frames
+            shifted_frames = frames
+            shift = 0
 
         out_total = int(shifted_frames.shape[0])
         if not _is_wan_valid(out_total):
