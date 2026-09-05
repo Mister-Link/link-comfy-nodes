@@ -1,3 +1,4 @@
+from .align_frames_to_root import AlignFramesToRootNode
 from .auto_cropper import AutoCropperNode
 from .batch import AddImageToBatchNode
 from .crop_by_bbox import CropByBBoxNode

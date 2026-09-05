@@ -3,6 +3,7 @@ from pathlib import Path
 
 from .nodes import (
     AddImageToBatchNode,
+    AlignFramesToRootNode,
     AdvancedStringConcat,
     ApplyPaletteNode,
     StringToListNode,
@@ -51,6 +52,7 @@ NODE_CLASS_MAPPINGS = {
     "Load Folder": LoadFolderNode,
     "Average Mask Region Size": AverageMaskRegionSizeNode,
     "Add Image to Batch": AddImageToBatchNode,
+    "Align Frames to Root": AlignFramesToRootNode,
     "Palettize": ApplyPaletteNode,
     "HybridMaMoMask Loader": HybridMaMoMaskLoader,
     "HybridMaMoMask Generate": HybridMaMoMaskGenerate,
@@ -97,6 +99,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Load Folder": "Load Folder",
     "Average Mask Region Size": "Average Mask Region Size",
     "Add Image to Batch": "Add Image to Batch",
+    "Align Frames to Root": "Align Frames to Root",
     "Palettize": "Apply Game Palette",
     "HybridMaMoMask Loader": "HybridMaMoMask Loader",
     "HybridMaMoMask Generate": "HybridMaMoMask Generate",

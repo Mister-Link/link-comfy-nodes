@@ -8,6 +8,7 @@ from .color import (
 )
 from .image import (
     AddImageToBatchNode,
+    AlignFramesToRootNode,
     AutoCropperNode,
     CropByBBoxNode,
     ImagePixelateNode,
@@ -52,6 +53,7 @@ from .wan import (
 
 __all__ = [
     "AddImageToBatchNode",
+    "AlignFramesToRootNode",
     "ApplyPaletteNode",
     "ShiftPoseFramesNode",
     "AdvancedStringConcat",
