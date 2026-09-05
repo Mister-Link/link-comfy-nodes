@@ -488,6 +488,8 @@ class HybridMaMoMaskExportFBX:
             save_path=str(fbx_path),
             fps=float(motion.fps),
             scale=100.0,
+            source_name="HybridMaMoMask",
+            source_key="HYBRID_MAMOMASK",
         )
         if not ok:
             raise RuntimeError(f"FBX export failed: {fbx_path}")

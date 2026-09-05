@@ -41,6 +41,8 @@ def write_fbx_with_character(
     save_path: str,
     fps: float = 30.0,
     scale: float = 100.0,
+    source_name: str = "MotionStreamer",
+    source_key: str = "MOTIONSTREAMER",
 ) -> bool:
     """
     Animate a rigged template FBX with 22-joint MotionStreamer output and save.
@@ -52,6 +54,8 @@ def write_fbx_with_character(
         save_path: Output FBX path.
         fps: Animation frame rate.
         scale: Translation scale (default 100 = meters to cm).
+        source_name: Human-readable source name stored in FBX metadata.
+        source_key: Stable NLF source identifier stored in FBX metadata.
 
     Returns:
         True if save_path exists after export.
@@ -111,6 +115,15 @@ def write_fbx_with_character(
 
         mode = fbx.FbxTime().ConvertFrameRateToTimeMode(fps)
         scene.GetGlobalSettings().SetTimeMode(mode)
+
+        # Keep the source identity inside the FBX so consumers do not have to
+        # infer it from a filename or from the shared 22-joint template.
+        info = fbx.FbxDocumentInfo.Create(manager, "NLF_Export_Metadata")
+        info.mTitle = fbx.FbxString(source_name)
+        info.mSubject = fbx.FbxString(f"NLF_SOURCE={source_key}")
+        info.mKeywords = fbx.FbxString(f"NLF;{source_name};{source_key}")
+        info.mComment = fbx.FbxString(f"NLF Studio source: {source_name}")
+        scene.SetDocumentInfo(info)
 
         all_nodes = _collect_nodes(scene.GetRootNode())
 
