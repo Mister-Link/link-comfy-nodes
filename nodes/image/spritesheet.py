@@ -114,25 +114,32 @@ class SpritesheetBuilderNode:
                 # graph serialization or a node reload, so never reject a valid
                 # alpha-bearing frame solely because its saved rectangle is
                 # marginally outside the current canvas.
+                #
+                # Only width is trimmed to content. Height must stay exactly
+                # the incoming canvas height always - trimming it to the
+                # alpha bbox let a frame with a bit of vertical letterbox
+                # padding (from Stabilize Frames' fill-to-canvas scaling)
+                # come out a couple pixels short, which breaks the fixed
+                # frame-height assumption the game's per-animation scale math
+                # relies on (e.g. Spirie idle right needs an exact 160px
+                # height or vertical alignment suffers).
                 frame_np = frame.numpy()
+                full_h = frame.shape[0]
                 if frame_np.shape[-1] == 4:
-                    ys, xs = np.where(frame_np[..., 3] > 0.02)
+                    _, xs = np.where(frame_np[..., 3] > 0.02)
                 else:
-                    ys, xs = np.array([]), np.array([])
+                    xs = np.array([])
 
                 if xs.size:
-                    x, y = int(xs.min()), int(ys.min())
-                    w, h = int(xs.max()) + 1 - x, int(ys.max()) + 1 - y
+                    x = int(xs.min())
+                    w = int(xs.max()) + 1 - x
                 else:
                     rect = placement[index].get("spriteSourceSize", {})
-                    x, y = int(rect.get("x", 0)), int(rect.get("y", 0))
-                    x = max(0, min(x, frame.shape[1] - 1))
-                    y = max(0, min(y, frame.shape[0] - 1))
+                    x = max(0, min(int(rect.get("x", 0)), frame.shape[1] - 1))
                     w = max(1, min(int(rect.get("w", frame.shape[1])), frame.shape[1] - x))
-                    h = max(1, min(int(rect.get("h", frame.shape[0])), frame.shape[0] - y))
 
-                placement[index]["spriteSourceSize"] = {"x": x, "y": y, "w": w, "h": h}
-                trimmed.append(frame[y:y + h, x:x + w])
+                placement[index]["spriteSourceSize"] = {"x": x, "y": 0, "w": w, "h": full_h}
+                trimmed.append(frame[:, x:x + w])
             frame_list = trimmed
 
         target_ratio = self._aspect_ratio_value(aspect_ratio)
