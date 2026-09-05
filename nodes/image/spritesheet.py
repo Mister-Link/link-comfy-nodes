@@ -181,6 +181,11 @@ class SpritesheetBuilderNode:
                 "frame_count": frame_count,
             },
             "frames": frame_metadata,
+            # Explicit, always-present hook for a downstream engine to apply
+            # a per-animation draw nudge without touching engine code - edit
+            # this JSON by hand (or regenerate through a future node input)
+            # instead of hardcoding the offset in the game's own config.
+            "calibration": {"offset_x": 0, "offset_y": 0},
         }
         if manifest is not None:
             metadata["stabilization"] = {
