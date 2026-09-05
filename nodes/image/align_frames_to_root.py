@@ -43,6 +43,28 @@ def _corner_background(frame: np.ndarray) -> np.ndarray:
     return np.median(corners, axis=0).astype(np.float32)
 
 
+def _warp_border_value(frame: np.ndarray) -> list[float]:
+    """Return a border color that preserves transparent image backgrounds."""
+    if frame.shape[-1] > 3:
+        height, width = frame.shape[:2]
+        corner_size = max(2, int(min(height, width) * 0.05))
+        alpha_corners = np.concatenate(
+            (
+                frame[:corner_size, :corner_size, 3].reshape(-1),
+                frame[:corner_size, -corner_size:, 3].reshape(-1),
+                frame[-corner_size:, :corner_size, 3].reshape(-1),
+                frame[-corner_size:, -corner_size:, 3].reshape(-1),
+            )
+        )
+        if float(np.median(alpha_corners)) < 0.5:
+            return [0.0] * frame.shape[-1]
+
+    border = _corner_background(frame).tolist()
+    if frame.shape[-1] > 3:
+        border.extend([1.0] * (frame.shape[-1] - 3))
+    return border
+
+
 def _foreground_mask(frame: np.ndarray) -> np.ndarray:
     """Return the largest connected subject region in an image."""
     if frame.shape[-1] > 3:
@@ -433,10 +455,7 @@ class AlignFramesToRootNode:
             offset_y,
         )
 
-        root_background = _corner_background(root_np)
-        root_border_value = root_background.tolist()
-        if root_np.shape[-1] > 3:
-            root_border_value.extend([1.0] * (root_np.shape[-1] - 3))
+        root_border_value = _warp_border_value(root_np)
         root_transform = np.float32(
             (
                 (1.0, 0.0, offset_x),
@@ -454,10 +473,7 @@ class AlignFramesToRootNode:
 
         aligned = []
         for frame in frames_np:
-            background = _corner_background(frame)
-            border_value = background.tolist()
-            if frame.shape[-1] > 3:
-                border_value.extend([1.0] * (frame.shape[-1] - 3))
+            border_value = _warp_border_value(frame)
             aligned.append(
                 cv2.warpAffine(
                     frame,
