@@ -47,6 +47,7 @@ from .wan import (
     UnshiftPoseFramesNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
+    WANConnectFrames,
 )
 
 __all__ = [
@@ -90,4 +91,5 @@ __all__ = [
     "UnshiftPoseFramesNode",
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
+    "WANConnectFrames",
 ]

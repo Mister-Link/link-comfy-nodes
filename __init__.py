@@ -44,6 +44,7 @@ from .nodes import (
     UnshiftPoseFramesNode,
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
+    WANConnectFrames,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -89,6 +90,7 @@ NODE_CLASS_MAPPINGS = {
     "Shift Image Batch": ShiftImageBatchNode,
     "Unshift Pose Frames": UnshiftPoseFramesNode,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
+    "WAN Connect Frames": WANConnectFrames,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -134,6 +136,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Shift Image Batch": "Shift Image Batch",
     "Unshift Pose Frames": "Unshift Pose Frames",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
+    "WAN Connect Frames": "WAN Connect Frames",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))
