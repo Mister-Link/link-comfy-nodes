@@ -46,6 +46,7 @@ from .nodes import (
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
     WANConnectFrames,
+    WANRemoveCapFrames,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -93,6 +94,7 @@ NODE_CLASS_MAPPINGS = {
     "Unshift Pose Frames": UnshiftPoseFramesNode,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
     "WAN Connect Frames": WANConnectFrames,
+    "WAN Remove Cap Frames": WANRemoveCapFrames,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -140,6 +142,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Unshift Pose Frames": "Unshift Pose Frames",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
     "WAN Connect Frames": "WAN Connect Frames",
+    "WAN Remove Cap Frames": "WAN Remove Cap Frames",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

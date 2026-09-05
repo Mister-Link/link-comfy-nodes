@@ -1,6 +1,8 @@
-"""Build a WAN-compatible connection sequence from up to four frame sections."""
+"""Build and optionally de-cap a WAN-compatible connection sequence."""
 
 from __future__ import annotations
+
+import json
 
 import torch
 
@@ -31,35 +33,30 @@ def _as_image_batch(frames: torch.Tensor, name: str) -> torch.Tensor:
     return frames
 
 
-def _transition_distance(first: torch.Tensor, second: torch.Tensor) -> float:
-    """Return a device-independent visual distance for two boundary frames."""
-    distance = torch.mean(torch.abs(first.float() - second.float()))
-    return float(distance.detach().cpu().item())
+def _as_mask_batch(mask: torch.Tensor) -> torch.Tensor:
+    if not isinstance(mask, torch.Tensor):
+        raise ValueError("mask must be a MASK tensor.")
+    if mask.ndim == 2:
+        mask = mask.unsqueeze(0)
+    if mask.ndim == 4 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    if mask.ndim != 3:
+        raise ValueError(
+            "mask must have shape (frames, height, width); "
+            f"received {tuple(mask.shape)}."
+        )
+    return mask
 
 
-def _allocate_weighted(amount: int, weights: list[float]) -> list[int]:
-    """Allocate an integer amount proportionally, using largest remainders."""
+def _allocate_evenly(amount: int, gap_count: int) -> list[int]:
+    """Allocate an integer amount as evenly as possible across gaps."""
     amount = max(0, int(amount))
-    if not weights:
+    gap_count = max(0, int(gap_count))
+    if gap_count == 0:
         return []
 
-    safe_weights = [max(0.0, float(weight)) for weight in weights]
-    weight_total = sum(safe_weights)
-    if weight_total <= 0.0:
-        safe_weights = [1.0] * len(weights)
-        weight_total = float(len(weights))
-
-    exact = [amount * weight / weight_total for weight in safe_weights]
-    allocation = [int(value) for value in exact]
-    remainder = amount - sum(allocation)
-    order = sorted(
-        range(len(weights)),
-        key=lambda index: (exact[index] - allocation[index], -index),
-        reverse=True,
-    )
-    for index in order[:remainder]:
-        allocation[index] += 1
-    return allocation
+    base, remainder = divmod(amount, gap_count)
+    return [base + (1 if index < remainder else 0) for index in range(gap_count)]
 
 
 def _balanced_split(amount: int, first_capacity: int, second_capacity: int) -> tuple[int, int]:
@@ -84,14 +81,15 @@ def _balanced_split(amount: int, first_capacity: int, second_capacity: int) -> t
 
 
 class WANConnectFrames:
-    """Create WAN frames and an inpaint mask from connected frame sections."""
+    """Create a WAN sequence with optional boundary caps and cleanup metadata."""
 
     CATEGORY = "conditioning/video_models"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("frames", "mask")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("frames", "mask", "cap_info")
     OUTPUT_TOOLTIPS = (
         "Optional start, section 1, white connection frames, section 2, and optional end frames.",
         "One mask per frame: black for supplied images and white for connection frames.",
+        "Metadata for WAN Remove Cap Frames; connect this output to its cap_info input.",
     )
     FUNCTION = "create"
 
@@ -105,21 +103,21 @@ class WANConnectFrames:
                         "tooltip": "Required first sequence. Supply only the frames you want to keep.",
                     },
                 ),
-                "frames_to_add_between": (
+                "transition_frames": (
                     "INT",
                     {
                         "default": 0,
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Total white connection frames to distribute across the available transitions.",
+                        "tooltip": "Number of white frames to use for transitions between sections. Same-frame-count mode may trim source frames to preserve the requested total.",
                     },
                 ),
                 "preference": (
-                    ["balanced", "add frames", "remove frames"],
+                    ["same frame count", "add frames"],
                     {
-                        "default": "balanced",
-                        "tooltip": "When WAN rounding is needed, choose whether to add white frames, remove source frames, or choose the closer result.",
+                        "default": "same frame count",
+                        "tooltip": "Keep the requested core frame count when possible, or always round it up by adding frames.",
                     },
                 ),
             },
@@ -133,13 +131,13 @@ class WANConnectFrames:
                 "start_frame": (
                     "IMAGE",
                     {
-                        "tooltip": "Optional leading frame or batch. White connection frames are allocated between it and the next sequence when useful.",
+                        "tooltip": "Optional leading cap image. It is repeated to fill its share of four removable WAN cap frames.",
                     },
                 ),
                 "end_frame": (
                     "IMAGE",
                     {
-                        "tooltip": "Optional trailing frame or batch. Either provide this or section_2_frames.",
+                        "tooltip": "Optional trailing cap image. It is repeated to fill its share of four removable WAN cap frames.",
                     },
                 ),
             },
@@ -148,8 +146,8 @@ class WANConnectFrames:
     def create(
         self,
         section_1_frames: torch.Tensor,
-        frames_to_add_between: int = 0,
-        preference: str = "balanced",
+        transition_frames: int = 0,
+        preference: str = "same frame count",
         section_2_frames: torch.Tensor | None = None,
         start_frame: torch.Tensor | None = None,
         end_frame: torch.Tensor | None = None,
@@ -200,68 +198,62 @@ class WANConnectFrames:
         start_frame = on_output_device(start_frame)
         end_frame = on_output_device(end_frame)
 
-        sequences = []
+        # WAN requires the complete sequence to have a length of 1 + 4*n.
+        # Reserve exactly four removable cap frames, splitting them evenly
+        # between the supplied boundaries. A cap input represents one boundary
+        # image; repeat that image when its boundary receives multiple slots.
+        cap_boundary_count = int(start_frame is not None) + int(end_frame is not None)
+        cap_allocation = _allocate_evenly(4, cap_boundary_count)
+        cap_allocation_index = 0
         if start_frame is not None:
-            sequences.append(start_frame)
-        sequences.append(section_1_frames)
-        if section_2_frames is not None:
-            sequences.append(section_2_frames)
+            start_frame = start_frame[:1].repeat(
+                (cap_allocation[cap_allocation_index], 1, 1, 1)
+            )
+            cap_allocation_index += 1
         if end_frame is not None:
-            sequences.append(end_frame)
+            end_frame = end_frame[-1:].repeat(
+                (cap_allocation[cap_allocation_index], 1, 1, 1)
+            )
 
-        input_total = sum(int(sequence.shape[0]) for sequence in sequences)
-        frames_to_add_between = max(0, int(frames_to_add_between))
-        requested_total = input_total + frames_to_add_between
-        minimum_total = len(sequences)
-
-        add_target = _next_wan_frame_count(max(minimum_total, requested_total))
-        add_delta = add_target - requested_total
-        remove_target = _previous_wan_frame_count(requested_total)
-        can_remove_to_wan = remove_target >= minimum_total
-        remove_delta = requested_total - remove_target if can_remove_to_wan else None
+        core_source_sequences = [section_1_frames]
+        if section_2_frames is not None:
+            core_source_sequences.append(section_2_frames)
+        core_source_count = sum(
+            int(sequence.shape[0]) for sequence in core_source_sequences
+        )
+        transition_frames = max(0, int(transition_frames))
+        requested_core_count = core_source_count + transition_frames
+        minimum_core_count = len(core_source_sequences)
+        add_target = _next_wan_frame_count(
+            max(minimum_core_count, requested_core_count)
+        )
+        same_count_add_target = _next_wan_frame_count(
+            max(minimum_core_count, core_source_count)
+        )
+        same_count_remove_target = _previous_wan_frame_count(core_source_count)
+        can_remove_to_same_count = same_count_remove_target >= minimum_core_count
 
         if preference == "add frames":
-            final_total = add_target
-            extra_cuts = 0
-            extra_blank_frames = add_delta
-        elif preference == "remove frames" and can_remove_to_wan:
-            final_total = remove_target
-            extra_cuts = remove_delta
-            extra_blank_frames = 0
-        elif preference == "remove frames":
-            final_total = add_target
-            extra_cuts = 0
-            extra_blank_frames = add_delta
-        elif not can_remove_to_wan or add_delta <= remove_delta:
-            final_total = add_target
-            extra_cuts = 0
-            extra_blank_frames = add_delta
+            core_target = add_target
+        elif can_remove_to_same_count and core_source_count - same_count_remove_target < same_count_add_target - core_source_count:
+            core_target = same_count_remove_target
         else:
-            final_total = remove_target
-            extra_cuts = remove_delta
-            extra_blank_frames = 0
+            core_target = same_count_add_target
 
-        # Only section 1's tail and section 2's head are auto-trimmable. The
-        # optional boundary inputs are anchors and remain intact.
         section_1_capacity = max(0, int(section_1_frames.shape[0]) - 1)
         section_2_capacity = (
             max(0, int(section_2_frames.shape[0]) - 1)
             if section_2_frames is not None
             else 0
         )
-        source_cuts = min(extra_cuts, section_1_capacity + section_2_capacity)
+        source_cuts = min(
+            max(0, core_source_count + transition_frames - core_target),
+            section_1_capacity + section_2_capacity,
+        )
         section_1_cut, section_2_cut = _balanced_split(
             source_cuts,
             section_1_capacity,
             section_2_capacity,
-        )
-
-        # If a remove preference asks for more cuts than the two sections can
-        # provide, reduce requested white frames by the remainder instead.
-        blank_total = max(
-            0,
-            frames_to_add_between + extra_blank_frames
-            - max(0, extra_cuts - source_cuts),
         )
         section_1_output = section_1_frames[: -section_1_cut or None]
         section_2_output = (
@@ -269,61 +261,202 @@ class WANConnectFrames:
             if section_2_frames is not None
             else None
         )
+        remaining_core_source_count = (
+            int(section_1_output.shape[0])
+            + (int(section_2_output.shape[0]) if section_2_output is not None else 0)
+        )
+        core_blank_count = max(0, core_target - remaining_core_source_count)
 
-        output_sequences = []
+        output_sequences: list[tuple[str, torch.Tensor]] = []
         if start_frame is not None:
-            output_sequences.append(start_frame)
-        output_sequences.append(section_1_output)
+            output_sequences.append(("start_cap", start_frame))
+        output_sequences.append(("section_1", section_1_output))
         if section_2_output is not None:
-            output_sequences.append(section_2_output)
+            output_sequences.append(("section_2", section_2_output))
         if end_frame is not None:
-            output_sequences.append(end_frame)
+            output_sequences.append(("end_cap", end_frame))
 
-        transition_weights = [
-            _transition_distance(first[-1], second[0])
-            for first, second in zip(output_sequences, output_sequences[1:])
-        ]
-        blank_allocations = _allocate_weighted(blank_total, transition_weights)
+        cap_count = sum(
+            int(sequence.shape[0])
+            for name, sequence in output_sequences
+            if name.endswith("_cap")
+        )
+        internal_target = _next_wan_frame_count(core_target + cap_count)
+        blank_count = internal_target - remaining_core_source_count - cap_count
+        blank_allocations = _allocate_evenly(blank_count, len(output_sequences) - 1)
 
         frame_parts = []
         mask_parts = []
-        for index, sequence in enumerate(output_sequences):
+        cap_indices = []
+        blank_indices_by_gap = []
+        frame_cursor = 0
+        for index, (name, sequence) in enumerate(output_sequences):
             frame_parts.append(sequence)
+            sequence_count = int(sequence.shape[0])
             mask_parts.append(
                 torch.zeros(
-                    (int(sequence.shape[0]), reference_shape[0], reference_shape[1]),
+                    (sequence_count, reference_shape[0], reference_shape[1]),
                     dtype=torch.float32,
                     device=section_1_frames.device,
                 )
             )
+            if name.endswith("_cap"):
+                cap_indices.extend(range(frame_cursor, frame_cursor + sequence_count))
+            frame_cursor += sequence_count
+
             if index >= len(blank_allocations):
                 continue
-            blank_count = blank_allocations[index]
+            gap_count = blank_allocations[index]
+            blank_indices_by_gap.append(
+                list(range(frame_cursor, frame_cursor + gap_count))
+            )
             frame_parts.append(
                 torch.ones(
-                    (blank_count, *reference_shape),
+                    (gap_count, *reference_shape),
                     dtype=section_1_frames.dtype,
                     device=section_1_frames.device,
                 )
             )
             mask_parts.append(
                 torch.ones(
-                    (blank_count, reference_shape[0], reference_shape[1]),
+                    (gap_count, reference_shape[0], reference_shape[1]),
                     dtype=torch.float32,
                     device=section_1_frames.device,
                 )
             )
+            frame_cursor += gap_count
 
         frames = torch.cat(frame_parts, dim=0)
         mask = torch.cat(mask_parts, dim=0)
 
-        if int(frames.shape[0]) != final_total:
+        padding_count = internal_target - cap_count - core_target
+        preferred_padding_indices = []
+        if start_frame is not None and blank_indices_by_gap:
+            preferred_padding_indices.extend(blank_indices_by_gap[0])
+        if end_frame is not None and blank_indices_by_gap:
+            preferred_padding_indices.extend(blank_indices_by_gap[-1])
+        for gap_indices in blank_indices_by_gap:
+            preferred_padding_indices.extend(gap_indices)
+        preferred_padding_indices = list(dict.fromkeys(preferred_padding_indices))
+        padding_indices = preferred_padding_indices[:padding_count]
+        remove_indices = sorted(set(cap_indices + padding_indices))
+
+        cap_info = json.dumps(
+            {
+                "version": 1,
+                "remove_first": start_frame is not None,
+                "remove_last": end_frame is not None,
+                "start_count": int(start_frame.shape[0]) if start_frame is not None else 0,
+                "end_count": int(end_frame.shape[0]) if end_frame is not None else 0,
+                "padding_count": padding_count,
+                "remove_indices": remove_indices,
+                "core_frame_count": core_target,
+                "internal_frame_count": internal_target,
+            },
+            separators=(",", ":"),
+        )
+
+        if int(frames.shape[0]) != internal_target:
             raise RuntimeError(
                 "Internal WAN frame calculation mismatch: "
-                f"expected {final_total}, got {int(frames.shape[0])}."
+                f"expected {internal_target}, got {int(frames.shape[0])}."
             )
+        return (frames, mask, cap_info)
 
-        return (frames, mask)
+
+class WANRemoveCapFrames:
+    """Remove WAN Connect Frames boundary caps and their padding metadata."""
+
+    CATEGORY = "conditioning/video_models"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("frames", "mask")
+    FUNCTION = "remove"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames": ("IMAGE",),
+                "cap_info": (
+                    "STRING",
+                    {
+                        "tooltip": "Connect the cap_info output from WAN Connect Frames.",
+                    },
+                ),
+            },
+            "optional": {
+                "mask": (
+                    "MASK",
+                    {
+                        "tooltip": "Optional mask to trim along with the removed cap frames.",
+                    },
+                ),
+            },
+        }
+
+    def remove(
+        self,
+        frames: torch.Tensor,
+        cap_info: str,
+        mask: torch.Tensor | None = None,
+    ):
+        frames = _as_image_batch(frames, "frames")
+        if mask is not None:
+            mask = _as_mask_batch(mask)
+            if int(mask.shape[0]) != int(frames.shape[0]):
+                raise ValueError(
+                    "frames and mask must contain the same number of frames; "
+                    f"received {frames.shape[0]} and {mask.shape[0]}."
+                )
+            if tuple(mask.shape[1:]) != tuple(frames.shape[1:3]):
+                raise ValueError(
+                    "frames and mask must have matching height and width; "
+                    f"received {tuple(frames.shape[1:3])} and {tuple(mask.shape[1:])}."
+                )
+
+        try:
+            metadata = json.loads(cap_info)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("cap_info is not valid WAN Connect Frames metadata.") from error
+        if not isinstance(metadata, dict) or metadata.get("version") != 1:
+            raise ValueError("cap_info is not recognized WAN Connect Frames metadata.")
+
+        remove_indices = metadata.get("remove_indices", [])
+        if not isinstance(remove_indices, list):
+            raise ValueError("cap_info.remove_indices must be a list.")
+        remove_indices = sorted(set(int(index) for index in remove_indices))
+        if any(index < 0 or index >= int(frames.shape[0]) for index in remove_indices):
+            raise ValueError("cap_info contains a frame index outside the input batch.")
+
+        keep = torch.ones(
+            int(frames.shape[0]),
+            dtype=torch.bool,
+            device=frames.device,
+        )
+        if remove_indices:
+            keep[torch.tensor(remove_indices, device=frames.device)] = False
+        output_frames = frames[keep]
+        if mask is None:
+            output_mask = torch.zeros(
+                (int(output_frames.shape[0]), *frames.shape[1:3]),
+                dtype=torch.float32,
+                device=frames.device,
+            )
+        else:
+            output_mask = mask.to(device=frames.device)[keep]
+
+        expected_count = metadata.get("core_frame_count")
+        if expected_count is not None and int(output_frames.shape[0]) != int(expected_count):
+            raise RuntimeError(
+                "WAN cap removal produced an unexpected frame count: "
+                f"expected {expected_count}, got {output_frames.shape[0]}."
+            )
+        if (int(output_frames.shape[0]) - 1) % 4 != 0:
+            raise RuntimeError(
+                "WAN cap removal produced an invalid frame count: "
+                f"{output_frames.shape[0]} is not 1 + 4n."
+            )
+        return (output_frames, output_mask)
 
 
 # Keep imports from the previous node implementation working for external code.
