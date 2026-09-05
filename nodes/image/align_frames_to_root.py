@@ -123,21 +123,25 @@ def _alignment_transform(
     root_frame: np.ndarray,
     reference_frame: np.ndarray,
     match_axis: str,
+    scaling_mode: str = "Precise",
 ) -> np.ndarray:
     """Build a fixed scale/anchor transform from root and the first frame.
 
-    The subject, rather than the source canvas, determines the scale. The
-    first frame is independently scaled on X and Y to match the root
-    silhouette bounds, then anchored by the selected axis. That same
-    transform is reused for every frame in the batch. Keeping this transform
-    fixed is important: later poses may move above, below, or beyond the root
-    canvas, so they must expand the shared output canvas instead of changing
-    earlier frame placement.
+    The subject, rather than the source canvas, determines the scale. Precise
+    mode independently scales X and Y to match the root silhouette bounds;
+    proportional mode uses the selected axis' scale for both dimensions. The
+    result is anchored by the selected axis and reused for every frame in the
+    batch.
     """
     if match_axis not in {"Height (Y)", "Width (X)"}:
         raise ValueError(
             "match_axis must be 'Height (Y)' or 'Width (X)'; "
             f"received {match_axis!r}."
+        )
+    if scaling_mode not in {"Precise", "Proportional"}:
+        raise ValueError(
+            "scaling_mode must be 'Precise' or 'Proportional'; "
+            f"received {scaling_mode!r}."
         )
 
     root_x, root_y, root_width, root_height = _foreground_bbox(root_frame)
@@ -145,8 +149,16 @@ def _alignment_transform(
         reference_frame
     )
 
-    scale_x = root_width / max(1.0, float(reference_width))
-    scale_y = root_height / max(1.0, float(reference_height))
+    if scaling_mode == "Proportional":
+        match_scale = (
+            root_height / max(1.0, float(reference_height))
+            if match_axis == "Height (Y)"
+            else root_width / max(1.0, float(reference_width))
+        )
+        scale_x = scale_y = match_scale
+    else:
+        scale_x = root_width / max(1.0, float(reference_width))
+        scale_y = root_height / max(1.0, float(reference_height))
     root_center_x = root_x + root_width / 2.0
     reference_center_x = reference_x + reference_width / 2.0
     root_center_y = root_y + root_height / 2.0
@@ -218,14 +230,22 @@ def _refine_alignment_transform(
     root_frame: np.ndarray,
     reference_frame: np.ndarray,
     initial_transform: np.ndarray,
+    scaling_mode: str = "Precise",
 ) -> np.ndarray:
-    """Fine-tune X/Y scale and translation against the two silhouettes.
+    """Fine-tune scale and translation against the two silhouettes.
 
     The search is deliberately local. Bounding-box matching establishes the
     stable animation scale first; this pass only corrects small registration
-    errors such as a one- or two-pixel horizontal drift. Rotation and shear
-    are excluded so pose changes cannot tilt or distort the batch.
+    errors such as a one- or two-pixel horizontal drift. In proportional mode
+    the X and Y scales are refined together. Rotation and shear are excluded
+    so pose changes cannot tilt or distort the batch.
     """
+    if scaling_mode not in {"Precise", "Proportional"}:
+        raise ValueError(
+            "scaling_mode must be 'Precise' or 'Proportional'; "
+            f"received {scaling_mode!r}."
+        )
+
     root_mask = _foreground_mask(root_frame)
     reference_mask = _foreground_mask(reference_frame)
     root_distance = cv2.distanceTransform(
@@ -251,6 +271,9 @@ def _refine_alignment_transform(
             initial_transform[1, 2],
         )
     )
+    proportional = scaling_mode == "Proportional"
+    if proportional:
+        parameters[1] = parameters[0]
 
     def score(candidate: np.ndarray) -> float:
         scale_x, scale_y, offset_x, offset_y = candidate
@@ -292,11 +315,11 @@ def _refine_alignment_transform(
                 (initial[3] - 8.0, initial[3] + 8.0),
             )
         )
+        indexes = (0, 2, 3) if proportional else (0, 1, 2, 3)
         for _ in range(8):
             changed = False
-            for index, step in enumerate(
-                (scale_step, scale_step, offset_step, offset_step)
-            ):
+            for index in indexes:
+                step = scale_step if index < 2 else offset_step
                 candidate_best = parameters
                 candidate_score = best_score
                 for direction in (-1.0, 1.0):
@@ -307,6 +330,8 @@ def _refine_alignment_transform(
                         limits[index, 0],
                         limits[index, 1],
                     )
+                    if proportional and index == 0:
+                        candidate[1] = candidate[0]
                     candidate_value = score(candidate)
                     if candidate_value < candidate_score:
                         candidate_best = candidate
@@ -318,10 +343,11 @@ def _refine_alignment_transform(
             if not changed:
                 break
 
+    scale_y = parameters[0] if proportional else parameters[1]
     return np.float32(
         (
             (parameters[0], 0.0, parameters[2]),
-            (0.0, parameters[1], parameters[3]),
+            (0.0, scale_y, parameters[3]),
         )
     )
 
@@ -414,7 +440,14 @@ class AlignFramesToRootNode:
                     ["Height (Y)", "Width (X)"],
                     {
                         "default": "Height (Y)",
-                        "tooltip": "The first frame matches the root subject width and height independently. Height (Y) anchors their top edges and centers them on X; Width (X) anchors their left edges and centers them on Y.",
+                        "tooltip": "In proportional mode, this dimension determines the shared scale. Height (Y) anchors their top edges and centers them on X; Width (X) anchors their left edges and centers them on Y.",
+                    },
+                ),
+                "scaling_mode": (
+                    ["Precise", "Proportional"],
+                    {
+                        "default": "Precise",
+                        "tooltip": "Precise scales X and Y independently to match the root subject bounds. Proportional applies the selected match-axis scale to both dimensions to preserve the frame's aspect ratio.",
                     },
                 ),
             },
@@ -425,6 +458,7 @@ class AlignFramesToRootNode:
         root_frame: torch.Tensor,
         frames: torch.Tensor,
         match_axis: str = "Height (Y)",
+        scaling_mode: str = "Precise",
     ):
         root_frame = _as_image_batch(root_frame, "root_frame")
         frames = _as_image_batch(frames, "frames")
@@ -437,11 +471,17 @@ class AlignFramesToRootNode:
 
         root_np = root_frame[0].detach().cpu().numpy().astype(np.float32, copy=False)
         frames_np = frames.detach().cpu().numpy().astype(np.float32, copy=False)
-        transform = _alignment_transform(root_np, frames_np[0], match_axis)
+        transform = _alignment_transform(
+            root_np,
+            frames_np[0],
+            match_axis,
+            scaling_mode,
+        )
         transform = _refine_alignment_transform(
             root_np,
             frames_np[0],
             transform,
+            scaling_mode,
         )
         output_width, output_height, offset_x, offset_y = _expanded_canvas(
             int(root_np.shape[1]),
