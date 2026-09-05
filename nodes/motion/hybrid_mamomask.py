@@ -480,14 +480,14 @@ class HybridMaMoMaskExportFBX:
         stem = f"{_sanitize_filename(filename_prefix)}{time.strftime('%m%d%y%H%M', time.localtime())}"
         fbx_path = output_root / f"{stem}.fbx"
 
-        rot_matrices, root_trans = _get_rot_matrices_from_motion(motion.motion_263_denorm, model.repo_root)
-        ok = ms_fbx_export.write_fbx_with_character(
+        rot_matrices, _root_trans = _get_rot_matrices_from_motion(motion.motion_263_denorm, model.repo_root)
+        ok = ms_fbx_export.write_fbx_from_positions(
             template_fbx_path=str(_LOCAL_TEMPLATE_FBX),
-            rot_matrices=rot_matrices,
-            translations=root_trans,
+            xyz=motion.xyz,
             save_path=str(fbx_path),
             fps=float(motion.fps),
             scale=100.0,
+            rot_matrices=rot_matrices,
             source_name="HybridMaMoMask",
             source_key="HYBRID_MAMOMASK",
         )
