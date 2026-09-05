@@ -107,40 +107,15 @@ class SpritesheetBuilderNode:
                     "y": motion.get("y", 0) * scale_y,
                 }
             placement = manifest["frames"]
-            trimmed = []
+            # This node only arranges frames into a grid - it never crops or
+            # resizes them (a prior version trimmed to the alpha bbox here,
+            # which changed frame dimensions and broke the fixed canvas size
+            # the rest of the pipeline depends on). spriteSourceSize is
+            # derived directly from each frame's own incoming dimensions so
+            # it always matches exactly what gets packed, regardless of any
+            # resize/pixel-art node upstream of this one.
             for index, frame in enumerate(frame_list):
-                # The image arriving through ComfyUI is authoritative for the
-                # crop. It can differ by a pixel from metadata generated before
-                # graph serialization or a node reload, so never reject a valid
-                # alpha-bearing frame solely because its saved rectangle is
-                # marginally outside the current canvas.
-                #
-                # Only width is trimmed to content. Height must stay exactly
-                # the incoming canvas height always - trimming it to the
-                # alpha bbox let a frame with a bit of vertical letterbox
-                # padding (from Stabilize Frames' fill-to-canvas scaling)
-                # come out a couple pixels short, which breaks the fixed
-                # frame-height assumption the game's per-animation scale math
-                # relies on (e.g. Spirie idle right needs an exact 160px
-                # height or vertical alignment suffers).
-                frame_np = frame.numpy()
-                full_h = frame.shape[0]
-                if frame_np.shape[-1] == 4:
-                    _, xs = np.where(frame_np[..., 3] > 0.02)
-                else:
-                    xs = np.array([])
-
-                if xs.size:
-                    x = int(xs.min())
-                    w = int(xs.max()) + 1 - x
-                else:
-                    rect = placement[index].get("spriteSourceSize", {})
-                    x = max(0, min(int(rect.get("x", 0)), frame.shape[1] - 1))
-                    w = max(1, min(int(rect.get("w", frame.shape[1])), frame.shape[1] - x))
-
-                placement[index]["spriteSourceSize"] = {"x": x, "y": 0, "w": w, "h": full_h}
-                trimmed.append(frame[:, x:x + w])
-            frame_list = trimmed
+                placement[index]["spriteSourceSize"] = {"x": 0, "y": 0, "w": frame.shape[1], "h": frame.shape[0]}
 
         target_ratio = self._aspect_ratio_value(aspect_ratio)
         frame_width = max(frame.shape[1] for frame in frame_list)
