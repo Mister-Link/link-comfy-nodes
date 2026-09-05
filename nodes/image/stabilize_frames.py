@@ -6,9 +6,10 @@ import cv2
 import numpy as np
 import torch
 
-# Border of transparent pixels kept between the scaled-to-fill content and
-# the canvas edge (on the limiting axis only - see PADDING_PX usage below).
-PADDING_PX = 1
+# Border of transparent pixels kept between the stabilized content and the
+# canvas edge. A few pixels are needed because Lanczos resampling has a small
+# ringing footprint beyond the detected foreground bounds.
+PADDING_PX = 4
 
 
 def _foreground(mask: np.ndarray):
@@ -38,6 +39,56 @@ def _pairwise_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, f
     window = cv2.createHanningWindow((previous.shape[1], previous.shape[0]), cv2.CV_32F)
     shift, response = cv2.phaseCorrelate(previous, current, window)
     return float(shift[0]), float(shift[1]), float(response)
+
+
+def _registration_positions(
+    scaled_frames: list[np.ndarray],
+    scaled_alphas: list[np.ndarray],
+) -> np.ndarray:
+    """Measure global loop positions in the same space as the scaled frames."""
+    signals = [
+        _registration_signal(frame, alpha)
+        for frame, alpha in zip(scaled_frames, scaled_alphas)
+    ]
+    if len(signals) <= 1:
+        return np.zeros((len(signals), 2), dtype=np.float32)
+
+    edges = np.asarray(
+        [_pairwise_shift(a, b) for a, b in zip(signals, signals[1:] + signals[:1])],
+        dtype=np.float32,
+    )
+    edges[:, :2] -= np.mean(edges[:, :2], axis=0)
+    positions = np.zeros((len(signals), 2), dtype=np.float32)
+    for index, edge in enumerate(edges[:-1], start=1):
+        positions[index] = positions[index - 1] + edge[:2]
+    positions -= np.median(positions, axis=0)
+    return positions
+
+
+def _corrected_content_bounds(
+    boxes: list[tuple[int, int, int, int]],
+    scale: float,
+    corrections: np.ndarray,
+) -> tuple[float, float, float, float]:
+    """Find the union of all foreground boxes after stabilization motion."""
+    bounds = np.asarray(
+        [
+            (
+                x1 * scale + dx,
+                y1 * scale + dy,
+                x2 * scale + dx,
+                y2 * scale + dy,
+            )
+            for (x1, y1, x2, y2), (dx, dy) in zip(boxes, corrections)
+        ],
+        dtype=np.float32,
+    )
+    return (
+        float(bounds[:, 0].min()),
+        float(bounds[:, 1].min()),
+        float(bounds[:, 2].max()),
+        float(bounds[:, 3].max()),
+    )
 
 
 class StabilizeFramesNode:
@@ -75,10 +126,11 @@ class StabilizeFramesNode:
         # a nominally identical frame size.
         h, w = frames.shape[1:3]
 
-        alphas, widths, heights = [], [], []
+        alphas, boxes, widths, heights = [], [], [], []
         for current_mask in masks:
             alpha, (x1, y1, x2, y2) = _foreground(current_mask)
             alphas.append(alpha)
+            boxes.append((x1, y1, x2, y2))
             widths.append(max(1, x2 - x1))
             heights.append(max(1, y2 - y1))
 
@@ -87,26 +139,42 @@ class StabilizeFramesNode:
         # limiting axis fills to the border exactly; the other axis is
         # letterboxed with transparent padding split evenly on both sides
         # rather than stretched to match.
-        scale = min((w - 2 * PADDING_PX) / max(widths), (h - 2 * PADDING_PX) / max(heights))
-        scaled_frames, scaled_alphas = [], []
-        for frame, alpha in zip(frames, alphas):
-            size = (max(1, round(frame.shape[1] * scale)), max(1, round(frame.shape[0] * scale)))
-            scaled_frames.append(cv2.resize(frame, size, interpolation=cv2.INTER_LANCZOS4))
-            scaled_alphas.append(cv2.resize(alpha, size, interpolation=cv2.INTER_LINEAR))
-        scaled_h, scaled_w = scaled_frames[0].shape[:2]
+        scale = min(
+            (w - 2 * PADDING_PX) / max(widths),
+            (h - 2 * PADDING_PX) / max(heights),
+        )
 
-        # Register adjacent frames around the complete loop. This is global,
-        # feature-independent motion estimation; no object-specific anchor.
-        # Measured directly in scaled-frame pixel units, since that's the
-        # space the translation below is applied in.
-        signals = [_registration_signal(frame, alpha) for frame, alpha in zip(scaled_frames, scaled_alphas)]
-        edges = np.asarray([_pairwise_shift(a, b) for a, b in zip(signals, signals[1:] + signals[:1])], dtype=np.float32)
-        edges[:, :2] -= np.mean(edges[:, :2], axis=0)
-        positions = np.zeros((len(frames), 2), dtype=np.float32)
-        for i, edge in enumerate(edges[:-1], start=1):
-            positions[i] = positions[i - 1] + edge[:2]
-        positions -= np.median(positions, axis=0)
-        corrections = -positions
+        # Registration corrections can make the union wider or taller than
+        # the largest individual foreground box. Recompute at a fitted scale
+        # so the corrected union is guaranteed to fit before placement.
+        for _ in range(4):
+            scaled_frames, scaled_alphas = [], []
+            for frame, alpha in zip(frames, alphas):
+                size = (
+                    max(1, round(frame.shape[1] * scale)),
+                    max(1, round(frame.shape[0] * scale)),
+                )
+                scaled_frames.append(cv2.resize(frame, size, interpolation=cv2.INTER_LANCZOS4))
+                scaled_alphas.append(cv2.resize(alpha, size, interpolation=cv2.INTER_LINEAR))
+
+            positions = _registration_positions(scaled_frames, scaled_alphas)
+            corrections = -positions
+            min_x, min_y, max_x, max_y = _corrected_content_bounds(
+                boxes,
+                scale,
+                corrections,
+            )
+            content_width = max(1.0, max_x - min_x)
+            content_height = max(1.0, max_y - min_y)
+            fit_scale = min(
+                (w - 2 * PADDING_PX) / content_width,
+                (h - 2 * PADDING_PX) / content_height,
+                1.0,
+            )
+            if fit_scale >= 0.999:
+                break
+            scale *= fit_scale * 0.999
+
         # The image is moved by `corrections` to remove the source motion.
         # The game later adds this inverse displacement back per frame, after
         # pixelization and spritesheet trimming. Reported in the same units
@@ -114,11 +182,16 @@ class StabilizeFramesNode:
         # working space.
         motion_offsets = positions / scale
 
-        # Base placement centers the scaled content on the untouched (w, h)
-        # canvas; the per-frame correction then nudges that placement to
-        # cancel jitter.
-        center_x = (w - scaled_w) / 2.0
-        center_y = (h - scaled_h) / 2.0
+        # Center the corrected foreground union, rather than the full source
+        # canvas. This removes arbitrary source padding (especially above the
+        # subject) while keeping every corrected pose inside the output.
+        min_x, min_y, max_x, max_y = _corrected_content_bounds(
+            boxes,
+            scale,
+            corrections,
+        )
+        center_x = PADDING_PX + (w - 2 * PADDING_PX - (max_x - min_x)) / 2.0 - min_x
+        center_y = PADDING_PX + (h - 2 * PADDING_PX - (max_y - min_y)) / 2.0 - min_y
 
         result, output_masks, manifest_frames = [], [], []
         for index, (frame, alpha, (dx, dy)) in enumerate(zip(scaled_frames, scaled_alphas, corrections)):
