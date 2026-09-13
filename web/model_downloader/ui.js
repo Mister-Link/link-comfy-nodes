@@ -236,7 +236,11 @@ export class WorkflowUI {
       
       if (dlInfo.status === "downloading") {
         const progress = parseFloat(dlInfo.progress) || 0;
-        btnText.textContent = dlInfo.phase ? dlInfo.phase : `${progress.toFixed(1)}%`;
+        const eta = Number(dlInfo.eta_seconds);
+        const etaText = Number.isFinite(eta) && eta >= 1
+          ? ` · ${eta < 60 ? `${Math.ceil(eta)}s` : `${Math.ceil(eta / 60)}m`}`
+          : "";
+        btnText.textContent = dlInfo.phase ? dlInfo.phase : `${progress.toFixed(1)}%${etaText}`;
         if (progressFill) progressFill.style.width = `${progress}%`;
         btn.style.background = "#555";
         btn.disabled = true;
@@ -253,7 +257,7 @@ export class WorkflowUI {
         btn.disabled = true;
         btn.style.cursor = "not-allowed";
       } else if (dlInfo.status === "pending") {
-        btnText.textContent = "Pending";
+        btnText.textContent = dlInfo.source === "hot-model-prefetch" ? "Waiting for R2" : "Pending";
         btn.style.background = "#666";
         btn.disabled = true;
         btn.style.cursor = "not-allowed";
@@ -367,6 +371,7 @@ export class WorkflowUI {
             shards: model.shards || null,
             path: model.type,
             filename: model.name,
+            size: model.size,
             max_speed_mbps: maxDownloadSpeed || null
           }),
         });
@@ -555,6 +560,7 @@ export class WorkflowUI {
               shards: model.shards || null,
               path: model.type,
               filename: model.name,
+            size: model.size,
               max_speed_mbps: maxDownloadSpeed || null
             }),
           });
