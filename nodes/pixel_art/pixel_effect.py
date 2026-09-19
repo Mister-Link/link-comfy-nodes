@@ -16,6 +16,15 @@ class PixelEffectModule(nn.Module):
     # RELIABLE_COLOR_FLOOR's use in forward().
     RELIABLE_COLOR_FLOOR = 2.0
 
+    # Minimum share of the block's TOTAL alpha coverage (all families
+    # combined) the winning family needs to hold before it's trusted to
+    # represent the whole block. dominant_vote_weight's saturation bias can
+    # make a thin, uniformly-colored detail (e.g. a fold/seam line) win the
+    # argmax against a much larger neutral area that's fragmented across
+    # several tone-level bins -- no single one of those fragments looks
+    # big, but their combined area is still the true majority.
+    RELIABLE_AREA_SHARE_FLOOR = 0.35
+
     def __init__(self):
         super(PixelEffectModule, self).__init__()
 
@@ -340,7 +349,10 @@ class PixelEffectModule(nn.Module):
         g_final_fallback = g_all / (alpha_coverage + epsilon)
         b_final_fallback = b_all / (alpha_coverage + epsilon)
 
-        reliable = alpha_max >= self.RELIABLE_COLOR_FLOOR
+        area_share = alpha_max / (alpha_coverage + epsilon)
+        reliable = (alpha_max >= self.RELIABLE_COLOR_FLOOR) & (
+            area_share >= self.RELIABLE_AREA_SHARE_FLOOR
+        )
         r_final = torch.where(reliable, r_final_selected, r_final_fallback)
         g_final = torch.where(reliable, g_final_selected, g_final_fallback)
         b_final = torch.where(reliable, b_final_selected, b_final_fallback)
