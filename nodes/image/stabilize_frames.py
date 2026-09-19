@@ -18,12 +18,13 @@ PADDING_PX = 4
 # the pair it was measured from.
 RESPONSE_THRESHOLD = 0.10
 
-# Circular moving-average window applied to the closed-loop position curve.
-# Even a "good" phase-correlate match has sub-pixel measurement noise; without
+# Moving-average window applied to the measured position curve. Even a
+# "good" phase-correlate match has sub-pixel measurement noise; without
 # damping that noise is applied to the output at full strength every frame,
-# which is what shows up as a few pixels of jitter. 3 is enough to average out
-# single-frame noise without smearing real motion across many frames.
-SMOOTHING_WINDOW = 3
+# which is what shows up as a few pixels of jitter. Five frames suppresses
+# isolated registration noise while preserving the broad displacement of a
+# jump or other one-shot action.
+SMOOTHING_WINDOW = 5
 
 
 def _foreground(mask: np.ndarray):
@@ -32,16 +33,26 @@ def _foreground(mask: np.ndarray):
     border = np.concatenate([binary[0], binary[-1], binary[:, 0], binary[:, -1]])
     bg_white = np.median(border) > 127
     foreground = (binary == 0 if bg_white else binary == 255).astype(np.uint8)
+    source_alpha = 1.0 - mask if bg_white else mask
+    visible = source_alpha > (1.0 / 255.0)
+    ys, xs = np.where(visible)
+    if len(xs):
+        full_bounds = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    else:
+        h, w = mask.shape
+        full_bounds = (0, 0, w, h)
+
     count, labels, stats, _ = cv2.connectedComponentsWithStats(foreground, 8)
     if count <= 1:
-        h, w = mask.shape
-        return mask, (0, 0, w, h)
+        return source_alpha, source_alpha, full_bounds
     label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
     component = (labels == label).astype(np.uint8)
     keep = cv2.dilate(component, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), 1).astype(np.float32)
-    alpha = (1.0 - mask if bg_white else mask) * keep
-    x, y, w, h, _ = stats[label]
-    return alpha, (x, y, x + w, y + h)
+    alpha = source_alpha * keep
+    # Use the complete alpha bounds for canvas sizing even though the largest
+    # component is used for registration. A disconnected hat, hand, prop, or
+    # effect must never be cropped just because it is not the largest island.
+    return alpha, source_alpha, full_bounds
 
 
 def _registration_signal(frame: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -52,7 +63,9 @@ def _registration_signal(frame: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     # register as motion. Matches the intent of the old distance-transform +
     # GaussianBlur(sigma=4) signal this replaced, just applied to the new
     # luminance-weighted signal instead of a binary mask.
-    return cv2.GaussianBlur(signal.astype(np.float32), (0, 0), 2.0)
+    signal = cv2.GaussianBlur(signal.astype(np.float32), (0, 0), 2.0)
+
+    return signal
 
 
 def _pairwise_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, float, float]:
@@ -61,10 +74,8 @@ def _pairwise_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, f
     return float(shift[0]), float(shift[1]), float(response)
 
 
-def _smooth_cyclic(positions: np.ndarray, window: int) -> np.ndarray:
-    """Circular moving average - the sequence is a closed loop, so smoothing
-    must wrap around the last/first frame boundary instead of padding with
-    edge values (which would bias the ends of the cycle)."""
+def _smooth_linear(positions: np.ndarray, window: int) -> np.ndarray:
+    """Moving average for a one-shot sequence without wrapping endpoints."""
     n = len(positions)
     if n <= window:
         return positions
@@ -72,8 +83,8 @@ def _smooth_cyclic(positions: np.ndarray, window: int) -> np.ndarray:
     kernel = np.ones(window, dtype=np.float32) / window
     smoothed = np.empty_like(positions)
     for axis in range(positions.shape[1]):
-        wrapped = np.concatenate([positions[-pad:, axis], positions[:, axis], positions[:pad, axis]])
-        smoothed[:, axis] = np.convolve(wrapped, kernel, mode="valid")
+        padded = np.pad(positions[:, axis], (pad, pad), mode="edge")
+        smoothed[:, axis] = np.convolve(padded, kernel, mode="valid")
     return smoothed
 
 
@@ -81,7 +92,12 @@ def _registration_positions(
     scaled_frames: list[np.ndarray],
     scaled_alphas: list[np.ndarray],
 ) -> np.ndarray:
-    """Measure global loop positions in the same space as the scaled frames."""
+    """Measure open-chain global positions in the scaled frame space.
+
+    Playback behavior is deliberately not part of stabilization metadata. The
+    registration pass therefore treats the batch as an ordered sequence and
+    never invents a closing edge between the last and first frame.
+    """
     signals = [
         _registration_signal(frame, alpha)
         for frame, alpha in zip(scaled_frames, scaled_alphas)
@@ -90,19 +106,15 @@ def _registration_positions(
         return np.zeros((len(signals), 2), dtype=np.float32)
 
     edges = np.asarray(
-        [_pairwise_shift(a, b) for a, b in zip(signals, signals[1:] + signals[:1])],
+        [_pairwise_shift(a, b) for a, b in zip(signals, signals[1:])],
         dtype=np.float32,
     )
-    # A low-confidence match is more likely to be correlation noise than real
-    # motion - trusting it at full weight injects that noise into every
-    # subsequent frame's position via the cumulative sum below.
     edges[edges[:, 2] < RESPONSE_THRESHOLD, :2] = 0.0
-    edges[:, :2] -= np.mean(edges[:, :2], axis=0)
     positions = np.zeros((len(signals), 2), dtype=np.float32)
-    for index, edge in enumerate(edges[:-1], start=1):
+    for index, edge in enumerate(edges, start=1):
         positions[index] = positions[index - 1] + edge[:2]
     positions -= np.median(positions, axis=0)
-    return _smooth_cyclic(positions, SMOOTHING_WINDOW)
+    return _smooth_linear(positions, SMOOTHING_WINDOW)
 
 
 def _corrected_content_bounds(
@@ -139,12 +151,42 @@ class StabilizeFramesNode:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {
-            "image": ("IMAGE",),
-            "mask": ("MASK",),
-        }}
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "mask": ("MASK",),
+            },
+            "optional": {
+                "anchor": ("STRING", {"default": ""}),
+            },
+        }
 
-    def stabilize(self, image: torch.Tensor, mask: torch.Tensor):
+    @staticmethod
+    def _parse_anchor(anchor: str, width: int, height: int):
+        if not anchor:
+            return None
+        try:
+            payload = json.loads(anchor) if isinstance(anchor, str) else anchor
+            point = payload.get("anchor", payload)
+            source_size = payload.get("sourceSize", {})
+            source_w = max(1.0, float(source_size.get("w", width)))
+            source_h = max(1.0, float(source_size.get("h", height)))
+            return np.asarray(
+                [
+                    float(point["x"]) * width / source_w,
+                    float(point["y"]) * height / source_h,
+                ],
+                dtype=np.float32,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def stabilize(
+        self,
+        image: torch.Tensor,
+        mask: torch.Tensor,
+        anchor: str = "",
+    ):
         frames = image.detach().cpu().numpy().astype(np.float32)
         masks = mask.detach().cpu().numpy().astype(np.float32)
         if masks.ndim == 4:
@@ -165,11 +207,13 @@ class StabilizeFramesNode:
         # idle_r_alt2 to render visibly wider than idle_r/idle_r_alt despite
         # a nominally identical frame size.
         h, w = frames.shape[1:3]
+        static_anchor = self._parse_anchor(anchor, w, h)
 
-        alphas, boxes, widths, heights = [], [], [], []
+        alphas, render_alphas, boxes, widths, heights = [], [], [], [], []
         for current_mask in masks:
-            alpha, (x1, y1, x2, y2) = _foreground(current_mask)
+            alpha, render_alpha, (x1, y1, x2, y2) = _foreground(current_mask)
             alphas.append(alpha)
+            render_alphas.append(render_alpha)
             boxes.append((x1, y1, x2, y2))
             widths.append(max(1, x2 - x1))
             heights.append(max(1, y2 - y1))
@@ -179,41 +223,37 @@ class StabilizeFramesNode:
         # limiting axis fills to the border exactly; the other axis is
         # letterboxed with transparent padding split evenly on both sides
         # rather than stretched to match.
-        scale = min(
-            (w - 2 * PADDING_PX) / max(widths),
-            (h - 2 * PADDING_PX) / max(heights),
-        )
+        if static_anchor is not None:
+            # Anchored mode is intentionally deterministic. The selected
+            # coordinate is a canvas contract, not a visual-tracking hint:
+            # every source frame receives the same transform.
+            scale = 1.0
+            scaled_frames = list(frames)
+            scaled_alphas = list(alphas)
+            scaled_render_alphas = list(render_alphas)
+            positions = np.zeros((len(frames), 2), dtype=np.float32)
+        else:
+            scale = min(
+                (w - 2 * PADDING_PX) / max(widths),
+                (h - 2 * PADDING_PX) / max(heights),
+            )
 
-        # Registration corrections can make the union wider or taller than
-        # the largest individual foreground box. Recompute at a fitted scale
-        # so the corrected union is guaranteed to fit before placement.
-        for _ in range(4):
-            scaled_frames, scaled_alphas = [], []
-            for frame, alpha in zip(frames, alphas):
+            # Unanchored mode retains automatic registration.
+            scaled_frames, scaled_alphas, scaled_render_alphas = [], [], []
+            for frame, alpha, render_alpha in zip(frames, alphas, render_alphas):
                 size = (
                     max(1, round(frame.shape[1] * scale)),
                     max(1, round(frame.shape[0] * scale)),
                 )
                 scaled_frames.append(cv2.resize(frame, size, interpolation=cv2.INTER_LANCZOS4))
                 scaled_alphas.append(cv2.resize(alpha, size, interpolation=cv2.INTER_LINEAR))
+                scaled_render_alphas.append(cv2.resize(render_alpha, size, interpolation=cv2.INTER_LINEAR))
 
-            positions = _registration_positions(scaled_frames, scaled_alphas)
-            corrections = -positions
-            min_x, min_y, max_x, max_y = _corrected_content_bounds(
-                boxes,
-                scale,
-                corrections,
+            positions = _registration_positions(
+                scaled_frames,
+                scaled_alphas,
             )
-            content_width = max(1.0, max_x - min_x)
-            content_height = max(1.0, max_y - min_y)
-            fit_scale = min(
-                (w - 2 * PADDING_PX) / content_width,
-                (h - 2 * PADDING_PX) / content_height,
-                1.0,
-            )
-            if fit_scale >= 0.999:
-                break
-            scale *= fit_scale * 0.999
+        corrections = -positions
 
         # The image is moved by `corrections` to remove the source motion.
         # The game later adds this inverse displacement back per frame, after
@@ -233,28 +273,104 @@ class StabilizeFramesNode:
         center_x = PADDING_PX + (w - 2 * PADDING_PX - (max_x - min_x)) / 2.0 - min_x
         center_y = PADDING_PX + (h - 2 * PADDING_PX - (max_y - min_y)) / 2.0 - min_y
 
+        # The anchor node supplies one fixed source/output coordinate, not a
+        # per-frame point and not a replacement canvas center. Anchored mode
+        # uses the identity transform here; the same source coordinate is
+        # therefore in the same place for every output frame.
+        output_pivot = np.asarray([w / 2.0, h / 2.0], dtype=np.float32)
+        if static_anchor is not None:
+            center_x = float(static_anchor[0] - static_anchor[0] * scale - corrections[0][0])
+            center_y = float(static_anchor[1] - static_anchor[1] * scale - corrections[0][1])
+            # The clicked point is the stabilization reference only. It is
+            # commonly the feet, but the engine's render pivot is the
+            # physics-body center. That center is the middle of the
+            # canonical output canvas, not the clicked anchor.
+            output_pivot = None
+
+        # Compute a tight canvas from every transformed content bound. Keep
+        # only a small safety border for resampling; crop transparent source
+        # margins, but grow the canvas whenever anchoring needs more room.
+        placed_min_x = min_x + center_x
+        placed_min_y = min_y + center_y
+        placed_max_x = max_x + center_x
+        placed_max_y = max_y + center_y
+        canvas_min_x = int(np.floor(placed_min_x)) - PADDING_PX
+        canvas_min_y = int(np.floor(placed_min_y)) - PADDING_PX
+        canvas_max_x = int(np.ceil(placed_max_x)) + PADDING_PX
+        canvas_max_y = int(np.ceil(placed_max_y)) + PADDING_PX
+        output_width = max(1, canvas_max_x - canvas_min_x)
+        output_height = max(1, canvas_max_y - canvas_min_y)
+        canvas_shift_x = -canvas_min_x
+        canvas_shift_y = -canvas_min_y
+
+        # Expanding the canvas adds only transparent padding. No source pixel
+        # is discarded when anchor placement moves content past an old edge.
         result, output_masks, manifest_frames = [], [], []
-        for index, (frame, alpha, (dx, dy)) in enumerate(zip(scaled_frames, scaled_alphas, corrections)):
-            transform = np.float32([[1, 0, center_x + dx], [0, 1, center_y + dy]])
-            corrected_frame = cv2.warpAffine(frame, transform, (w, h), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT)
-            corrected_alpha = cv2.warpAffine(alpha, transform, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        for index, (frame, render_alpha, (dx, dy)) in enumerate(
+            zip(scaled_frames, scaled_render_alphas, corrections)
+        ):
+            transform = np.float32(
+                [[1, 0, center_x + dx + canvas_shift_x],
+                 [0, 1, center_y + dy + canvas_shift_y]]
+            )
+            corrected_frame = cv2.warpAffine(
+                frame,
+                transform,
+                (output_width, output_height),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_CONSTANT,
+            )
+            corrected_alpha = cv2.warpAffine(
+                render_alpha,
+                transform,
+                (output_width, output_height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+            )
             result.append(np.concatenate([corrected_frame[:, :, :3], corrected_alpha[..., None]], axis=-1))
             output_masks.append(corrected_alpha)
             manifest_frames.append({
                 "index": index,
-                "spriteSourceSize": {"x": 0, "y": 0, "w": w, "h": h},
+                "spriteSourceSize": {"x": 0, "y": 0, "w": output_width, "h": output_height},
                 "motionOffset": {"x": float(motion_offsets[index][0]), "y": float(motion_offsets[index][1])},
             })
 
         if not np.any(np.stack(output_masks) > 0.02):
             raise ValueError("Registration moved all frames outside their canvas")
 
+        if static_anchor is not None:
+            # Anchored output is normalized to the canonical frame center so
+            # feet/head anchors do not become the game's physics origin.
+            output_anchor = static_anchor + np.asarray([canvas_shift_x, canvas_shift_y], dtype=np.float32)
+            output_pivot = np.asarray([output_width / 2.0, output_height / 2.0], dtype=np.float32)
+        else:
+            output_anchor = None
+            output_pivot = output_pivot + np.asarray([canvas_shift_x, canvas_shift_y], dtype=np.float32)
+
         metadata = {
             "format": "link-comfy-nodes/stabilization-v1",
-            "sourceSize": {"w": w, "h": h},
-            "pivot": {"x": round(w / 2), "y": round(h / 2)},
+            # The stabilized sheet is anchored at the player's physics-body
+            # center. Registration history remains per-frame diagnostic data;
+            # the game must not reapply it as root motion by default.
+            "root": {
+                "type": "physics_body_center",
+                "x": round(float(output_pivot[0])),
+                "y": round(float(output_pivot[1])),
+            },
+            "rootMotion": False,
+            "sourceSize": {"w": output_width, "h": output_height},
+            "pivot": {
+                "x": round(float(output_pivot[0])),
+                "y": round(float(output_pivot[1])),
+            },
             "frames": manifest_frames,
         }
+        if static_anchor is not None:
+            metadata["anchor"] = {
+                "x": round(float(output_anchor[0])),
+                "y": round(float(output_anchor[1])),
+            }
+
         output = torch.from_numpy(np.stack(result)).to(device=image.device, dtype=image.dtype)
         output_masks = torch.from_numpy(np.stack(output_masks)).to(device=mask.device, dtype=mask.dtype)
         return output, output_masks, json.dumps(metadata)

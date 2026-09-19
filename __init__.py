@@ -25,6 +25,7 @@ from .nodes import (
     ImagePixelateNode,
     ImageRotatorNode,
     KSamplerAdvancedDual,
+    LoadFolderAnchorNode,
     LoadFolderNode,
     MatchColorsToReferenceNode,
     NativeWanPoseStrength,
@@ -51,6 +52,7 @@ from .nodes import (
 
 NODE_CLASS_MAPPINGS = {
     "Load Folder": LoadFolderNode,
+    "Load Folder with Anchor": LoadFolderAnchorNode,
     "Average Mask Region Size": AverageMaskRegionSizeNode,
     "Add Image to Batch": AddImageToBatchNode,
     "Align Frames to Root": AlignFramesToRootNode,
@@ -99,6 +101,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Load Folder": "Load Folder",
+    "Load Folder with Anchor": "Load Folder with Anchor",
     "Average Mask Region Size": "Average Mask Region Size",
     "Add Image to Batch": "Add Image to Batch",
     "Align Frames to Root": "Align Frames to Root",

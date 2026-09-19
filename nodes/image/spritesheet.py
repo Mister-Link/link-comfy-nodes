@@ -170,7 +170,15 @@ class SpritesheetBuilderNode:
             "calibration": {"offset_x": 0, "offset_y": 0},
         }
         if manifest is not None:
+            root_motion = bool(manifest.get("rootMotion", False))
+            metadata["root"] = {
+                "type": "physics_body_center",
+                "x": manifest["pivot"]["x"],
+                "y": manifest["pivot"]["y"],
+            }
+            metadata["rootMotion"] = root_motion
             metadata["stabilization"] = {
+                "rootMotion": root_motion,
                 "sourceSize": manifest["sourceSize"],
                 "pivot": manifest["pivot"],
             }

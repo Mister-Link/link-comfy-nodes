@@ -3,6 +3,7 @@ from .auto_cropper import AutoCropperNode
 from .batch import AddImageToBatchNode
 from .crop_by_bbox import CropByBBoxNode
 from .load_folder import LoadFolderNode
+from .load_folder_anchor import LoadFolderAnchorNode
 from .pixelate import ImagePixelateNode
 from .resize import ResizeImageAndMaskBySideNode
 from .rotate import ImageRotatorNode
