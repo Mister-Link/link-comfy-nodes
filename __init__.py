@@ -47,6 +47,8 @@ from .nodes import (
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
     WANConnectFrames,
+    WANLoopFrames,
+    WANUnloopFrames,
     WANRemoveCapFrames,
 )
 
@@ -96,6 +98,8 @@ NODE_CLASS_MAPPINGS = {
     "Unshift Pose Frames": UnshiftPoseFramesNode,
     "WAN Frames to Add & Cut": WANFramesToAddAndCut,
     "WAN Connect Frames": WANConnectFrames,
+    "WAN Loop Frames": WANLoopFrames,
+    "WAN Unloop Frames": WANUnloopFrames,
     "WAN Remove Cap Frames": WANRemoveCapFrames,
 }
 
@@ -145,6 +149,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Unshift Pose Frames": "Unshift Pose Frames",
     "WAN Frames to Add & Cut": "WAN Frames to Add & Cut",
     "WAN Connect Frames": "WAN Connect Frames",
+    "WAN Loop Frames": "WAN Loop Frames",
+    "WAN Unloop Frames": "WAN Unloop Frames",
     "WAN Remove Cap Frames": "WAN Remove Cap Frames",
 }
 

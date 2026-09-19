@@ -1,5 +1,6 @@
 from .blank_frame_layout import ShiftPoseFramesNode, UnshiftPoseFramesNode
 from .dual_frame_adjuster import WANConnectFrames, WANRemoveCapFrames
+from .loop_frames import WANLoopFrames, WANUnloopFrames
 from .frame_adjuster import WANFramesToAddAndCut
 from .frame_calculator import WANFrameCalculatorNode
 from .pose_strength import NativeWanPoseStrength

@@ -50,6 +50,8 @@ from .wan import (
     WANFrameCalculatorNode,
     WANFramesToAddAndCut,
     WANConnectFrames,
+    WANLoopFrames,
+    WANUnloopFrames,
     WANRemoveCapFrames,
 )
 
@@ -97,5 +99,7 @@ __all__ = [
     "WANFrameCalculatorNode",
     "WANFramesToAddAndCut",
     "WANConnectFrames",
+    "WANLoopFrames",
+    "WANUnloopFrames",
     "WANRemoveCapFrames",
 ]
