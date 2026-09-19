@@ -402,13 +402,20 @@ class WANConnectFrames:
             )
         trailing_context = internal_target - last_masked - 1
         if trailing_context < context_frames:
-            raise ValueError(
-                f"context_frames={context_frames} requires that many unmasked frames "
-                f"after the last masked gap; only {trailing_context} are available."
-            )
+            if not loop or loop_source_frames is None:
+                raise ValueError(
+                    f"context_frames={context_frames} requires that many unmasked frames "
+                    f"after the last masked gap; only {trailing_context} are available."
+                )
+            if int(loop_source_frames.shape[0]) < context_frames:
+                raise ValueError(
+                    "loop requires at least context_frames leading source frames "
+                    "to provide temporal context after the seam."
+                )
 
+        base_after_context = min(context_frames, trailing_context)
         segment_start = first_masked - context_frames
-        segment_end = last_masked + 1 + context_frames
+        segment_end = last_masked + 1 + base_after_context
         segment_frames = frames[segment_start:segment_end]
         segment_mask = mask[segment_start:segment_end]
 
@@ -416,6 +423,7 @@ class WANConnectFrames:
         # are not useful temporal context for the sampler. Substitute the real
         # leading animation frames in the sampled segment; raw_frames retains
         # the removable caps for Unconnect Frames.
+        cap_positions = []
         if loop and loop_source_frames is not None:
             cap_positions = [
                 index - segment_start
@@ -433,9 +441,28 @@ class WANConnectFrames:
 
         base_segment_frame_count = int(segment_frames.shape[0])
         segment_padding_indices = []
-        if (base_segment_frame_count - 1) % 4 != 0:
+        extra_loop_context = max(0, context_frames - base_after_context)
+        if extra_loop_context:
+            extra_frames = loop_source_frames[
+                len(cap_positions):context_frames
+            ]
+            extra_mask = torch.zeros(
+                (extra_loop_context, reference_shape[0], reference_shape[1]),
+                dtype=torch.float32,
+                device=section_1_frames.device,
+            )
+            segment_frames = torch.cat((segment_frames, extra_frames), dim=0)
+            segment_mask = torch.cat((segment_mask, extra_mask), dim=0)
+            segment_padding_indices.extend(
+                range(
+                    base_segment_frame_count,
+                    base_segment_frame_count + extra_loop_context,
+                )
+            )
+        current_segment_frame_count = int(segment_frames.shape[0])
+        if (current_segment_frame_count - 1) % 4 != 0:
             if preference == "add frames":
-                segment_padding_count = (1 - base_segment_frame_count) % 4
+                segment_padding_count = (1 - current_segment_frame_count) % 4
                 insert_at = (last_masked - segment_start) + 1
                 padding_frames = torch.ones(
                     (
@@ -472,11 +499,42 @@ class WANConnectFrames:
                     ),
                     dim=0,
                 )
-                segment_padding_indices = list(
+                segment_padding_indices = [
+                    index + segment_padding_count
+                    if index >= insert_at
+                    else index
+                    for index in segment_padding_indices
+                ]
+                segment_padding_indices.extend(
                     range(insert_at, insert_at + segment_padding_count)
                 )
             elif preference == "same frame count":
-                segment_context_count = (1 - base_segment_frame_count) % 4
+                segment_context_count = (1 - current_segment_frame_count) % 4
+                if loop and loop_source_frames is not None:
+                    extra_start = context_frames
+                    extra_end = extra_start + segment_context_count
+                    if int(loop_source_frames.shape[0]) < extra_end:
+                        raise ValueError(
+                            "loop requires enough leading source frames to make the "
+                            "sampler context length valid."
+                        )
+                    extra_frames = loop_source_frames[extra_start:extra_end]
+                    extra_mask = torch.zeros(
+                        (
+                            segment_context_count,
+                            reference_shape[0],
+                            reference_shape[1],
+                        ),
+                        dtype=torch.float32,
+                        device=section_1_frames.device,
+                    )
+                    old_count = int(segment_frames.shape[0])
+                    segment_frames = torch.cat((segment_frames, extra_frames), dim=0)
+                    segment_mask = torch.cat((segment_mask, extra_mask), dim=0)
+                    segment_padding_indices.extend(
+                        range(old_count, old_count + segment_context_count)
+                    )
+                    segment_context_count = 0
                 available_before = segment_start
                 available_after = internal_target - segment_end
                 try:
@@ -511,7 +569,11 @@ class WANConnectFrames:
                     (prefix_mask, segment_mask, suffix_mask),
                     dim=0,
                 )
+                existing_padding_indices = [
+                    index + add_before for index in segment_padding_indices
+                ]
                 segment_padding_indices = list(range(add_before))
+                segment_padding_indices.extend(existing_padding_indices)
                 segment_padding_indices.extend(
                     range(
                         add_before + base_segment_frame_count,
