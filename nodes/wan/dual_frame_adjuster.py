@@ -120,6 +120,13 @@ class WANConnectFrames:
                         "tooltip": "Keep the requested core frame count when possible, or always round it up by adding frames.",
                     },
                 ),
+                "loop": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Build a seamless loop from section_1_frames alone. Its first frame becomes the end-cap anchor instead of core content, so it is not duplicated when the output repeats. section_2_frames, start_frame, and end_frame are ignored.",
+                    },
+                ),
             },
             "optional": {
                 "section_2_frames": (
@@ -148,26 +155,45 @@ class WANConnectFrames:
         section_1_frames: torch.Tensor,
         transition_frames: int = 0,
         preference: str = "same frame count",
+        loop: bool = False,
         section_2_frames: torch.Tensor | None = None,
         start_frame: torch.Tensor | None = None,
         end_frame: torch.Tensor | None = None,
     ):
         section_1_frames = _as_image_batch(section_1_frames, "section_1_frames")
-        section_2_frames = (
-            _as_image_batch(section_2_frames, "section_2_frames")
-            if section_2_frames is not None
-            else None
-        )
-        start_frame = (
-            _as_image_batch(start_frame, "start_frame")
-            if start_frame is not None
-            else None
-        )
-        end_frame = (
-            _as_image_batch(end_frame, "end_frame")
-            if end_frame is not None
-            else None
-        )
+
+        if loop:
+            if int(section_1_frames.shape[0]) < 2:
+                raise ValueError(
+                    "loop requires section_1_frames to contain at least two frames: "
+                    "one to close the loop against and at least one core frame."
+                )
+            # The first frame closes the loop rather than appearing as core
+            # content; otherwise it is effectively duplicated when the output
+            # repeats (it as core content, then again as the conditioning
+            # target the last generated frame is pulled toward), producing a
+            # visible pause. It is dropped from core and reused as the
+            # end-cap anchor instead, which WANRemoveCapFrames strips entirely.
+            end_frame = section_1_frames[:1]
+            section_1_frames = section_1_frames[1:]
+            section_2_frames = None
+            start_frame = None
+        else:
+            section_2_frames = (
+                _as_image_batch(section_2_frames, "section_2_frames")
+                if section_2_frames is not None
+                else None
+            )
+            start_frame = (
+                _as_image_batch(start_frame, "start_frame")
+                if start_frame is not None
+                else None
+            )
+            end_frame = (
+                _as_image_batch(end_frame, "end_frame")
+                if end_frame is not None
+                else None
+            )
 
         if section_2_frames is None and end_frame is None:
             raise ValueError(
