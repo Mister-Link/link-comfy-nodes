@@ -49,7 +49,7 @@ from .nodes import (
     WANConnectFrames,
     WANLoopFrames,
     WANUnloopFrames,
-    WANRemoveCapFrames,
+    WANUnconnectFrames,
 )
 
 NODE_CLASS_MAPPINGS = {
@@ -100,7 +100,7 @@ NODE_CLASS_MAPPINGS = {
     "WAN Connect Frames": WANConnectFrames,
     "WAN Loop Frames": WANLoopFrames,
     "WAN Unloop Frames": WANUnloopFrames,
-    "WAN Remove Cap Frames": WANRemoveCapFrames,
+    "WAN Unconnect Frames": WANUnconnectFrames,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -151,7 +151,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WAN Connect Frames": "WAN Connect Frames",
     "WAN Loop Frames": "WAN Loop Frames",
     "WAN Unloop Frames": "WAN Unloop Frames",
-    "WAN Remove Cap Frames": "WAN Remove Cap Frames",
+    "WAN Unconnect Frames": "WAN Unconnect Frames",
 }
 
 WEB_DIRECTORY = str(Path(__file__).parent.joinpath("web"))

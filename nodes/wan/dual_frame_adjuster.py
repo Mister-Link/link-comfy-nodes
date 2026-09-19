@@ -33,21 +33,6 @@ def _as_image_batch(frames: torch.Tensor, name: str) -> torch.Tensor:
     return frames
 
 
-def _as_mask_batch(mask: torch.Tensor) -> torch.Tensor:
-    if not isinstance(mask, torch.Tensor):
-        raise ValueError("mask must be a MASK tensor.")
-    if mask.ndim == 2:
-        mask = mask.unsqueeze(0)
-    if mask.ndim == 4 and mask.shape[-1] == 1:
-        mask = mask[..., 0]
-    if mask.ndim != 3:
-        raise ValueError(
-            "mask must have shape (frames, height, width); "
-            f"received {tuple(mask.shape)}."
-        )
-    return mask
-
-
 def _allocate_evenly(amount: int, gap_count: int) -> list[int]:
     """Allocate an integer amount as evenly as possible across gaps."""
     amount = max(0, int(amount))
@@ -84,12 +69,22 @@ class WANConnectFrames:
     """Create a WAN sequence with optional boundary caps and cleanup metadata."""
 
     CATEGORY = "conditioning/video_models"
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("frames", "mask", "cap_info")
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING", "IMAGE", "INT", "INT")
+    RETURN_NAMES = (
+        "frames",
+        "mask",
+        "metadata",
+        "raw_frames",
+        "frame_count",
+        "context_frames",
+    )
     OUTPUT_TOOLTIPS = (
-        "Optional start, section 1, white connection frames, section 2, and optional end frames.",
-        "One mask per frame: black for supplied images and white for connection frames.",
-        "Metadata for WAN Remove Cap Frames; connect this output to its cap_info input.",
+        "Only the context segment spanning every masked gap.",
+        "Black for context frames and white for frames to inpaint.",
+        "Metadata for WAN Unconnect Frames.",
+        "Full internal WAN sequence passed through for WAN Unconnect Frames.",
+        "Final full-animation frame count after WAN 1 + 4n adjustment.",
+        "Actual number of frames in the context segment for the sampler length.",
     )
     FUNCTION = "create"
 
@@ -111,6 +106,16 @@ class WANConnectFrames:
                         "max": 9999,
                         "step": 1,
                         "tooltip": "Number of white frames to use for transitions between sections. Same-frame-count mode may trim source frames to preserve the requested total.",
+                    },
+                ),
+                "context_frames": (
+                    "INT",
+                    {
+                        "default": 4,
+                        "min": 0,
+                        "max": 9998,
+                        "step": 1,
+                        "tooltip": "Number of unmasked context frames required before the first masked gap and after the last masked gap.",
                     },
                 ),
                 "preference": (
@@ -154,6 +159,7 @@ class WANConnectFrames:
         self,
         section_1_frames: torch.Tensor,
         transition_frames: int = 0,
+        context_frames: int = 4,
         preference: str = "same frame count",
         loop: bool = False,
         section_2_frames: torch.Tensor | None = None,
@@ -173,7 +179,7 @@ class WANConnectFrames:
             # repeats (it as core content, then again as the conditioning
             # target the last generated frame is pulled toward), producing a
             # visible pause. It is dropped from core and reused as the
-            # end-cap anchor instead, which WANRemoveCapFrames strips entirely.
+            # end-cap anchor instead, which WANUnconnectFrames strips entirely.
             end_frame = section_1_frames[:1]
             section_1_frames = section_1_frames[1:]
             section_2_frames = None
@@ -367,123 +373,336 @@ class WANConnectFrames:
         padding_indices = preferred_padding_indices[:padding_count]
         remove_indices = sorted(set(cap_indices + padding_indices))
 
-        cap_info = json.dumps(
+        context_frames = int(context_frames)
+        if context_frames < 0:
+            raise ValueError("context_frames must be a non-negative integer.")
+
+        if int(frames.shape[0]) != internal_target:
+            raise RuntimeError(
+                "Internal WAN frame calculation mismatch: "
+                f"expected {internal_target}, got {frames.shape[0]}."
+            )
+
+        masked_frame_indices = torch.where(
+            mask.reshape(mask.shape[0], -1).any(dim=1)
+        )[0]
+        if int(masked_frame_indices.numel()) == 0:
+            raise ValueError(
+                "WAN Connect Frames produced no masked gap to provide context for."
+            )
+
+        first_masked = int(masked_frame_indices[0])
+        last_masked = int(masked_frame_indices[-1])
+        if first_masked < context_frames:
+            raise ValueError(
+                f"context_frames={context_frames} requires that many unmasked frames "
+                f"before the first masked gap; only {first_masked} are available."
+            )
+        trailing_context = internal_target - last_masked - 1
+        if trailing_context < context_frames:
+            raise ValueError(
+                f"context_frames={context_frames} requires that many unmasked frames "
+                f"after the last masked gap; only {trailing_context} are available."
+            )
+
+        segment_start = first_masked - context_frames
+        segment_end = last_masked + 1 + context_frames
+        segment_frames = frames[segment_start:segment_end]
+        segment_mask = mask[segment_start:segment_end]
+        base_segment_frame_count = int(segment_frames.shape[0])
+        segment_padding_indices = []
+        if (base_segment_frame_count - 1) % 4 != 0:
+            if preference == "add frames":
+                segment_padding_count = (1 - base_segment_frame_count) % 4
+                insert_at = (last_masked - segment_start) + 1
+                padding_frames = torch.ones(
+                    (
+                        segment_padding_count,
+                        reference_shape[0],
+                        reference_shape[1],
+                        reference_shape[2],
+                    ),
+                    dtype=section_1_frames.dtype,
+                    device=section_1_frames.device,
+                )
+                padding_mask = torch.ones(
+                    (
+                        segment_padding_count,
+                        reference_shape[0],
+                        reference_shape[1],
+                    ),
+                    dtype=torch.float32,
+                    device=section_1_frames.device,
+                )
+                segment_frames = torch.cat(
+                    (
+                        segment_frames[:insert_at],
+                        padding_frames,
+                        segment_frames[insert_at:],
+                    ),
+                    dim=0,
+                )
+                segment_mask = torch.cat(
+                    (
+                        segment_mask[:insert_at],
+                        padding_mask,
+                        segment_mask[insert_at:],
+                    ),
+                    dim=0,
+                )
+                segment_padding_indices = list(
+                    range(insert_at, insert_at + segment_padding_count)
+                )
+            elif preference == "same frame count":
+                segment_context_count = (1 - base_segment_frame_count) % 4
+                available_before = segment_start
+                available_after = internal_target - segment_end
+                try:
+                    add_before, add_after = _balanced_split(
+                        segment_context_count,
+                        available_before,
+                        available_after,
+                    )
+                except ValueError as error:
+                    raise ValueError(
+                        "WAN Connect Frames cannot add enough unmasked context frames "
+                        "to make the sampler segment a valid 1 + 4n length."
+                    ) from error
+
+                prefix_frames = frames[segment_start - add_before:segment_start]
+                suffix_frames = frames[segment_end:segment_end + add_after]
+                prefix_mask = torch.zeros(
+                    (add_before, reference_shape[0], reference_shape[1]),
+                    dtype=torch.float32,
+                    device=section_1_frames.device,
+                )
+                suffix_mask = torch.zeros(
+                    (add_after, reference_shape[0], reference_shape[1]),
+                    dtype=torch.float32,
+                    device=section_1_frames.device,
+                )
+                segment_frames = torch.cat(
+                    (prefix_frames, segment_frames, suffix_frames),
+                    dim=0,
+                )
+                segment_mask = torch.cat(
+                    (prefix_mask, segment_mask, suffix_mask),
+                    dim=0,
+                )
+                segment_padding_indices = list(range(add_before))
+                segment_padding_indices.extend(
+                    range(
+                        add_before + base_segment_frame_count,
+                        add_before + base_segment_frame_count + add_after,
+                    )
+                )
+            else:
+                raise ValueError(
+                    "WAN Connect Frames produced an invalid context segment length: "
+                    f"{base_segment_frame_count}. WAN requires 1 + 4n frames; "
+                    "use preference='add frames' or 'same frame count'."
+                )
+
+        segment_frame_count = int(segment_frames.shape[0])
+        if (segment_frame_count - 1) % 4 != 0:
+            raise RuntimeError(
+                "WAN Connect Frames could not resolve the context segment to a valid 1 + 4n length."
+            )
+
+        metadata = json.dumps(
             {
-                "version": 1,
+                "format": "link-comfy-nodes/wan-connect-v2",
+                "internal_frame_count": internal_target,
+                "segment_frame_count": segment_frame_count,
+                "base_segment_frame_count": base_segment_frame_count,
+                "segment_padding_indices": segment_padding_indices,
+                "segment_start": segment_start,
+                "segment_end": segment_end,
+                "context_frames": context_frames,
+                "masked_gap_count": int(masked_frame_indices.numel()),
+                "remove_indices": remove_indices,
+                "core_frame_count": core_target,
                 "remove_first": start_frame is not None,
                 "remove_last": end_frame is not None,
                 "start_count": int(start_frame.shape[0]) if start_frame is not None else 0,
                 "end_count": int(end_frame.shape[0]) if end_frame is not None else 0,
                 "padding_count": padding_count,
-                "remove_indices": remove_indices,
-                "core_frame_count": core_target,
-                "internal_frame_count": internal_target,
             },
             separators=(",", ":"),
         )
+        return (
+            segment_frames,
+            segment_mask,
+            metadata,
+            frames,
+            internal_target,
+            segment_frame_count,
+        )
 
-        if int(frames.shape[0]) != internal_target:
-            raise RuntimeError(
-                "Internal WAN frame calculation mismatch: "
-                f"expected {internal_target}, got {int(frames.shape[0])}."
-            )
-        return (frames, mask, cap_info)
 
-
-class WANRemoveCapFrames:
-    """Remove WAN Connect Frames boundary caps and their padding metadata."""
+class WANUnconnectFrames:
+    """Merge a sampled connection segment and remove WAN caps/padding."""
 
     CATEGORY = "conditioning/video_models"
-    RETURN_TYPES = ("IMAGE", "MASK")
-    RETURN_NAMES = ("frames", "mask")
-    FUNCTION = "remove"
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("frames",)
+    OUTPUT_TOOLTIPS = (
+        "Core connection sequence with the inpainted masked gaps restored.",
+    )
+    FUNCTION = "unconnect"
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "frames": ("IMAGE",),
-                "cap_info": (
-                    "STRING",
+                "raw_frames": (
+                    "IMAGE",
                     {
-                        "tooltip": "Connect the cap_info output from WAN Connect Frames.",
+                        "tooltip": "The full internal sequence output by WAN Connect Frames.",
                     },
                 ),
-            },
-            "optional": {
-                "mask": (
-                    "MASK",
+                "inpainted_frames": (
+                    "IMAGE",
                     {
-                        "tooltip": "Optional mask to trim along with the removed cap frames.",
+                        "tooltip": "The context segment output by WAN Connect Frames after inpainting.",
+                    },
+                ),
+                "metadata": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": "Connect the metadata output from WAN Connect Frames.",
                     },
                 ),
             },
         }
 
-    def remove(
-        self,
-        frames: torch.Tensor,
-        cap_info: str,
-        mask: torch.Tensor | None = None,
-    ):
-        frames = _as_image_batch(frames, "frames")
-        if mask is not None:
-            mask = _as_mask_batch(mask)
-            if int(mask.shape[0]) != int(frames.shape[0]):
-                raise ValueError(
-                    "frames and mask must contain the same number of frames; "
-                    f"received {frames.shape[0]} and {mask.shape[0]}."
-                )
-            if tuple(mask.shape[1:]) != tuple(frames.shape[1:3]):
-                raise ValueError(
-                    "frames and mask must have matching height and width; "
-                    f"received {tuple(frames.shape[1:3])} and {tuple(mask.shape[1:])}."
-                )
-
+    @staticmethod
+    def _parse_metadata(metadata_text: str) -> dict:
         try:
-            metadata = json.loads(cap_info)
+            metadata = json.loads(metadata_text)
         except (TypeError, json.JSONDecodeError) as error:
-            raise ValueError("cap_info is not valid WAN Connect Frames metadata.") from error
-        if not isinstance(metadata, dict) or metadata.get("version") != 1:
-            raise ValueError("cap_info is not recognized WAN Connect Frames metadata.")
+            raise ValueError("metadata is not valid WAN Connect Frames JSON.") from error
+        if not isinstance(metadata, dict) or metadata.get("format") != "link-comfy-nodes/wan-connect-v2":
+            raise ValueError("metadata is not recognized WAN Connect Frames metadata.")
+        required = (
+            "internal_frame_count",
+            "segment_frame_count",
+            "segment_start",
+            "segment_end",
+            "remove_indices",
+            "core_frame_count",
+        )
+        for key in required:
+            if key not in metadata:
+                raise ValueError(f"metadata is missing {key}.")
+        return metadata
 
-        remove_indices = metadata.get("remove_indices", [])
+    def unconnect(
+        self,
+        raw_frames: torch.Tensor,
+        inpainted_frames: torch.Tensor,
+        metadata: str,
+    ):
+        raw_frames = _as_image_batch(raw_frames, "raw_frames")
+        inpainted_frames = _as_image_batch(inpainted_frames, "inpainted_frames")
+        parsed = self._parse_metadata(metadata)
+
+        internal_count = int(raw_frames.shape[0])
+        expected_internal_count = int(parsed["internal_frame_count"])
+        if internal_count != expected_internal_count:
+            raise ValueError(
+                "WAN Unconnect Frames received a different raw frame count than WAN Connect Frames output: "
+                f"metadata expects {expected_internal_count}, received {internal_count}."
+            )
+
+        segment_count = int(inpainted_frames.shape[0])
+        expected_segment_count = int(parsed["segment_frame_count"])
+        if segment_count != expected_segment_count:
+            raise ValueError(
+                "WAN Unconnect Frames received a different inpainted segment length than WAN Connect Frames output: "
+                f"metadata expects {expected_segment_count}, received {segment_count}."
+            )
+        if tuple(raw_frames.shape[1:]) != tuple(inpainted_frames.shape[1:]):
+            raise ValueError(
+                "raw_frames and inpainted_frames must have matching height, width, and channels."
+            )
+
+        segment_start = int(parsed["segment_start"])
+        segment_end = int(parsed["segment_end"])
+        if (
+            segment_start < 0
+            or segment_end <= segment_start
+            or segment_end > internal_count
+        ):
+            raise ValueError("metadata contains invalid context segment bounds.")
+
+        segment_padding_indices = parsed.get("segment_padding_indices", [])
+        if not isinstance(segment_padding_indices, list):
+            raise ValueError("metadata.segment_padding_indices must be a list.")
+        segment_padding_indices = sorted(
+            set(int(index) for index in segment_padding_indices)
+        )
+        if any(index < 0 or index >= segment_count for index in segment_padding_indices):
+            raise ValueError("metadata contains an invalid context padding index.")
+
+        segment_keep = torch.ones(
+            segment_count,
+            dtype=torch.bool,
+            device=raw_frames.device,
+        )
+        if segment_padding_indices:
+            segment_keep[
+                torch.tensor(segment_padding_indices, device=raw_frames.device)
+            ] = False
+        merge_segment = inpainted_frames[segment_keep]
+
+        expected_base_segment_count = int(
+            parsed.get("base_segment_frame_count", segment_count - len(segment_padding_indices))
+        )
+        if int(merge_segment.shape[0]) != expected_base_segment_count:
+            raise ValueError(
+                "metadata context padding does not match the inpainted segment length."
+            )
+        if segment_end - segment_start != expected_base_segment_count:
+            raise ValueError("metadata contains invalid context segment bounds.")
+
+        merged = raw_frames.clone()
+        merged[segment_start:segment_end] = merge_segment.to(
+            device=raw_frames.device,
+            dtype=raw_frames.dtype,
+        )
+
+        remove_indices = parsed["remove_indices"]
         if not isinstance(remove_indices, list):
-            raise ValueError("cap_info.remove_indices must be a list.")
+            raise ValueError("metadata.remove_indices must be a list.")
         remove_indices = sorted(set(int(index) for index in remove_indices))
-        if any(index < 0 or index >= int(frames.shape[0]) for index in remove_indices):
-            raise ValueError("cap_info contains a frame index outside the input batch.")
+        if any(index < 0 or index >= internal_count for index in remove_indices):
+            raise ValueError("metadata contains a frame index outside raw_frames.")
 
         keep = torch.ones(
-            int(frames.shape[0]),
+            internal_count,
             dtype=torch.bool,
-            device=frames.device,
+            device=raw_frames.device,
         )
         if remove_indices:
-            keep[torch.tensor(remove_indices, device=frames.device)] = False
-        output_frames = frames[keep]
-        if mask is None:
-            output_mask = torch.zeros(
-                (int(output_frames.shape[0]), *frames.shape[1:3]),
-                dtype=torch.float32,
-                device=frames.device,
-            )
-        else:
-            output_mask = mask.to(device=frames.device)[keep]
+            keep[torch.tensor(remove_indices, device=raw_frames.device)] = False
+        output_frames = merged[keep]
 
-        expected_count = metadata.get("core_frame_count")
-        if expected_count is not None and int(output_frames.shape[0]) != int(expected_count):
+        expected_count = int(parsed["core_frame_count"])
+        if int(output_frames.shape[0]) != expected_count:
             raise RuntimeError(
-                "WAN cap removal produced an unexpected frame count: "
+                "WAN Unconnect Frames produced an unexpected frame count: "
                 f"expected {expected_count}, got {output_frames.shape[0]}."
             )
-        if (int(output_frames.shape[0]) - 1) % 4 != 0:
+        if (expected_count - 1) % 4 != 0:
             raise RuntimeError(
-                "WAN cap removal produced an invalid frame count: "
-                f"{output_frames.shape[0]} is not 1 + 4n."
+                "WAN Unconnect Frames produced an invalid frame count: "
+                f"{expected_count} is not 1 + 4n."
             )
-        return (output_frames, output_mask)
+        return (output_frames,)
 
 
-# Keep imports from the previous node implementation working for external code.
+# Compatibility aliases for external Python callers from earlier releases.
+WANRemoveCapFrames = WANUnconnectFrames
 WANBeginEndFrames = WANConnectFrames
