@@ -11,6 +11,20 @@ import torch
 # ringing footprint beyond the detected foreground bounds.
 PADDING_PX = 4
 
+# Below this cv2.phaseCorrelate response, a pairwise shift is treated as
+# unreliable (occlusion, motion blur, low-texture frame pair) and dropped to
+# zero rather than trusted. Because positions are a cumulative sum of edges,
+# one bad edge otherwise poisons every subsequent frame's position, not just
+# the pair it was measured from.
+RESPONSE_THRESHOLD = 0.10
+
+# Circular moving-average window applied to the closed-loop position curve.
+# Even a "good" phase-correlate match has sub-pixel measurement noise; without
+# damping that noise is applied to the output at full strength every frame,
+# which is what shows up as a few pixels of jitter. 3 is enough to average out
+# single-frame noise without smearing real motion across many frames.
+SMOOTHING_WINDOW = 3
+
 
 def _foreground(mask: np.ndarray):
     mask_u8 = np.clip(mask * 255, 0, 255).astype(np.uint8)
@@ -32,13 +46,35 @@ def _foreground(mask: np.ndarray):
 
 def _registration_signal(frame: np.ndarray, alpha: np.ndarray) -> np.ndarray:
     luminance = frame[..., :3] @ np.array([0.2126, 0.7152, 0.0722], np.float32)
-    return (0.35 * alpha + 0.65 * luminance * alpha).astype(np.float32)
+    signal = 0.35 * alpha + 0.65 * luminance * alpha
+    # Blur out per-pixel noise (antialiasing, compression, per-frame Otsu
+    # threshold flicker on the mask edge) that phaseCorrelate would otherwise
+    # register as motion. Matches the intent of the old distance-transform +
+    # GaussianBlur(sigma=4) signal this replaced, just applied to the new
+    # luminance-weighted signal instead of a binary mask.
+    return cv2.GaussianBlur(signal.astype(np.float32), (0, 0), 2.0)
 
 
 def _pairwise_shift(previous: np.ndarray, current: np.ndarray) -> tuple[float, float, float]:
     window = cv2.createHanningWindow((previous.shape[1], previous.shape[0]), cv2.CV_32F)
     shift, response = cv2.phaseCorrelate(previous, current, window)
     return float(shift[0]), float(shift[1]), float(response)
+
+
+def _smooth_cyclic(positions: np.ndarray, window: int) -> np.ndarray:
+    """Circular moving average - the sequence is a closed loop, so smoothing
+    must wrap around the last/first frame boundary instead of padding with
+    edge values (which would bias the ends of the cycle)."""
+    n = len(positions)
+    if n <= window:
+        return positions
+    pad = window // 2
+    kernel = np.ones(window, dtype=np.float32) / window
+    smoothed = np.empty_like(positions)
+    for axis in range(positions.shape[1]):
+        wrapped = np.concatenate([positions[-pad:, axis], positions[:, axis], positions[:pad, axis]])
+        smoothed[:, axis] = np.convolve(wrapped, kernel, mode="valid")
+    return smoothed
 
 
 def _registration_positions(
@@ -57,12 +93,16 @@ def _registration_positions(
         [_pairwise_shift(a, b) for a, b in zip(signals, signals[1:] + signals[:1])],
         dtype=np.float32,
     )
+    # A low-confidence match is more likely to be correlation noise than real
+    # motion - trusting it at full weight injects that noise into every
+    # subsequent frame's position via the cumulative sum below.
+    edges[edges[:, 2] < RESPONSE_THRESHOLD, :2] = 0.0
     edges[:, :2] -= np.mean(edges[:, :2], axis=0)
     positions = np.zeros((len(signals), 2), dtype=np.float32)
     for index, edge in enumerate(edges[:-1], start=1):
         positions[index] = positions[index - 1] + edge[:2]
     positions -= np.median(positions, axis=0)
-    return positions
+    return _smooth_cyclic(positions, SMOOTHING_WINDOW)
 
 
 def _corrected_content_bounds(
