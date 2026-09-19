@@ -167,6 +167,7 @@ class WANConnectFrames:
         end_frame: torch.Tensor | None = None,
     ):
         section_1_frames = _as_image_batch(section_1_frames, "section_1_frames")
+        loop_source_frames = None
 
         if loop:
             if int(section_1_frames.shape[0]) < 2:
@@ -180,6 +181,7 @@ class WANConnectFrames:
             # target the last generated frame is pulled toward), producing a
             # visible pause. It is dropped from core and reused as the
             # end-cap anchor instead, which WANUnconnectFrames strips entirely.
+            loop_source_frames = section_1_frames
             end_frame = section_1_frames[:1]
             section_1_frames = section_1_frames[1:]
             section_2_frames = None
@@ -409,6 +411,26 @@ class WANConnectFrames:
         segment_end = last_masked + 1 + context_frames
         segment_frames = frames[segment_start:segment_end]
         segment_mask = mask[segment_start:segment_end]
+
+        # Loop mode uses repeated end-cap frames internally, but those caps
+        # are not useful temporal context for the sampler. Substitute the real
+        # leading animation frames in the sampled segment; raw_frames retains
+        # the removable caps for Unconnect Frames.
+        if loop and loop_source_frames is not None:
+            cap_positions = [
+                index - segment_start
+                for index in cap_indices
+                if segment_start <= index < segment_end
+            ]
+            if cap_positions:
+                if int(loop_source_frames.shape[0]) < len(cap_positions):
+                    raise ValueError(
+                        "loop requires enough leading source frames to replace the "
+                        "end-cap context; increase the input animation length."
+                    )
+                segment_frames = segment_frames.clone()
+                segment_frames[cap_positions] = loop_source_frames[:len(cap_positions)]
+
         base_segment_frame_count = int(segment_frames.shape[0])
         segment_padding_indices = []
         if (base_segment_frame_count - 1) % 4 != 0:
