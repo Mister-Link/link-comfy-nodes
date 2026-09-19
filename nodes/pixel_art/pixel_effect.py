@@ -10,6 +10,12 @@ class PixelEffectModule(nn.Module):
     # hard binary threshold.
     ALPHA_TRANSITION_SOFTNESS = 0.12
 
+    # Minimum alpha-weighted support (in units of "fully-opaque source
+    # pixels") the winning color family needs within a kernel window before
+    # its own unmultiplied color is trusted -- see the note above
+    # RELIABLE_COLOR_FLOOR's use in forward().
+    RELIABLE_COLOR_FLOOR = 2.0
+
     def __init__(self):
         super(PixelEffectModule, self).__init__()
 
@@ -295,9 +301,49 @@ class PixelEffectModule(nn.Module):
         epsilon = 1e-8
 
         # Unmultiply dominant-family RGB by alpha to get the final color.
-        r_final = r_selected / (alpha_max + epsilon)
-        g_final = g_selected / (alpha_max + epsilon)
-        b_final = b_selected / (alpha_max + epsilon)
+        # This ratio is only meaningful when the winning family actually has
+        # real support in this block; at a thin edge block where it barely
+        # edged out the other families (e.g. one or two anti-aliased fringe
+        # pixels), alpha_max is tiny and this collapses toward whatever that
+        # handful of pixels happened to be -- often a dark outline/fringe
+        # color, not the block's true content. That's normally hidden by
+        # the correspondingly low result_alpha, but edge_style="hard" in
+        # the caller can still promote such a block to fully opaque, making
+        # the bad color a visible stray pixel. Below RELIABLE_COLOR_FLOOR,
+        # fall back to the alpha-weighted average color across *all* bins
+        # (i.e. ignoring the family split), which reflects the block's
+        # actual dominant content instead of a barely-won sliver.
+        r_final_selected = r_selected / (alpha_max + epsilon)
+        g_final_selected = g_selected / (alpha_max + epsilon)
+        b_final_selected = b_selected / (alpha_max + epsilon)
+
+        r_all = F.conv2d(
+            F.pad(r * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
+            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
+            padding=0,
+            stride=param_pixel_size,
+        )[0, 0, :, :]
+        g_all = F.conv2d(
+            F.pad(g * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
+            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
+            padding=0,
+            stride=param_pixel_size,
+        )[0, 0, :, :]
+        b_all = F.conv2d(
+            F.pad(b * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
+            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
+            padding=0,
+            stride=param_pixel_size,
+        )[0, 0, :, :]
+
+        r_final_fallback = r_all / (alpha_coverage + epsilon)
+        g_final_fallback = g_all / (alpha_coverage + epsilon)
+        b_final_fallback = b_all / (alpha_coverage + epsilon)
+
+        reliable = alpha_max >= self.RELIABLE_COLOR_FLOOR
+        r_final = torch.where(reliable, r_final_selected, r_final_fallback)
+        g_final = torch.where(reliable, g_final_selected, g_final_fallback)
+        b_final = torch.where(reliable, b_final_selected, b_final_fallback)
 
         # Build result RGB
         result_rgb = torch.stack([r_final, g_final, b_final], dim=-1)
