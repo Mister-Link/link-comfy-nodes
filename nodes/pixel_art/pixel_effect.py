@@ -25,6 +25,33 @@ class PixelEffectModule(nn.Module):
     # big, but their combined area is still the true majority.
     RELIABLE_AREA_SHARE_FLOOR = 0.35
 
+    # Minimum TOTAL alpha coverage (all families combined, in units of
+    # "fully-opaque source pixels") a block's own kernel window needs
+    # before its local content is trusted at all -- independent of how
+    # cleanly one family won that content. At a silhouette tip, a block's
+    # kernel window can contain nothing but a sliver of dark outline stroke
+    # and otherwise-transparent background: the outline family then wins
+    # 100% of a real but tiny sample, clearing RELIABLE_AREA_SHARE_FLOOR
+    # trivially even though there was never enough content nearby to draw
+    # a real conclusion from. Below this floor, always defer to the wider
+    # fallback search regardless of area_share.
+    RELIABLE_TOTAL_COVERAGE_FLOOR = 4.0
+
+    # How much wider than param_kernel_size the fallback color's own search
+    # window is (see the note above its use in forward()).
+    FALLBACK_KERNEL_MULTIPLIER = 2
+
+    # saturation = chroma/cmax is scale-invariant, so it's numerically
+    # meaningless for near-black colors: e.g. RGB (7,3,5), a typical dark
+    # ink outline pixel, computes ~57% saturation -- HIGHER than a genuine
+    # mid-tone lavender fill color's ~26% -- purely because both chroma and
+    # cmax are tiny, not because the color is actually vivid. That lets
+    # thin black outline strokes systematically outvote and out-bin larger
+    # true-color fill areas. Below this cmax (as a 0-1 fraction), the raw
+    # ratio is ramped toward 0 instead of trusted outright -- see
+    # _damped_saturation().
+    SATURATION_VALUE_FLOOR = 0.12
+
     def __init__(self):
         super(PixelEffectModule, self).__init__()
 
@@ -44,6 +71,13 @@ class PixelEffectModule(nn.Module):
         idx_y = torch.arange(w, device=device).view([1, w]).repeat([h, 1])
         return data[idx_x, idx_y, idx_z]
 
+    def _damped_saturation(self, chroma, cmax, eps):
+        """chroma/cmax, ramped toward 0 as cmax drops below
+        SATURATION_VALUE_FLOOR -- see the constant's docstring."""
+        raw = torch.where(cmax > eps, chroma / (cmax + eps), torch.zeros_like(chroma))
+        ramp = (cmax / self.SATURATION_VALUE_FLOOR).clamp(0.0, 1.0)
+        return raw * ramp
+
     def color_family_bin_idx(self, rgb, param_num_bins):
         """
         Build hue+tone bins:
@@ -60,9 +94,7 @@ class PixelEffectModule(nn.Module):
         cmax = torch.max(torch.stack([r, g, b], dim=0), dim=0).values
         cmin = torch.min(torch.stack([r, g, b], dim=0), dim=0).values
         chroma = cmax - cmin
-        saturation = torch.where(
-            cmax > eps, chroma / (cmax + eps), torch.zeros_like(chroma)
-        )
+        saturation = self._damped_saturation(chroma, cmax, eps)
 
         scale = int(np.ceil(np.sqrt(max(1, param_num_bins))))
         tone_levels = max(2, min(8, scale + 1))
@@ -102,9 +134,7 @@ class PixelEffectModule(nn.Module):
         cmax = torch.max(torch.cat([r, g, b], dim=1), dim=1, keepdim=True).values
         cmin = torch.min(torch.cat([r, g, b], dim=1), dim=1, keepdim=True).values
         chroma = cmax - cmin
-        saturation = torch.where(
-            cmax > eps, chroma / (cmax + eps), torch.zeros_like(chroma)
-        )
+        saturation = self._damped_saturation(chroma, cmax, eps)
 
         bright_neutral = (1.0 - saturation) * cmax
         vote_strength = (
@@ -129,6 +159,8 @@ class PixelEffectModule(nn.Module):
         vote_beta=0.0,
         hysteresis_margin=0.0,
         vote_boost=None,
+        prev_reliable=None,
+        area_share_band=0.0,
     ):
         """
         Process RGB with alpha channel awareness.
@@ -147,9 +179,17 @@ class PixelEffectModule(nn.Module):
         - hysteresis_margin: the previously winning family (prev_argmax)
           keeps a block unless a challenger's vote exceeds the incumbent's
           by this relative margin.
-        Returns (result_rgb, result_alpha, vote_state, argmax); pass the
-        last two back in for the next frame. For single images leave the
-        defaults -- behavior is unchanged.
+        A third mechanism damps a separate decision: whether the winning
+        family's own color is trusted or a pooled-average fallback is used
+        (see RELIABLE_AREA_SHARE_FLOOR below). Without damping this can
+        flip every frame as a block's area_share drifts across the floor,
+        alternating between two quite different colors even where nothing
+        meaningfully changed -- area_share_band widens that floor into a
+        band, Schmitt-trigger style, using the previous frame's reliable
+        state (prev_reliable).
+        Returns (result_rgb, result_alpha, vote_state, argmax, reliable);
+        pass the last three back in for the next frame. For single images
+        leave the defaults -- behavior is unchanged.
         """
         r, g, b = rgb[:, 0:1, :, :], rgb[:, 1:2, :, :], rgb[:, 2:3, :, :]
 
@@ -326,32 +366,67 @@ class PixelEffectModule(nn.Module):
         g_final_selected = g_selected / (alpha_max + epsilon)
         b_final_selected = b_selected / (alpha_max + epsilon)
 
-        r_all = F.conv2d(
-            F.pad(r * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
-            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
-            padding=0,
-            stride=param_pixel_size,
-        )[0, 0, :, :]
-        g_all = F.conv2d(
-            F.pad(g * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
-            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
-            padding=0,
-            stride=param_pixel_size,
-        )[0, 0, :, :]
-        b_all = F.conv2d(
-            F.pad(b * alpha_norm, (pad_size, pad_size, pad_size, pad_size), mode="replicate"),
-            weight=torch.ones([1, 1, param_kernel_size, param_kernel_size], device=rgb.device, dtype=rgb.dtype),
+        # A block's own kernel window can be almost entirely transparent --
+        # e.g. right at the tip of a silhouette curve, where only a sliver
+        # of antialiased outline stroke falls inside it at all. Pooling
+        # within that same starved window (as RELIABLE_COLOR_FLOOR/
+        # RELIABLE_AREA_SHARE_FLOOR above do) still has nothing real to
+        # average toward and just reproduces the same dark sliver. The
+        # fallback color instead searches a wider neighborhood -- still
+        # centered on this block, same stride/output grid, just a bigger
+        # receptive field -- so it can draw on genuine nearby content (e.g.
+        # the actual limb color a few pixels further in).
+        fallback_kernel_size = param_kernel_size * self.FALLBACK_KERNEL_MULTIPLIER + 1
+        fallback_pad_size = (fallback_kernel_size - 1) // 2
+        fallback_kernel_conv = torch.ones(
+            [1, 1, fallback_kernel_size, fallback_kernel_size],
+            device=rgb.device,
+            dtype=rgb.dtype,
+        )
+
+        def _wide_conv(channel):
+            padded = F.pad(
+                channel * alpha_norm,
+                (fallback_pad_size, fallback_pad_size, fallback_pad_size, fallback_pad_size),
+                mode="replicate",
+            )
+            return F.conv2d(
+                padded, weight=fallback_kernel_conv, padding=0, stride=param_pixel_size
+            )[0, 0, :, :]
+
+        r_all = _wide_conv(r)
+        g_all = _wide_conv(g)
+        b_all = _wide_conv(b)
+        alpha_coverage_wide = F.conv2d(
+            F.pad(
+                alpha_norm,
+                (fallback_pad_size, fallback_pad_size, fallback_pad_size, fallback_pad_size),
+                mode="replicate",
+            ),
+            weight=fallback_kernel_conv,
             padding=0,
             stride=param_pixel_size,
         )[0, 0, :, :]
 
-        r_final_fallback = r_all / (alpha_coverage + epsilon)
-        g_final_fallback = g_all / (alpha_coverage + epsilon)
-        b_final_fallback = b_all / (alpha_coverage + epsilon)
+        r_final_fallback = r_all / (alpha_coverage_wide + epsilon)
+        g_final_fallback = g_all / (alpha_coverage_wide + epsilon)
+        b_final_fallback = b_all / (alpha_coverage_wide + epsilon)
 
         area_share = alpha_max / (alpha_coverage + epsilon)
-        reliable = (alpha_max >= self.RELIABLE_COLOR_FLOOR) & (
-            area_share >= self.RELIABLE_AREA_SHARE_FLOOR
+        if (
+            prev_reliable is not None
+            and area_share_band > 0.0
+            and prev_reliable.shape == area_share.shape
+        ):
+            lo = self.RELIABLE_AREA_SHARE_FLOOR - area_share_band
+            hi = self.RELIABLE_AREA_SHARE_FLOOR + area_share_band
+            area_reliable = torch.where(prev_reliable, area_share >= lo, area_share >= hi)
+        else:
+            area_reliable = area_share >= self.RELIABLE_AREA_SHARE_FLOOR
+        reliable = (
+            (alpha_max >= self.RELIABLE_COLOR_FLOOR)
+            & area_reliable
+            & (alpha_coverage >= self.RELIABLE_TOTAL_COVERAGE_FLOOR)
         )
         r_final = torch.where(reliable, r_final_selected, r_final_fallback)
         g_final = torch.where(reliable, g_final_selected, g_final_fallback)
@@ -395,4 +470,4 @@ class PixelEffectModule(nn.Module):
         # result_alpha; result_rgb is the true block color everywhere the
         # dominant bin had any support.
 
-        return result_rgb, result_alpha, vote_used, alpha_argmax
+        return result_rgb, result_alpha, vote_used, alpha_argmax, reliable

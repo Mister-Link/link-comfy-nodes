@@ -251,8 +251,10 @@ class PixelArtStudioNode:
         model = self._get_model()
         use_stabilize = images.shape[0] > 1 and stability > 0.0
         hysteresis_margin = 1.2 * stability if use_stabilize else 0.0
+        area_share_band = 0.2 * stability if use_stabilize else 0.0
         vote_state = None
         prev_argmax = None
+        prev_reliable = None
 
         # With loop enabled, a first hidden pass only warms up the
         # hysteresis state; outputs are kept from the second pass, whose
@@ -266,7 +268,7 @@ class PixelArtStudioNode:
                 block_rgbs = []
                 block_alphas = []
                 for idx in range(images.shape[0]):
-                    result_rgb, result_alpha, vote_state, prev_argmax = model(
+                    result_rgb, result_alpha, vote_state, prev_argmax, prev_reliable = model(
                         rgb[idx : idx + 1],
                         alpha_norm[idx : idx + 1] * 255.0,
                         param_num_bins=32,
@@ -276,6 +278,8 @@ class PixelArtStudioNode:
                         vote_state=vote_state if use_stabilize else None,
                         prev_argmax=prev_argmax if use_stabilize else None,
                         hysteresis_margin=hysteresis_margin,
+                        prev_reliable=prev_reliable if use_stabilize else None,
+                        area_share_band=area_share_band,
                     )
                     if not final_pass:
                         continue
