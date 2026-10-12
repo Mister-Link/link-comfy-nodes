@@ -76,6 +76,57 @@ class SpritesheetBuilderNode:
             raise ValueError("Stabilization metadata is missing pivot")
         return manifest
 
+    @staticmethod
+    def _foreground_bounds(frame: torch.Tensor):
+        """Return the visible alpha bounds in (x, y, width, height) form."""
+        if frame.shape[-1] < 4:
+            return None
+        alpha = frame.numpy()[..., 3]
+        ys, xs = np.where(alpha > 0.05)
+        if len(xs) == 0:
+            return None
+        return (
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max() - xs.min() + 1),
+            int(ys.max() - ys.min() + 1),
+        )
+
+    @classmethod
+    def _auto_calibration(cls, frame_list: list[torch.Tensor], manifest: dict) -> dict:
+        """Normalize a batch around its stabilized canvas and physics pivot.
+
+        Stabilize Frames gives the builder a canonical canvas and pivot, but
+        different animation poses can occupy different portions of that
+        canvas. Use the median visible height as the batch's stable design
+        height, then align its median foot/bottom edge to the canvas bottom.
+        This is deliberately proportional so pose width is not mistaken for
+        a change in character scale.
+        """
+        default = {"offset_x": 0, "offset_y": 0, "scale_x": 1, "scale_y": 1}
+        bounds = [cls._foreground_bounds(frame) for frame in frame_list]
+        bounds = [bound for bound in bounds if bound is not None]
+        if not bounds:
+            return default
+
+        source_height = float(manifest["sourceSize"]["h"])
+        pivot_y = float(manifest["pivot"]["y"])
+        median_height = float(np.median([bound[3] for bound in bounds]))
+        median_bottom = float(np.median([bound[1] + bound[3] for bound in bounds]))
+        scale = source_height / max(1.0, median_height)
+        offset_y = (source_height - 1.0 - pivot_y) - (median_bottom - pivot_y) * scale
+
+        def rounded(value: float):
+            value = round(float(value), 6)
+            return 0 if abs(value) < 0.000001 else value
+
+        return {
+            "offset_x": 0,
+            "offset_y": rounded(offset_y),
+            "scale_x": rounded(scale),
+            "scale_y": rounded(scale),
+        }
+
     def build_spritesheet(self, frames, aspect_ratio="1:1 (Square)", stabilization_metadata=""):
         aspect_ratio = self._one_value(aspect_ratio, "1:1 (Square)")
         frame_list = self._flatten_frames(frames)
@@ -142,9 +193,8 @@ class SpritesheetBuilderNode:
                 spritesheet[y0:y0 + h, x0:x0 + w, 3] = alpha
                 frames_out[index, :h, :w, 3] = alpha
 
-            record = {"index": index, "frame": {"x": x0, "y": y0, "w": w, "h": h}}
+            record = {"frame": {"x": x0, "y": y0, "w": w, "h": h}}
             if manifest is not None:
-                record["sourceSize"] = manifest["sourceSize"]
                 record["spriteSourceSize"] = placement[index]["spriteSourceSize"]
                 record["pivot"] = manifest["pivot"]
                 record["motionOffset"] = placement[index].get("motionOffset", {"x": 0, "y": 0})
@@ -163,25 +213,12 @@ class SpritesheetBuilderNode:
                 "frame_count": frame_count,
             },
             "frames": frame_metadata,
-            # Explicit, always-present hook for a downstream engine to apply
-            # a per-animation draw nudge without touching engine code - edit
-            # this JSON by hand (or regenerate through a future node input)
-            # instead of hardcoding the offset in the game's own config.
-            "calibration": {"offset_x": 0, "offset_y": 0},
         }
         if manifest is not None:
+            metadata["calibration"] = self._auto_calibration(frame_list, manifest)
             root_motion = bool(manifest.get("rootMotion", False))
-            metadata["root"] = {
-                "type": "physics_body_center",
-                "x": manifest["pivot"]["x"],
-                "y": manifest["pivot"]["y"],
-            }
-            metadata["rootMotion"] = root_motion
-            metadata["stabilization"] = {
-                "rootMotion": root_motion,
-                "sourceSize": manifest["sourceSize"],
-                "pivot": manifest["pivot"],
-            }
+            if root_motion:
+                metadata["rootMotion"] = True
         return (result, frames_tensor, json.dumps(metadata, indent=2))
 
     @classmethod
