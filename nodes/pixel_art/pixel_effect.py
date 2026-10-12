@@ -219,30 +219,38 @@ class PixelEffectModule(nn.Module):
         b_weighted = b * alpha_weighted_mask
 
         pad_size = (param_kernel_size - 1) // 2
+        # Even kernels need one extra pixel on the bottom/right to keep the
+        # strided output grid aligned with the odd-sized fallback kernel below.
+        # With symmetric padding, e.g. kernel=8 and pixel_size=5, an input
+        # dimension congruent to 1 mod 5 produces one fewer selected cell than
+        # fallback cells, causing torch.where() to fail with a 389/390 shape
+        # mismatch. This is the usual asymmetric "same" padding convention.
+        pad_right = pad_size + (1 - param_kernel_size % 2)
+        pad = (pad_size, pad_right, pad_size, pad_right)
 
         # Pad RGB with replicate mode (extends edge colors naturally)
         r_weighted_padded = F.pad(
-            r_weighted, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+            r_weighted, pad, mode="replicate"
         )
         g_weighted_padded = F.pad(
-            g_weighted, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+            g_weighted, pad, mode="replicate"
         )
         b_weighted_padded = F.pad(
-            b_weighted, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+            b_weighted, pad, mode="replicate"
         )
         alpha_weighted_mask_padded = F.pad(
             alpha_weighted_mask,
-            (pad_size, pad_size, pad_size, pad_size),
+            pad,
             mode="replicate",
         )
         vote_mask_padded = F.pad(
-            vote_mask, (pad_size, pad_size, pad_size, pad_size), mode="replicate"
+            vote_mask, pad, mode="replicate"
         )
 
         # Pad alpha with replicate mode to prevent darkening at the edges
         alpha_norm_padded = F.pad(
             alpha_norm.repeat(1, num_bins, 1, 1),
-            (pad_size, pad_size, pad_size, pad_size),
+            pad,
             mode="replicate",
         )
 
