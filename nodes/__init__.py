@@ -52,6 +52,8 @@ from .wan import (
     WANConnectFrames,
     WANLoopFrames,
     WANUnloopFrames,
+    WANLoopBridge,
+    WANUnloopBridge,
     WANUnconnectFrames,
 )
 
@@ -100,5 +102,7 @@ __all__ = [
     "WANConnectFrames",
     "WANLoopFrames",
     "WANUnloopFrames",
+    "WANLoopBridge",
+    "WANUnloopBridge",
     "WANUnconnectFrames",
 ]

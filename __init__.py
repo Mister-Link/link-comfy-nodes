@@ -48,6 +48,8 @@ from .nodes import (
     WANConnectFrames,
     WANLoopFrames,
     WANUnloopFrames,
+    WANLoopBridge,
+    WANUnloopBridge,
     WANUnconnectFrames,
 )
 
@@ -98,6 +100,8 @@ NODE_CLASS_MAPPINGS = {
     "WAN Connect Frames": WANConnectFrames,
     "WAN Loop Frames": WANLoopFrames,
     "WAN Unloop Frames": WANUnloopFrames,
+    "WAN Loop Bridge": WANLoopBridge,
+    "WAN Unloop Bridge": WANUnloopBridge,
     "WAN Unconnect Frames": WANUnconnectFrames,
 }
 

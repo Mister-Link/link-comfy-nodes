@@ -217,47 +217,28 @@ class WANLoopFrames:
         )
         segment_padding_count = 0
         if (base_segment_count - 1) % 4 != 0:
-            if preference == "add frames":
-                segment_padding_count = (1 - base_segment_count) % 4
-                padding_frames = torch.ones(
-                    (segment_padding_count, height, width, channels),
-                    dtype=frames.dtype,
-                    device=frames.device,
+            # The full-animation preference must never discard the requested
+            # seam context.  The sampler has its own 1 + 4n length contract, so
+            # add unmasked sampler-only context padding instead of cutting away
+            # the frames that tell the model how to bridge the loop seam.
+            segment_padding_count = (1 - base_segment_count) % 4
+            available_padding = first_half[context_after_frames:]
+            padding_parts = []
+            if int(available_padding.shape[0]) > 0:
+                padding_parts.append(available_padding[:segment_padding_count])
+            padding_count = sum(int(part.shape[0]) for part in padding_parts)
+            if padding_count < segment_padding_count:
+                fallback_frame = after_context[-1:]
+                padding_parts.append(
+                    fallback_frame.expand(
+                        segment_padding_count - padding_count,
+                        -1,
+                        -1,
+                        -1,
+                    )
                 )
-                blank_frames = torch.cat((blank_frames, padding_frames), dim=0)
-            else:
-                segment_cut_count = (base_segment_count - 1) % 4
-                # Keep one source frame on each side of the blank region.  If
-                # cutting enough context would violate that invariant, pad the
-                # blank region to the next valid WAN segment length instead.
-                cut_after = min(
-                    segment_cut_count,
-                    max(0, int(after_context.shape[0]) - 1),
-                )
-                if cut_after:
-                    after_context = after_context[:-cut_after]
-                    segment_cut_count -= cut_after
-                if segment_cut_count:
-                    cut_before = min(
-                        segment_cut_count,
-                        max(0, int(before_context.shape[0]) - 1),
-                    )
-                    if cut_before:
-                        before_context = before_context[cut_before:]
-                        segment_cut_count -= cut_before
-                if segment_cut_count:
-                    current_segment_count = (
-                        int(before_context.shape[0])
-                        + int(blank_frames.shape[0])
-                        + int(after_context.shape[0])
-                    )
-                    segment_padding_count = (1 - current_segment_count) % 4
-                    padding_frames = torch.ones(
-                        (segment_padding_count, height, width, channels),
-                        dtype=frames.dtype,
-                        device=frames.device,
-                    )
-                    blank_frames = torch.cat((blank_frames, padding_frames), dim=0)
+            padding_frames = torch.cat(padding_parts, dim=0)
+            after_context = torch.cat((after_context, padding_frames), dim=0)
 
         segment_frames = torch.cat(
             (before_context, blank_frames, after_context),
