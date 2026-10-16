@@ -81,24 +81,28 @@ class WANLoopFrames:
                         "min": 0,
                         "max": 9998,
                         "step": 1,
-                        "tooltip": "Requested number of blank masked frames inserted at the midpoint seam.",
+                        "tooltip": "Requested number of blank masked frames inserted at the midpoint seam; at least one blank frame is always retained.",
                     },
                 ),
                 "context_frames": (
                     "INT",
                     {
                         "default": 4,
-                        "min": 0,
+                        "min": 2,
                         "max": 9998,
                         "step": 1,
-                        "tooltip": "Number of source context frames included before and after the blank inpaint frames.",
+                        "tooltip": (
+                            "Total number of source context frames around the blank inpaint "
+                            "frames; at least one source frame is required on each side; "
+                            "if odd, the first side receives the extra frame."
+                        ),
                     },
                 ),
                 "preference": (
                     ["add frames", "cut frames"],
                     {
                         "default": "add frames",
-                        "tooltip": "If the requested full-animation result is not 1 + 4n, round the blank-frame count up or down.",
+                        "tooltip": "If the requested full-animation result is not 1 + 4n, round the blank-frame count up or down; the result always keeps at least one blank frame.",
                     },
                 ),
             }
@@ -122,8 +126,11 @@ class WANLoopFrames:
             raise ValueError("frames_to_cut must be a non-negative integer.")
         if frames_to_add < 0:
             raise ValueError("frames_to_add must be non-negative.")
-        if context_frames < 0:
-            raise ValueError("context_frames must be non-negative.")
+        if context_frames < 2:
+            raise ValueError(
+                "context_frames must be at least 2 so the sampling segment has "
+                "at least one source frame before and after the blank frames."
+            )
         if frames_to_cut >= frame_count:
             raise ValueError(
                 "frames_to_cut must leave at least one source frame; "
@@ -133,19 +140,25 @@ class WANLoopFrames:
             raise ValueError("preference must be 'add frames' or 'cut frames'.")
 
         source_frame_count = frame_count - frames_to_cut
-        requested_total = source_frame_count + frames_to_add
+        # The full result must always contain at least one model-controlled blank
+        # frame.  In particular, cut-frame rounding must not turn a positive
+        # request into zero additions.
+        minimum_total = source_frame_count + 1
+        requested_total = max(source_frame_count + frames_to_add, minimum_total)
 
         if preference == "add frames":
             target_total = _valid_total_at_or_above(requested_total)
         else:
             target_total = _valid_total_at_or_below(requested_total)
-            if target_total < source_frame_count:
-                raise ValueError(
-                    "cut frames preference cannot reach a valid WAN count without "
-                    "removing more source frames or requesting more additions."
-                )
+            if target_total < minimum_total:
+                target_total = _valid_total_at_or_above(minimum_total)
 
         effective_frames_to_add = target_total - source_frame_count
+        if effective_frames_to_add < 1:
+            raise RuntimeError(
+                "WAN Loop Frames must produce at least one blank frame, but "
+                f"calculated {effective_frames_to_add}."
+            )
 
         # Trim alternately from the beginning and end.
         left = 0
@@ -163,16 +176,18 @@ class WANLoopFrames:
         second_half = trimmed[midpoint:]
         first_half = trimmed[:midpoint]
 
-        if context_frames > int(second_half.shape[0]) or context_frames > int(first_half.shape[0]):
+        context_before_frames = (context_frames + 1) // 2
+        context_after_frames = context_frames // 2
+        if (
+            context_before_frames > int(second_half.shape[0])
+            or context_after_frames > int(first_half.shape[0])
+        ):
             raise ValueError(
                 f"context_frames={context_frames} is too large for the available "
-                f"midpoint context ({second_half.shape[0]} before, {first_half.shape[0]} after)."
+                f"midpoint context (requested {context_before_frames} before and "
+                f"{context_after_frames} after; available {second_half.shape[0]} before "
+                f"and {first_half.shape[0]} after)."
             )
-        if context_frames == 0 and effective_frames_to_add == 0:
-            raise ValueError(
-                "The sampling segment would be empty; request context_frames or frames_to_add."
-            )
-
         height, width, channels = (
             int(frames.shape[1]),
             int(frames.shape[2]),
@@ -184,8 +199,16 @@ class WANLoopFrames:
             device=frames.device,
         )
 
-        before_context = second_half[-context_frames:] if context_frames else second_half[:0]
-        after_context = first_half[:context_frames] if context_frames else first_half[:0]
+        before_context = (
+            second_half[-context_before_frames:]
+            if context_before_frames
+            else second_half[:0]
+        )
+        after_context = (
+            first_half[:context_after_frames]
+            if context_after_frames
+            else first_half[:0]
+        )
 
         base_segment_count = (
             int(before_context.shape[0])
@@ -204,23 +227,37 @@ class WANLoopFrames:
                 blank_frames = torch.cat((blank_frames, padding_frames), dim=0)
             else:
                 segment_cut_count = (base_segment_count - 1) % 4
-                cut_after = min(segment_cut_count, int(after_context.shape[0]))
+                # Keep one source frame on each side of the blank region.  If
+                # cutting enough context would violate that invariant, pad the
+                # blank region to the next valid WAN segment length instead.
+                cut_after = min(
+                    segment_cut_count,
+                    max(0, int(after_context.shape[0]) - 1),
+                )
                 if cut_after:
                     after_context = after_context[:-cut_after]
                     segment_cut_count -= cut_after
                 if segment_cut_count:
-                    if segment_cut_count > int(before_context.shape[0]):
-                        raise ValueError(
-                            "WAN Loop Frames cannot cut the context segment to a valid "
-                            "1 + 4n length without removing the entire available context."
-                        )
-                    before_context = before_context[segment_cut_count:]
-                if (
-                    int(before_context.shape[0])
-                    + effective_frames_to_add
-                    + int(after_context.shape[0])
-                ) < 1:
-                    raise ValueError("WAN Loop Frames produced an empty context segment.")
+                    cut_before = min(
+                        segment_cut_count,
+                        max(0, int(before_context.shape[0]) - 1),
+                    )
+                    if cut_before:
+                        before_context = before_context[cut_before:]
+                        segment_cut_count -= cut_before
+                if segment_cut_count:
+                    current_segment_count = (
+                        int(before_context.shape[0])
+                        + int(blank_frames.shape[0])
+                        + int(after_context.shape[0])
+                    )
+                    segment_padding_count = (1 - current_segment_count) % 4
+                    padding_frames = torch.ones(
+                        (segment_padding_count, height, width, channels),
+                        dtype=frames.dtype,
+                        device=frames.device,
+                    )
+                    blank_frames = torch.cat((blank_frames, padding_frames), dim=0)
 
         segment_frames = torch.cat(
             (before_context, blank_frames, after_context),
@@ -259,6 +296,15 @@ class WANLoopFrames:
             raise RuntimeError(
                 "WAN Loop Frames could not resolve the context segment to a valid 1 + 4n length."
             )
+        if (
+            int(before_context.shape[0]) < 1
+            or int(blank_frames.shape[0]) < 1
+            or int(after_context.shape[0]) < 1
+        ):
+            raise RuntimeError(
+                "WAN Loop Frames requires at least one source frame before and "
+                "after at least one blank frame."
+            )
         if (target_total - 1) % 4 != 0:
             raise RuntimeError(
                 f"WAN Loop Frames produced invalid full frame count: {target_total}."
@@ -273,6 +319,8 @@ class WANLoopFrames:
             "frames_to_add_requested": frames_to_add,
             "frames_to_add": effective_frames_to_add,
             "context_frames": context_frames,
+            "context_before_frames": context_before_frames,
+            "context_after_frames": context_after_frames,
             "trim_begin": left,
             "trim_end": frame_count - right,
             "source_frame_count": source_frame_count,

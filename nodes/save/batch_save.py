@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import html
 import os
 import re
+import zipfile
 from datetime import datetime
+from io import BytesIO
+from urllib.parse import quote
 
 import numpy as np
 import torch
@@ -67,7 +71,7 @@ class BatchImageSave:
         link_to_input: bool,
         unique_id: str | None = None,
     ):
-        images_np = images.cpu().numpy()
+        images_np = images.detach().cpu().numpy()
         timestamp_token = datetime.now().strftime("%m%d%y-%H%M%S")
 
         if images_np.ndim != 4:
@@ -76,6 +80,7 @@ class BatchImageSave:
             )
 
         num_images = images_np.shape[0]
+        images_uint8 = (np.clip(images_np, 0.0, 1.0) * 255.0).astype(np.uint8)
         saved_files = []
 
         output_dir = folder_paths.get_output_directory()
@@ -195,39 +200,67 @@ class BatchImageSave:
 
         digits = max(2, len(str(start_index + num_images - 1)))
 
-        for i in range(num_images):
-            index = start_index + i
-            filename = f"{resolved_filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
+        full_zip_path = f"{full_dir}.zip"
+        with zipfile.ZipFile(full_zip_path, "w", compression=zipfile.ZIP_STORED) as zipf:
+            for i in range(num_images):
+                index = start_index + i
+                filename = f"{resolved_filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
 
-            relative_path = os.path.join(resolved_path, filename) if resolved_path else filename
-            full_path = os.path.join(full_dir, filename)
+                relative_path = (
+                    os.path.join(resolved_path, filename) if resolved_path else filename
+                )
+                full_path = os.path.join(full_dir, filename)
+                frame = images_uint8[i]
 
-            frame = images_np[i]
-            frame = np.clip(frame, 0.0, 1.0)
+                if frame.shape[-1] == 1:
+                    pil_img = Image.fromarray(frame[:, :, 0], mode="L")
+                elif frame.shape[-1] == 3:
+                    pil_img = Image.fromarray(frame, mode="RGB")
+                elif frame.shape[-1] == 4:
+                    pil_img = Image.fromarray(frame, mode="RGBA")
+                    if pil_format == "JPEG":
+                        pil_img = pil_img.convert("RGB")
+                else:
+                    raise ValueError(f"Unsupported number of channels: {frame.shape[-1]}")
 
-            if frame.shape[-1] == 1:
-                frame_255 = (frame[:, :, 0] * 255).astype(np.uint8)
-                pil_img = Image.fromarray(frame_255, mode="L")
-            elif frame.shape[-1] == 3:
-                frame_255 = (frame * 255).astype(np.uint8)
-                pil_img = Image.fromarray(frame_255, mode="RGB")
-            elif frame.shape[-1] == 4:
-                frame_255 = (frame * 255).astype(np.uint8)
-                pil_img = Image.fromarray(frame_255, mode="RGBA")
-                if pil_format == "JPEG":
-                    pil_img = pil_img.convert("RGB")
-            else:
-                raise ValueError(f"Unsupported number of channels: {frame.shape[-1]}")
-
-            pil_img.save(full_path, format=pil_format)
-            saved_files.append(relative_path)
+                image_buffer = BytesIO()
+                pil_img.save(image_buffer, format=pil_format)
+                payload = image_buffer.getvalue()
+                with open(full_path, "wb") as image_file:
+                    image_file.write(payload)
+                zipf.writestr(filename, payload)
+                saved_files.append(relative_path)
 
         folder_path = resolved_path if resolved_path else ""
         file_names = "\n".join([os.path.basename(f) for f in saved_files])
 
+        zip_filename = os.path.basename(full_zip_path)
+        zip_download_url = None
+        try:
+            zip_relative_path = os.path.relpath(full_zip_path, output_dir)
+        except ValueError:
+            zip_relative_path = None
+        if zip_relative_path and not zip_relative_path.startswith(".."):
+            zip_download_url = (
+                "/view?filename="
+                f"{quote(zip_relative_path.replace(os.sep, '/'))}&type=output"
+            )
+
+        ui_text = [f"Saved {num_images} images to {resolved_path or 'output'}"]
+        if zip_download_url:
+            ui_text.insert(
+                0,
+                (
+                    f'<a href="{zip_download_url}" '
+                    'target="_blank" style="color: #4a9eff; text-decoration: underline;">'
+                    f"Download: {html.escape(zip_filename)}"
+                    "</a>"
+                ),
+            )
+
         return {
             "ui": {
-                "text": [f"Saved {num_images} images to {resolved_path or 'output'}"]
+                "text": ui_text,
             },
             "result": (folder_path, file_names),
         }
