@@ -36,7 +36,7 @@ from .preview import (
     SpritesheetPreviewNode,
 )
 from .sampling import KSamplerAdvancedDual
-from .save import BatchImageSave, SaveFolderAsZip
+from .save import BatchImageSave, SaveFolderAsZip, SaveImageSequenceZip
 from .text import AdvancedStringConcat, DropdownSelectNode, PreviewAsMarkdown, StringToListNode
 from .video import (
     AverageMaskRegionSizeNode,
@@ -92,6 +92,7 @@ __all__ = [
     "ResizeImageAndMaskBySideNode",
     "SpriteScaleCalculatorNode",
     "SaveFolderAsZip",
+    "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
     "StabilizeFramesNode",
     "SpritesheetPreviewNode",
