@@ -11,6 +11,8 @@ core loader so its precision and compatibility behavior stay unchanged.
 from __future__ import annotations
 
 import logging
+import resource
+import time
 
 import torch
 import comfy.model_management as model_management
@@ -20,6 +22,22 @@ import comfy.sd
 import comfy.utils
 import folder_paths
 from comfy.utils import ProgressBar
+
+
+def _runtime_memory():
+    """Return cheap process/device memory diagnostics for loader timing logs."""
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    parts = [f"rss_max={rss_mb:.0f}MB"]
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        parts.append(
+            "cuda{} allocated={:.0f}MB reserved={:.0f}MB".format(
+                device,
+                torch.cuda.memory_allocated(device) / (1024 * 1024),
+                torch.cuda.memory_reserved(device) / (1024 * 1024),
+            )
+        )
+    return ", ".join(parts)
 
 
 def _estimate_construction_operations(state_dict):
@@ -39,7 +57,7 @@ def _progress_operations(base_operations, progress, state_dict):
     while turning each layer construction into a progress update.
     """
     expected = _estimate_construction_operations(state_dict)
-    state = {"created": 0, "last_value": 10}
+    state = {"created": 0, "last_value": 10, "last_log_value": 10, "started": time.perf_counter()}
 
     class ProgressOperations(base_operations):
         pass
@@ -56,6 +74,16 @@ def _progress_operations(base_operations, progress, state_dict):
                 if value != state["last_value"]:
                     state["last_value"] = value
                     progress.update_absolute(value)
+                if value >= state["last_log_value"]:
+                    logging.info(
+                        "[Load Model] construction progress=%d%% layers=%d/%d elapsed=%.1fs %s",
+                        value,
+                        state["created"],
+                        expected,
+                        time.perf_counter() - state["started"],
+                        _runtime_memory(),
+                    )
+                    state["last_log_value"] = value + 5
 
         ProgressOperation.__name__ = operation.__name__
         return ProgressOperation
@@ -90,6 +118,12 @@ def _load_diffusion_model_state_dict_fast(
     management keeps its usual non-dynamic behavior.
     """
     model_options = {} if model_options is None else dict(model_options)
+    total_started = time.perf_counter()
+    logging.info(
+        "[Load Model] state-dict pipeline begin keys=%d %s",
+        len(state_dict),
+        _runtime_memory(),
+    )
     dtype = model_options.get("dtype", None)
     custom_operations = model_options.get("custom_operations", None)
 
@@ -113,6 +147,12 @@ def _load_diffusion_model_state_dict_fast(
 
     if progress is not None:
         progress.update_absolute(2)
+    logging.info(
+        "[Load Model] state-dict normalization complete keys=%d elapsed=%.1fs %s",
+        len(state_dict),
+        time.perf_counter() - total_started,
+        _runtime_memory(),
+    )
 
     parameters = comfy.utils.calculate_parameters(state_dict)
     weight_dtype = comfy.utils.weight_dtype(state_dict)
@@ -195,11 +235,34 @@ def _load_diffusion_model_state_dict_fast(
             base_operations, progress, new_state_dict
         )
 
+    logging.info(
+        "[Load Model] config ready class=%s params=%d state_keys=%d dtype=%s manual_cast=%s load_device=%s offload_device=%s assign_candidate=%s %s",
+        type(model_config).__name__,
+        parameters,
+        len(new_state_dict),
+        unet_dtype,
+        manual_cast_dtype,
+        load_device,
+        offload_device,
+        bool(zero_copy and dtype is None and custom_operations is None and model_config.quant_config is None),
+        _runtime_memory(),
+    )
+
     if progress is not None:
         progress.update_absolute(10)
+    construction_started = time.perf_counter()
+    logging.info("[Load Model] BEGIN model construction %s", _runtime_memory())
     model = model_config.get_model(new_state_dict, "")
+    logging.info(
+        "[Load Model] END model construction elapsed=%.1fs model=%s %s",
+        time.perf_counter() - construction_started,
+        type(model).__name__,
+        _runtime_memory(),
+    )
     if progress is not None:
         progress.update_absolute(90)
+    patcher_started = time.perf_counter()
+    logging.info("[Load Model] BEGIN patcher construction %s", _runtime_memory())
     model_patcher_type = (
         comfy.model_patcher.ModelPatcher
         if disable_dynamic
@@ -208,8 +271,21 @@ def _load_diffusion_model_state_dict_fast(
     model_patcher = model_patcher_type(
         model, load_device=load_device, offload_device=offload_device
     )
+    logging.info(
+        "[Load Model] END patcher construction elapsed=%.1fs %s",
+        time.perf_counter() - patcher_started,
+        _runtime_memory(),
+    )
+    move_started = time.perf_counter()
+    logging.info("[Load Model] BEGIN model.to(%s) %s", offload_device, _runtime_memory())
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
+    logging.info(
+        "[Load Model] END model.to(%s) elapsed=%.1fs %s",
+        offload_device,
+        time.perf_counter() - move_started,
+        _runtime_memory(),
+    )
     if progress is not None:
         progress.update_absolute(94)
 
@@ -222,12 +298,29 @@ def _load_diffusion_model_state_dict_fast(
         and custom_operations is None
         and model_config.quant_config is None
     )
+    weights_started = time.perf_counter()
+    logging.info(
+        "[Load Model] BEGIN load_model_weights assign=%s keys=%d %s",
+        assign,
+        len(new_state_dict),
+        _runtime_memory(),
+    )
     model.load_model_weights(new_state_dict, "", assign=assign)
+    logging.info(
+        "[Load Model] END load_model_weights elapsed=%.1fs %s",
+        time.perf_counter() - weights_started,
+        _runtime_memory(),
+    )
     if progress is not None:
         progress.update_absolute(99)
     left_over = state_dict.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: %s", left_over)
+    logging.info(
+        "[Load Model] state-dict pipeline complete elapsed=%.1fs %s",
+        time.perf_counter() - total_started,
+        _runtime_memory(),
+    )
     return model_patcher
 
 
@@ -238,8 +331,16 @@ def _load_diffusion_model_fast(
     progress=None,
 ):
     model_options = {} if model_options is None else dict(model_options)
+    file_started = time.perf_counter()
+    logging.info("[Load Model] BEGIN load_torch_file path=%s %s", model_path, _runtime_memory())
     state_dict, metadata = comfy.utils.load_torch_file(
         model_path, return_metadata=True
+    )
+    logging.info(
+        "[Load Model] END load_torch_file elapsed=%.1fs keys=%d %s",
+        time.perf_counter() - file_started,
+        len(state_dict),
+        _runtime_memory(),
     )
     if progress is not None:
         progress.update_absolute(1)
