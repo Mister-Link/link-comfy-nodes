@@ -23,6 +23,7 @@ from .image import (
     UpscalerTensorrtVramSafe,
 )
 from .latent import AspectToResolution, SnapToDivisible
+from .model import LoadModel
 from .motion import (
     HybridMaMoMaskExportFBX,
     HybridMaMoMaskGenerate,
@@ -87,6 +88,7 @@ __all__ = [
     "LoadFolderAnchorNode",
     "LoadFolderFilteredNode",
     "LoadFolderNode",
+    "LoadModel",
     "NativeWanPoseStrength",
     "PreviewAsMarkdown",
     "StringToListNode",
