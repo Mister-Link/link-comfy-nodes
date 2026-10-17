@@ -16,6 +16,11 @@ const FIELD_GAP = 3;
 const PREVIEW_MARGIN_TOP = 8;
 const CONTENT_PADDING_X = 8;
 const CONTENT_PADDING_BOTTOM = 16;
+const FRAME_DEFAULTS = {
+  image_load_cap: 0,
+  skip_first_images: 0,
+  select_every_nth: 1,
+};
 
 function getWidget(node, name) {
   return node.widgets?.find((widget) => widget.name === name);
@@ -311,14 +316,16 @@ app.registerExtension({
           "pointer-events:none",
           "white-space:nowrap",
         ].join(";");
-        const committedValue = () => String(widget?.value ?? 0);
+        const defaultValue = FRAME_DEFAULTS[labelText] ?? Number(widget?.options?.default ?? 0);
+        const committedValue = () => String(widget?.value ?? defaultValue);
         const parseDraft = () => {
           let value = Number(input.value);
-          if (!Number.isFinite(value)) value = Number(committedValue());
-          if (widget?.options?.min != null) value = Math.max(Number(widget.options.min), value);
-          if (widget?.options?.max != null) value = Math.min(Number(widget.options.max), value);
-          if (input.max && Number.isFinite(Number(input.max))) {
-            value = Math.min(Number(input.max), value);
+          const minimum = Number(widget?.options?.min ?? 0);
+          const maximum = Number(input.max || widget?.options?.max);
+          if (!Number.isInteger(value)
+            || value < minimum
+            || (Number.isFinite(maximum) && value > maximum)) {
+            return defaultValue;
           }
           return value;
         };
@@ -478,18 +485,33 @@ app.registerExtension({
         this.setDirtyCanvas(true, true);
       };
 
-      const updateCapLimit = (totalFrames) => {
+      const updateFrameLimits = (totalFrames) => {
         const total = Number(totalFrames) || 0;
-        const capWidget = getWidget(this, "image_load_cap");
-        const capInput = numberInputs.get("image_load_cap");
-        if (!capWidget || !capInput || total <= 0) return;
+        if (total <= 0) return;
 
-        capInput.max = String(total);
-        const current = Number(capWidget.value) || 0;
-        // Zero intentionally means unlimited; only clamp positive values.
-        if (current > total) {
-          commitNativeValue(capWidget, total);
-          if (capInput.readOnly) capInput.value = String(total);
+        const limits = {
+          image_load_cap: total,
+          skip_first_images: Math.max(0, total - 1),
+          select_every_nth: Math.max(1, total),
+        };
+        for (const [name, maximum] of Object.entries(limits)) {
+          const widget = getWidget(this, name);
+          const input = numberInputs.get(name);
+          if (!widget || !input) continue;
+          input.max = String(maximum);
+          const current = Number(widget.value);
+          const minimum = Number(widget.options?.min ?? 0);
+          const invalid = !Number.isInteger(current)
+            || current < minimum
+            || current > maximum;
+          // Do not overwrite an active draft. Once the preview reports the
+          // folder size, invalid committed values quietly return to the
+          // field's normal default instead of producing an empty selection.
+          if (invalid && input.readOnly) {
+            const fallback = FRAME_DEFAULTS[name] ?? minimum;
+            commitNativeValue(widget, fallback);
+            input.value = String(fallback);
+          }
         }
       };
 
@@ -554,7 +576,7 @@ app.registerExtension({
         } else {
           state.totalFrames = Math.max(state.totalFrames, nextFrames.length);
         }
-        updateCapLimit(state.totalFrames);
+        updateFrameLimits(state.totalFrames);
         updatePreviewStatus();
         const signature = nextFrames.map((frame) => imageUrl(frame)).join("|");
         if (signature === state.frameSignature) return;
