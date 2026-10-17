@@ -40,6 +40,30 @@ def _runtime_memory():
     return ", ".join(parts)
 
 
+def _direct_load_device(model_path, model_options, zero_copy):
+    """Return a GPU target for the native safetensors path when safe.
+
+    Native/default weights can be assigned without conversion.  In high-VRAM
+    mode the offload device is the same GPU, so loading safetensors tensors
+    there avoids first moving an empty model to the GPU and then replacing
+    those parameters with CPU tensors.
+    """
+    if not zero_copy or model_options.get("dtype") is not None:
+        return None
+    if not model_path.lower().endswith((".safetensors", ".sft")):
+        return None
+
+    load_device = model_options.get("load_device", model_management.get_torch_device())
+    offload_device = model_options.get(
+        "offload_device", model_management.unet_offload_device()
+    )
+    if model_management.is_device_cpu(load_device) or model_management.is_device_cpu(offload_device):
+        return None
+    if torch.device(load_device) != torch.device(offload_device):
+        return None
+    return load_device
+
+
 def _estimate_construction_operations(state_dict):
     """Estimate how many parameterized modules the model constructor will create."""
     module_names = set()
@@ -118,6 +142,7 @@ def _load_diffusion_model_state_dict_fast(
     management keeps its usual non-dynamic behavior.
     """
     model_options = {} if model_options is None else dict(model_options)
+    direct_load_device = model_options.get("_direct_load_device")
     total_started = time.perf_counter()
     logging.info(
         "[Load Model] state-dict pipeline begin keys=%d %s",
@@ -236,7 +261,7 @@ def _load_diffusion_model_state_dict_fast(
         )
 
     logging.info(
-        "[Load Model] config ready class=%s params=%d state_keys=%d dtype=%s manual_cast=%s load_device=%s offload_device=%s assign_candidate=%s %s",
+        "[Load Model] config ready class=%s params=%d state_keys=%d dtype=%s manual_cast=%s load_device=%s offload_device=%s assign_candidate=%s direct_load_device=%s %s",
         type(model_config).__name__,
         parameters,
         len(new_state_dict),
@@ -245,6 +270,7 @@ def _load_diffusion_model_state_dict_fast(
         load_device,
         offload_device,
         bool(zero_copy and dtype is None and custom_operations is None and model_config.quant_config is None),
+        direct_load_device,
         _runtime_memory(),
     )
 
@@ -278,8 +304,10 @@ def _load_diffusion_model_state_dict_fast(
     )
     move_started = time.perf_counter()
     logging.info("[Load Model] BEGIN model.to(%s) %s", offload_device, _runtime_memory())
-    if not model_management.is_device_cpu(offload_device):
+    if not model_management.is_device_cpu(offload_device) and direct_load_device is None:
         model.to(offload_device)
+    elif direct_load_device is not None:
+        logging.info("[Load Model] skip model.to(%s); weights are already resident on target device", offload_device)
     logging.info(
         "[Load Model] END model.to(%s) elapsed=%.1fs %s",
         offload_device,
@@ -331,10 +359,20 @@ def _load_diffusion_model_fast(
     progress=None,
 ):
     model_options = {} if model_options is None else dict(model_options)
+    direct_load_device = _direct_load_device(model_path, model_options, zero_copy)
+    if direct_load_device is not None:
+        model_options["_direct_load_device"] = direct_load_device
     file_started = time.perf_counter()
-    logging.info("[Load Model] BEGIN load_torch_file path=%s %s", model_path, _runtime_memory())
+    logging.info(
+        "[Load Model] BEGIN load_torch_file path=%s device=%s %s",
+        model_path,
+        direct_load_device or "cpu",
+        _runtime_memory(),
+    )
     state_dict, metadata = comfy.utils.load_torch_file(
-        model_path, return_metadata=True
+        model_path,
+        device=direct_load_device,
+        return_metadata=True,
     )
     logging.info(
         "[Load Model] END load_torch_file elapsed=%.1fs keys=%d %s",
