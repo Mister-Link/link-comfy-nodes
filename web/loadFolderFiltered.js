@@ -116,6 +116,29 @@ app.registerExtension({
         "font:14px Arial,sans-serif",
       ].join(";");
 
+      // The DOM widget is rendered in ComfyUI's overlay layer rather than
+      // inside the graph canvas, so wheel events over it would otherwise stop
+      // at the node. Forward them to the real canvas so zoom/pan still works
+      // when the cursor is over the fields or preview.
+      const forwardWheelToCanvas = (event) => {
+        const canvasElement = app.canvas?.canvas;
+        if (!canvasElement) return;
+        event.preventDefault();
+        event.stopPropagation();
+        canvasElement.dispatchEvent(new WheelEvent("wheel", {
+          clientX: event.clientX,
+          clientY: event.clientY,
+          deltaX: event.deltaX,
+          deltaY: event.deltaY,
+          deltaZ: event.deltaZ,
+          deltaMode: event.deltaMode,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+        }));
+      };
+      selector.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
+
       const makeField = (labelText) => {
         const field = document.createElement("div");
         field.style.cssText = [
