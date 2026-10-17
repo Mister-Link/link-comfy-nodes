@@ -317,6 +317,9 @@ app.registerExtension({
           if (!Number.isFinite(value)) value = Number(committedValue());
           if (widget?.options?.min != null) value = Math.max(Number(widget.options.min), value);
           if (widget?.options?.max != null) value = Math.min(Number(widget.options.max), value);
+          if (input.max && Number.isFinite(Number(input.max))) {
+            value = Math.min(Number(input.max), value);
+          }
           return value;
         };
         input.addEventListener("focus", () => {
@@ -475,6 +478,21 @@ app.registerExtension({
         this.setDirtyCanvas(true, true);
       };
 
+      const updateCapLimit = (totalFrames) => {
+        const total = Number(totalFrames) || 0;
+        const capWidget = getWidget(this, "image_load_cap");
+        const capInput = numberInputs.get("image_load_cap");
+        if (!capWidget || !capInput || total <= 0) return;
+
+        capInput.max = String(total);
+        const current = Number(capWidget.value) || 0;
+        // Zero intentionally means unlimited; only clamp positive values.
+        if (current > total) {
+          commitNativeValue(capWidget, total);
+          if (capInput.readOnly) capInput.value = String(total);
+        }
+      };
+
       const stopAnimation = () => {
         if (state.animationTimer) clearInterval(state.animationTimer);
         state.animationTimer = null;
@@ -536,6 +554,7 @@ app.registerExtension({
         } else {
           state.totalFrames = Math.max(state.totalFrames, nextFrames.length);
         }
+        updateCapLimit(state.totalFrames);
         updatePreviewStatus();
         const signature = nextFrames.map((frame) => imageUrl(frame)).join("|");
         if (signature === state.frameSignature) return;
