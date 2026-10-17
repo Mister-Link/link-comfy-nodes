@@ -13,7 +13,7 @@ const NODE_WIDTH = 270;
 const FIELD_HEIGHT = 22;
 const FIELD_GAP = 3;
 const PREVIEW_MARGIN_TOP = 8;
-const CONTENT_PADDING_X = 16;
+const CONTENT_PADDING_X = 8;
 const CONTENT_PADDING_BOTTOM = 16;
 
 function getWidget(node, name) {
