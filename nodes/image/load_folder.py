@@ -154,6 +154,7 @@ def _build_preview_images(
     image_load_cap: int = 0,
     skip_first_images: int = 0,
     select_every_nth: int = 1,
+    include_dimensions: bool = True,
 ):
     input_dir = folder_paths.get_input_directory()
     dir_files = _get_sorted_dir_files(
@@ -171,20 +172,17 @@ def _build_preview_images(
         subfolder = os.path.dirname(relative_path)
         filename = os.path.basename(relative_path)
 
-        with Image.open(file_path) as img:
-            img = ImageOps.exif_transpose(img)
-            width, height = img.size
-
-        preview_images.append(
-            {
-                "filename": filename,
-                "full_filename": filename,
-                "subfolder": "" if subfolder == "." else subfolder,
-                "type": "input",
-                "width": width,
-                "height": height,
-            }
-        )
+        frame = {
+            "filename": filename,
+            "full_filename": filename,
+            "subfolder": "" if subfolder == "." else subfolder,
+            "type": "input",
+        }
+        if include_dimensions:
+            with Image.open(file_path) as img:
+                img = ImageOps.exif_transpose(img)
+                frame["width"], frame["height"] = img.size
+        preview_images.append(frame)
 
     return preview_images
 
@@ -219,6 +217,7 @@ async def _load_folder_preview_route(request):
         image_load_cap=image_load_cap,
         skip_first_images=skip_first_images,
         select_every_nth=select_every_nth,
+        include_dimensions=False,
     )
     return web.json_response({"frames": frames})
 

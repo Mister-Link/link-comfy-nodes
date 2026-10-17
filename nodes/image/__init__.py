@@ -4,6 +4,7 @@ from .batch import AddImageToBatchNode
 from .crop_by_bbox import CropByBBoxNode
 from .load_folder import LoadFolderNode
 from .load_folder_anchor import LoadFolderAnchorNode
+from .load_folder_filtered import LoadFolderFilteredNode
 from .pixelate import ImagePixelateNode
 from .resize import ResizeImageAndMaskBySideNode
 from .rotate import ImageRotatorNode
