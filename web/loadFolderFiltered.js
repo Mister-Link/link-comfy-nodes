@@ -10,7 +10,7 @@ const PREVIEW_HEIGHT = 160;
 const PREVIEW_FPS = 12;
 const POLL_MS = 3000;
 const NODE_WIDTH = 270;
-const FIELD_HEIGHT = 24;
+const FIELD_HEIGHT = 22;
 const FIELD_GAP = 3;
 
 function getWidget(node, name) {
@@ -101,7 +101,7 @@ app.registerExtension({
         "padding:0 4px 4px",
         "box-sizing:border-box",
         "width:100%",
-        "font:15px Arial,sans-serif",
+        "font:14px Arial,sans-serif",
       ].join(";");
 
       const makeField = (labelText) => {
@@ -115,9 +115,9 @@ app.registerExtension({
           "padding:0 7px 0 9px",
           "background:#3b3b3b",
           "border:1px solid #686868",
-          "border-radius:13px",
+          "border-radius:11px",
           "overflow:hidden",
-          "font:15px Arial,sans-serif",
+          "font:14px Arial,sans-serif",
         ].join(";");
 
         const label = document.createElement("span");
@@ -126,7 +126,7 @@ app.registerExtension({
           "flex:0 0 auto",
           "margin-right:8px",
           "color:#999999",
-          "line-height:22px",
+          "line-height:20px",
           "white-space:nowrap",
         ].join(";");
         field.appendChild(label);
@@ -139,12 +139,12 @@ app.registerExtension({
         select.style.cssText = [
           "flex:1",
           "min-width:0",
-          "height:22px",
+          "height:20px",
           "padding:0",
           "border:0",
           "background:transparent",
           "color:#dddddd",
-          "font:15px Arial,sans-serif",
+          "font:14px Arial,sans-serif",
           "appearance:none",
           "-webkit-appearance:none",
           "text-overflow:ellipsis",
@@ -177,13 +177,13 @@ app.registerExtension({
           "flex:1",
           "min-width:0",
           "width:0",
-          "height:22px",
+          "height:20px",
           "padding:0",
           "border:0",
           "outline:none",
           "background:transparent",
           "color:#dddddd",
-          "font:15px Arial,sans-serif",
+          "font:14px Arial,sans-serif",
           "text-align:right",
           "appearance:textfield",
           "-moz-appearance:textfield",
