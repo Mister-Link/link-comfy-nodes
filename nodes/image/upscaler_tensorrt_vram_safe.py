@@ -26,6 +26,10 @@ DEFAULT_TILE = 512
 TILE_CHOICES = ["auto", "256", "384", "512", "640", "768", "1024"]
 
 
+class TensorRTOOMError(RuntimeError):
+    """Raised when TensorRT cannot create its GPU execution context."""
+
+
 def _model_scale(model_name):
     """Read the installed TensorRT node's model config without importing it."""
     try:
@@ -97,8 +101,19 @@ def _is_oom(error):
             "error code 2",
             "could not allocate memory",
             "memory allocation",
+            "execution context allocation failed",
         )
     )
+
+
+def _compact_vram():
+    """Return unused PyTorch blocks to CUDA before TensorRT allocates."""
+    gc.collect()
+    try:
+        mm.soft_empty_cache(force=True)
+    except Exception:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _release_vram(model, unload_models=False):
@@ -114,12 +129,7 @@ def _release_vram(model, unload_models=False):
             mm.unload_all_models()
         except Exception:
             pass
-    gc.collect()
-    try:
-        mm.soft_empty_cache(force=True)
-    except Exception:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    _compact_vram()
 
 
 def _initial_tile_size(choice):
@@ -211,7 +221,12 @@ class UpscalerTensorrtVramSafe:
         x_starts = _tile_starts(width, tile_size, overlap)
 
         model.reset()
+        _compact_vram()
         model.activate()
+        if getattr(model, "context", None) is None:
+            raise TensorRTOOMError(
+                "TensorRT execution context allocation failed (CUDA out of memory)."
+            )
         model.allocate_buffers(
             shape_dict={
                 "input": {"shape": (1, channels, tile_size, tile_size)},
