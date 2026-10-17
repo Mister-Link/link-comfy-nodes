@@ -247,6 +247,7 @@ app.registerExtension({
               "padding:6px 10px",
               "color:var(--input-text,#cbd0dc)",
               "cursor:pointer",
+              "text-align:center",
               "white-space:nowrap",
             ].join(";");
             if (option.value === select.value) {
@@ -270,8 +271,30 @@ app.registerExtension({
           }
           document.body.appendChild(menu);
           const rect = field.getBoundingClientRect();
-          const menuWidth = rect.width * 0.8;
-          menu.style.left = `${rect.left + (rect.width - menuWidth) / 2}px`;
+          const measureCanvas = document.createElement("canvas");
+          const measureContext = measureCanvas.getContext("2d");
+          if (measureContext) measureContext.font = getComputedStyle(menu).font;
+          const longestOption = [...select.options].reduce(
+            (longest, option) => Math.max(
+              longest,
+              measureContext?.measureText(option.textContent || "").width || 0,
+            ),
+            0,
+          );
+          const minimumWidth = rect.width * 0.8;
+          const maximumWidth = Math.min(420, Math.max(160, window.innerWidth - 16));
+          const menuWidth = Math.min(
+            maximumWidth,
+            Math.max(minimumWidth, longestOption + 32),
+          );
+          const menuLeft = Math.max(
+            8,
+            Math.min(
+              rect.left + (rect.width - menuWidth) / 2,
+              window.innerWidth - menuWidth - 8,
+            ),
+          );
+          menu.style.left = `${menuLeft}px`;
           menu.style.width = `${menuWidth}px`;
           menu.style.display = "block";
           const menuRect = menu.getBoundingClientRect();
