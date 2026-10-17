@@ -175,6 +175,7 @@ app.registerExtension({
         const input = document.createElement("input");
         input.type = "number";
         input.value = String(widget?.value ?? 0);
+        input.readOnly = true;
         input.min = String(widget?.options?.min ?? 0);
         input.max = String(widget?.options?.max ?? 0);
         input.step = String(widget?.options?.step ?? 1);
@@ -193,13 +194,35 @@ app.registerExtension({
           "appearance:textfield",
           "-moz-appearance:textfield",
         ].join(";");
-        input.addEventListener("change", () => {
+        const committedValue = () => String(widget?.value ?? 0);
+        const parseDraft = () => {
           let value = Number(input.value);
-          if (!Number.isFinite(value)) value = Number(widget?.value ?? 0);
+          if (!Number.isFinite(value)) value = Number(committedValue());
           if (widget?.options?.min != null) value = Math.max(Number(widget.options.min), value);
           if (widget?.options?.max != null) value = Math.min(Number(widget.options.max), value);
-          input.value = String(value);
-          commitNativeValue(widget, value);
+          return value;
+        };
+        input.addEventListener("focus", () => {
+          input.readOnly = false;
+          input.value = committedValue();
+          requestAnimationFrame(() => input.select());
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            input.value = committedValue();
+            input.blur();
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            const value = parseDraft();
+            input.value = String(value);
+            commitNativeValue(widget, value);
+            input.blur();
+          }
+        });
+        input.addEventListener("blur", () => {
+          input.value = committedValue();
+          input.readOnly = true;
         });
         field.appendChild(input);
         return input;
