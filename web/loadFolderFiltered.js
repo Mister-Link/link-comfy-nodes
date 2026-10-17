@@ -4,10 +4,12 @@ import { api } from "../../scripts/api.js";
 const NODE_NAME = "Load Folder by Type";
 const DIRECTORY_ROUTE = "/link_comfy/load_folder_filtered_directories";
 const PREVIEW_ROUTE = "/link_comfy/load_folder_preview";
-const PREVIEW_HEIGHT = 210;
+// Keep the compact minimum small, while allowing the preview to grow into
+// any additional height created by the user resizing the node.
+const PREVIEW_HEIGHT = 160;
 const PREVIEW_FPS = 12;
 const POLL_MS = 3000;
-const NODE_WIDTH = 360;
+const NODE_WIDTH = 270;
 const FIELD_HEIGHT = 24;
 const FIELD_GAP = 3;
 
