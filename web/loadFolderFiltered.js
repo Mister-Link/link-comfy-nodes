@@ -96,6 +96,7 @@ app.registerExtension({
         previewRequestToken: 0,
         pollTimer: null,
         removed: false,
+        initialLayoutChecked: false,
         dropdownCleanups: [],
       };
 
@@ -514,6 +515,21 @@ app.registerExtension({
 
       this.setSize([NODE_WIDTH, this.computeSize()[1]]);
       updatePreviewLayout();
+
+      // The DOM widget is mounted and positioned one or more frames after the
+      // node is created. Reconcile once after that first layout pass so the
+      // greedy preview does not temporarily extend past the node bottom.
+      const reconcileInitialLayout = () => {
+        if (state.removed || state.initialLayoutChecked) return;
+        const computedSize = this.computeSize();
+        const currentWidth = Math.max(NODE_WIDTH, Number(this.size?.[0]) || 0);
+        const currentHeight = Number(this.size?.[1]) || 0;
+        this.setSize([currentWidth, Math.max(currentHeight, computedSize[1])]);
+        state.initialLayoutChecked = true;
+        updatePreviewLayout();
+        this.setDirtyCanvas(true, true);
+      };
+      requestAnimationFrame(() => requestAnimationFrame(reconcileInitialLayout));
 
       const originalOnResize = this.onResize;
       this.onResize = function () {
