@@ -135,7 +135,7 @@ class UnshiftPoseFramesNode:
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "Loop flag emitted by Shift Pose Frames.",
+                        "tooltip": "Loop flag emitted by Shift Pose Frames. A positive shift also enables loop-layout recovery if this flag was not carried through.",
                     },
                 ),
             }
@@ -148,8 +148,18 @@ class UnshiftPoseFramesNode:
         is_loop: bool,
     ):
         work = frames
+        shift = max(0, int(shift))
 
-        if is_loop:
+        # Shift Pose Frames emits shift=0 for a pass-through and a positive
+        # value whenever it inserted the midpoint seam/overlap layout.  Use
+        # that invariant as a compatibility fallback when the BOOLEAN output
+        # was not connected or was saved incorrectly.  Without this, a small
+        # manual blank-frame value such as 2 is treated as a literal rotation
+        # of the full batch, leaving the seam (and frame 14/15 in typical
+        # batches) at the front instead of restoring source frame 1.
+        loop_layout = bool(is_loop) or shift > 0
+
+        if loop_layout:
             if int(work.shape[0]) < 4:
                 raise ValueError(
                     "Looped Shift Pose Frames input must include the 4 overlap frames."
@@ -160,7 +170,7 @@ class UnshiftPoseFramesNode:
         if work_count == 0:
             raise ValueError("No frames remain after removing overlap frames.")
 
-        shift_mod = _unshift_rotation(work_count, shift, is_loop)
+        shift_mod = _unshift_rotation(work_count, shift, loop_layout)
         if shift_mod:
             work = torch.cat([work[shift_mod:], work[:shift_mod]], dim=0)
 
