@@ -170,8 +170,7 @@ app.registerExtension({
       };
 
       const makeSelect = (labelText) => {
-        const { field } = makeField(labelText, "80%");
-        field.style.alignSelf = "center";
+        const { field } = makeField(labelText);
         const select = document.createElement("select");
         select.style.cssText = [
           "position:absolute",
@@ -271,8 +270,9 @@ app.registerExtension({
           }
           document.body.appendChild(menu);
           const rect = field.getBoundingClientRect();
-          menu.style.left = `${rect.left}px`;
-          menu.style.width = `${rect.width}px`;
+          const menuWidth = rect.width * 0.8;
+          menu.style.left = `${rect.left + (rect.width - menuWidth) / 2}px`;
+          menu.style.width = `${menuWidth}px`;
           menu.style.display = "block";
           const menuRect = menu.getBoundingClientRect();
           const below = rect.bottom + 2;
