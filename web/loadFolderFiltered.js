@@ -197,7 +197,7 @@ app.registerExtension({
           "-moz-appearance:textfield",
         ].join(";");
         const editBadge = document.createElement("span");
-        editBadge.textContent = "↵ Enter";
+        editBadge.textContent = "↵";
         editBadge.style.cssText = [
           "display:none",
           "position:absolute",
