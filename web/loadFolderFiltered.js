@@ -16,6 +16,7 @@ const FIELD_GAP = 3;
 const PREVIEW_MARGIN_TOP = 8;
 const CONTENT_PADDING_X = 8;
 const CONTENT_PADDING_BOTTOM = 16;
+const FIELD_RIGHT_INSET = 12;
 const FRAME_DEFAULTS = {
   image_load_cap: 0,
   skip_first_images: 0,
@@ -140,7 +141,7 @@ app.registerExtension({
       };
       selector.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
 
-      const makeField = (labelText, width = "100%") => {
+      const makeField = (labelText, width = `calc(100% - ${FIELD_RIGHT_INSET}px)`) => {
         const field = document.createElement("div");
         field.style.cssText = [
           "display:flex",
