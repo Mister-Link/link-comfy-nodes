@@ -12,6 +12,9 @@ const POLL_MS = 3000;
 const NODE_WIDTH = 270;
 const FIELD_HEIGHT = 22;
 const FIELD_GAP = 3;
+const PREVIEW_MARGIN_TOP = 8;
+const CONTENT_PADDING_X = 16;
+const CONTENT_PADDING_BOTTOM = 16;
 
 function getWidget(node, name) {
   return node.widgets?.find((widget) => widget.name === name);
@@ -98,7 +101,7 @@ app.registerExtension({
         "display:flex",
         "flex-direction:column",
         `gap:${FIELD_GAP}px`,
-        "padding:0 4px 4px",
+        `padding:0 ${CONTENT_PADDING_X}px ${CONTENT_PADDING_BOTTOM}px`,
         "box-sizing:border-box",
         "width:100%",
         "font:14px Arial,sans-serif",
@@ -219,6 +222,7 @@ app.registerExtension({
       preview.style.cssText = [
         `height:${PREVIEW_HEIGHT}px`,
         "width:100%",
+        `margin-top:${PREVIEW_MARGIN_TOP}px`,
         "display:flex",
         "align-items:center",
         "justify-content:center",
@@ -246,7 +250,8 @@ app.registerExtension({
         selector,
         { serialize: false, hideOnZoom: false },
       );
-      const controlsHeight = (FIELD_HEIGHT * 5) + (FIELD_GAP * 5) + 4;
+      const controlsHeight = (FIELD_HEIGHT * 5) + (FIELD_GAP * 5) +
+        PREVIEW_MARGIN_TOP + CONTENT_PADDING_BOTTOM;
       const minimumSelectorHeight = controlsHeight + PREVIEW_HEIGHT;
       const updatePreviewLayout = () => {
         const widgetTop = Number(selectorWidget.y) || 0;
