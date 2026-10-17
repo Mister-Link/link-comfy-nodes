@@ -146,6 +146,8 @@ app.registerExtension({
           "display:flex",
           "align-items:center",
           `width:${width}`,
+          "max-width:100%",
+          "min-width:0",
           `height:${FIELD_HEIGHT}px`,
           "box-sizing:border-box",
           "padding:0 7px 0 9px",
@@ -329,7 +331,7 @@ app.registerExtension({
         input.type = "number";
         input.value = String(widget?.value ?? 0);
         input.readOnly = true;
-        input.title = "Press Enter to apply; Escape or blur to cancel";
+        input.title = "Press Enter or click away to apply; Escape to cancel";
         input.min = String(widget?.options?.min ?? 0);
         input.max = String(widget?.options?.max ?? 0);
         input.step = String(widget?.options?.step ?? 1);
@@ -368,6 +370,8 @@ app.registerExtension({
           "white-space:nowrap",
         ].join(";");
         const defaultValue = FRAME_DEFAULTS[labelText] ?? Number(widget?.options?.default ?? 0);
+        let editing = false;
+        let cancelOnBlur = false;
         const committedValue = () => String(widget?.value ?? defaultValue);
         const parseDraft = () => {
           let value = Number(input.value);
@@ -381,6 +385,8 @@ app.registerExtension({
           return value;
         };
         input.addEventListener("focus", () => {
+          editing = true;
+          cancelOnBlur = false;
           input.readOnly = false;
           input.value = committedValue();
           input.style.paddingRight = "14px";
@@ -392,6 +398,7 @@ app.registerExtension({
         input.addEventListener("keydown", (event) => {
           if (event.key === "Escape") {
             event.preventDefault();
+            cancelOnBlur = true;
             input.value = committedValue();
             input.blur();
           } else if (event.key === "Enter") {
@@ -399,16 +406,24 @@ app.registerExtension({
             const value = parseDraft();
             input.value = String(value);
             commitNativeValue(widget, value);
+            editing = false;
             input.blur();
           }
         });
         input.addEventListener("blur", () => {
+          if (editing && !cancelOnBlur) {
+            const value = parseDraft();
+            input.value = String(value);
+            commitNativeValue(widget, value);
+          }
           input.value = committedValue();
           input.readOnly = true;
           input.style.paddingRight = "14px";
           editBadge.style.display = "none";
           field.style.borderColor = "#686868";
           field.style.background = "#3b3b3b";
+          editing = false;
+          cancelOnBlur = false;
         });
         field.append(input, editBadge);
         field.addEventListener("click", (event) => {
@@ -481,7 +496,14 @@ app.registerExtension({
       const controlsHeight = (FIELD_HEIGHT * 5) + (FIELD_GAP * 6) +
         PREVIEW_MARGIN_TOP + STATUS_HEIGHT + CONTENT_PADDING_BOTTOM;
       const minimumSelectorHeight = controlsHeight + PREVIEW_HEIGHT;
+      const updateSelectorWidth = () => {
+        const nodeWidth = Math.max(NODE_WIDTH, Number(this.size?.[0]) || NODE_WIDTH);
+        selector.style.width = `${nodeWidth}px`;
+        selector.style.maxWidth = `${nodeWidth}px`;
+        selector.style.minWidth = "0";
+      };
       const updatePreviewLayout = () => {
+        updateSelectorWidth();
         const widgetTop = Number(selectorWidget.y) || 0;
         const nodeHeight = Number(this.size?.[1]) || minimumSelectorHeight;
         const available = nodeHeight > widgetTop
@@ -495,7 +517,7 @@ app.registerExtension({
       // Keep the resize handle's minimum fixed. The preview can grow into
       // extra node height, but must not turn that current height into a new
       // minimum that prevents the user from dragging the node smaller.
-      selectorWidget.computeSize = (width) => [width, minimumSelectorHeight];
+      selectorWidget.computeSize = () => [NODE_WIDTH, minimumSelectorHeight];
 
       // DOM widgets are appended by addDOMWidget; move this one above the
       // hidden execution widgets so the visual order is type, folder, options.
