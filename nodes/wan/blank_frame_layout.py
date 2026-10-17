@@ -7,22 +7,6 @@ def _is_wan_valid(count: int) -> bool:
     return count >= 1 and (count - 1) % 4 == 0
 
 
-def _unshift_rotation(work_count: int, value: int, is_loop: bool) -> int:
-    """Resolve the rotation needed to restore the original first frame.
-
-    Shift Pose Frames reports the rotation within the trimmed sequence,
-    while its actual output has two overlap frames at each edge.  Unshift
-    removes those overlap frames first, then applies this rotation.  Smaller
-    loop values are interpreted as manually supplied blank-frame counts.
-    """
-    value = max(0, int(value))
-    if is_loop and value < work_count // 2:
-        blank_frames = value
-        source_count = work_count - blank_frames
-        value = source_count - source_count // 2 + blank_frames
-    return value % work_count
-
-
 class ShiftPoseFramesNode:
     RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "BOOLEAN")
     RETURN_NAMES = (
@@ -35,7 +19,7 @@ class ShiftPoseFramesNode:
     OUTPUT_TOOLTIPS = (
         "Frame sequence shifted so the original seam sits near the middle, with loop blanks and overlap added, when blank_frames is greater than 0. Passed through unchanged when blank_frames is 0.",
         "Actual total frame count of the shifted output sequence.",
-        "Amount to rotate the overlap-trimmed sequence left by to restore original frame order. 0 when blank_frames is 0.",
+        "Shift metadata for compatibility with Unshift Pose Frames. 0 when blank_frames is 0.",
         "Number of blank frames inserted into the shifted loop, for reference.",
         "Whether loop blanks and overlap were added. Feed this into Unshift Pose Frames.",
     )
@@ -110,7 +94,7 @@ class UnshiftPoseFramesNode:
     RETURN_TYPES = ("IMAGE", "INT")
     RETURN_NAMES = ("frames", "total_frames")
     OUTPUT_TOOLTIPS = (
-        "Original frame order restored from Shift Pose Frames output, with the four overlap frames removed.",
+        "Original sampled frame order preserved, with the four overlap frames removed from a looped Shift Pose Frames batch.",
         "Actual total frame count after unshifting.",
     )
     FUNCTION = "calculate"
@@ -151,12 +135,9 @@ class UnshiftPoseFramesNode:
         shift = max(0, int(shift))
 
         # Shift Pose Frames emits shift=0 for a pass-through and a positive
-        # value whenever it inserted the midpoint seam/overlap layout.  Use
+        # value whenever it inserted the midpoint seam/overlap layout. Use
         # that invariant as a compatibility fallback when the BOOLEAN output
-        # was not connected or was saved incorrectly.  Without this, a small
-        # manual blank-frame value such as 2 is treated as a literal rotation
-        # of the full batch, leaving the seam (and frame 14/15 in typical
-        # batches) at the front instead of restoring source frame 1.
+        # was not connected or was saved incorrectly.
         loop_layout = bool(is_loop) or shift > 0
 
         if loop_layout:
@@ -164,17 +145,15 @@ class UnshiftPoseFramesNode:
                 raise ValueError(
                     "Looped Shift Pose Frames input must include the 4 overlap frames."
                 )
-            # The first and last two frames are context overlap for the
-            # inpainting pass, not part of the restored output sequence.
-            work = work[2:-2]
+            # The sampled batch is already in the desired temporal order.
+            # The four extra outputs are the overlap context at the tail of
+            # the observed loop layout. Rotating the remaining batch by
+            # `shift` incorrectly moves frame 1 into the middle of the
+            # output (for example, 21 -> 1 becomes 1 -> 14).
+            work = work[:-4]
 
-        work_count = int(work.shape[0])
-        if work_count == 0:
+        if int(work.shape[0]) == 0:
             raise ValueError("No frames remain after removing overlap frames.")
-
-        shift_mod = _unshift_rotation(work_count, shift, loop_layout)
-        if shift_mod:
-            work = torch.cat([work[shift_mod:], work[:shift_mod]], dim=0)
 
         return (work, int(work.shape[0]))
 
