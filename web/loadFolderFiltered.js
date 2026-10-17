@@ -162,9 +162,9 @@ app.registerExtension({
         const arrow = document.createElement("span");
         arrow.textContent = "▾";
         arrow.style.cssText = [
-          "flex:0 0 18px",
-          "width:18px",
-          "padding:0",
+          "flex:0 0 22px",
+          "width:22px",
+          "padding:0 2px 0 4px",
           "color:#999999",
           "text-align:center",
           "pointer-events:none",
@@ -194,7 +194,7 @@ app.registerExtension({
           "min-width:0",
           "width:0",
           "height:20px",
-          "padding:0 16px 0 0",
+          "padding:0 14px 0 0",
           "border:0",
           "outline:none",
           "background:transparent",
@@ -212,7 +212,7 @@ app.registerExtension({
           "right:6px",
           "top:50%",
           "transform:translateY(-50%)",
-          "width:18px",
+          "width:14px",
           "padding:0",
           "border-radius:7px",
           "background:#68777a",
@@ -234,7 +234,7 @@ app.registerExtension({
         input.addEventListener("focus", () => {
           input.readOnly = false;
           input.value = committedValue();
-          input.style.paddingRight = "16px";
+          input.style.paddingRight = "14px";
           editBadge.style.display = "block";
           field.style.borderColor = "#9aaeb2";
           field.style.background = "#414646";
@@ -256,7 +256,7 @@ app.registerExtension({
         input.addEventListener("blur", () => {
           input.value = committedValue();
           input.readOnly = true;
-          input.style.paddingRight = "16px";
+          input.style.paddingRight = "14px";
           editBadge.style.display = "none";
           field.style.borderColor = "#686868";
           field.style.background = "#3b3b3b";
