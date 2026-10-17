@@ -15,10 +15,63 @@ import logging
 import torch
 import comfy.model_management as model_management
 import comfy.model_patcher
+import comfy.ops
 import comfy.sd
 import comfy.utils
 import folder_paths
 from comfy.utils import ProgressBar
+
+
+def _estimate_construction_operations(state_dict):
+    """Estimate how many parameterized modules the model constructor will create."""
+    module_names = set()
+    for key in state_dict:
+        if "." in key:
+            module_names.add(key.rsplit(".", 1)[0])
+    return max(1, len(module_names))
+
+
+def _progress_operations(base_operations, progress, state_dict):
+    """Wrap Comfy's operation classes so construction can report real activity.
+
+    Comfy's model constructors create their Linear/Conv/Norm layers through an
+    operations class.  Wrapping those classes keeps the core model untouched,
+    while turning each layer construction into a progress update.
+    """
+    expected = _estimate_construction_operations(state_dict)
+    state = {"created": 0, "last_value": 10}
+
+    class ProgressOperations(base_operations):
+        pass
+
+    def make_progress_operation(operation):
+        class ProgressOperation(operation):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                state["created"] += 1
+                value = min(
+                    89,
+                    10 + int(80 * state["created"] / expected),
+                )
+                if value != state["last_value"]:
+                    state["last_value"] = value
+                    progress.update_absolute(value)
+
+        ProgressOperation.__name__ = operation.__name__
+        return ProgressOperation
+
+    for name in dir(base_operations):
+        operation = getattr(base_operations, name)
+        try:
+            is_module = isinstance(operation, type) and issubclass(
+                operation, torch.nn.Module
+            )
+        except TypeError:
+            is_module = False
+        if is_module:
+            setattr(ProgressOperations, name, make_progress_operation(operation))
+
+    return ProgressOperations
 
 
 def _load_diffusion_model_state_dict_fast(
@@ -123,14 +176,30 @@ def _load_diffusion_model_state_dict_fast(
         )
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
 
-    if custom_operations is not None:
-        model_config.custom_operations = custom_operations
     if model_options.get("fp8_optimizations", False):
         model_config.optimizations["fp8"] = True
 
+    if custom_operations is not None:
+        model_config.custom_operations = custom_operations
+    elif progress is not None:
+        # BaseModel normally selects these operations internally.  Select the
+        # same implementation here, then wrap its layer classes so the long
+        # constructor phase reports progress instead of looking frozen.
+        base_operations = comfy.ops.pick_operations(
+            model_config.unet_config.get("dtype", None),
+            model_config.manual_cast_dtype,
+            fp8_optimizations=model_config.optimizations.get("fp8", False),
+            model_config=model_config,
+        )
+        model_config.custom_operations = _progress_operations(
+            base_operations, progress, new_state_dict
+        )
+
+    if progress is not None:
+        progress.update_absolute(10)
     model = model_config.get_model(new_state_dict, "")
     if progress is not None:
-        progress.update_absolute(3)
+        progress.update_absolute(90)
     model_patcher_type = (
         comfy.model_patcher.ModelPatcher
         if disable_dynamic
@@ -141,6 +210,8 @@ def _load_diffusion_model_state_dict_fast(
     )
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
+    if progress is not None:
+        progress.update_absolute(94)
 
     # assign=True makes parameters reference the already-loaded tensors rather
     # than copying ~30GB of weights a second time.  It is used only by the
@@ -153,7 +224,7 @@ def _load_diffusion_model_state_dict_fast(
     )
     model.load_model_weights(new_state_dict, "", assign=assign)
     if progress is not None:
-        progress.update_absolute(4)
+        progress.update_absolute(99)
     left_over = state_dict.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: %s", left_over)
@@ -186,7 +257,7 @@ def _load_diffusion_model_fast(
         (model_path, model_options, zero_copy),
     )
     if progress is not None:
-        progress.update_absolute(5)
+        progress.update_absolute(100)
     return model
 
 
@@ -236,7 +307,7 @@ class LoadModel:
             model_options["fp8_optimizations"] = True
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
-        progress = ProgressBar(5)
+        progress = ProgressBar(100)
         progress.update_absolute(0)
         model = _load_diffusion_model_fast(
             model_path,
