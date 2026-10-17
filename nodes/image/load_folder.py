@@ -212,6 +212,10 @@ async def _load_folder_preview_route(request):
     if not os.path.isdir(resolved):
         return web.json_response({"frames": []})
 
+    total_frames = len(_get_sorted_dir_files(
+        resolved,
+        extensions=FolderOfImages.IMG_EXTENSIONS,
+    ))
     frames = _build_preview_images(
         resolved,
         image_load_cap=image_load_cap,
@@ -219,7 +223,7 @@ async def _load_folder_preview_route(request):
         select_every_nth=select_every_nth,
         include_dimensions=False,
     )
-    return web.json_response({"frames": frames})
+    return web.json_response({"frames": frames, "total_frames": total_frames})
 
 
 class LoadFolderNode:

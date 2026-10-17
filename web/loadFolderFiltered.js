@@ -77,6 +77,7 @@ app.registerExtension({
         prefix: String(prefixWidget?.value || "all"),
         directories: [],
         frames: [],
+        totalFrames: 0,
         frameSignature: "",
         image: null,
         imageIndex: 0,
@@ -254,7 +255,7 @@ app.registerExtension({
         "justify-content:center",
         "box-sizing:border-box",
         "color:#999999",
-        "font:12px Arial,sans-serif",
+        "font:11px Arial,sans-serif",
         "white-space:nowrap",
       ].join(";");
       selector.appendChild(previewStatus);
@@ -330,12 +331,14 @@ app.registerExtension({
 
       const updatePreviewStatus = (width = 0, height = 0) => {
         const count = state.frames.length;
+        const total = Math.max(count, Number(state.totalFrames) || 0);
+        const frameLabel = total > count ? `${count} of ${total} frames` : `${count} frames`;
         if (!count) {
-          previewStatus.textContent = "0 frames";
+          previewStatus.textContent = total ? `0 of ${total} frames` : "0 frames";
         } else if (width && height) {
-          previewStatus.textContent = `${count} frames, ${width} x ${height}`;
+          previewStatus.textContent = `${frameLabel}, ${width} x ${height}`;
         } else {
-          previewStatus.textContent = `${count} frames`;
+          previewStatus.textContent = frameLabel;
         }
       };
 
@@ -373,8 +376,16 @@ app.registerExtension({
         if (!cached) image.src = src;
       };
 
-      const renderFrames = (frames) => {
+      const renderFrames = (frames, totalFrames = null) => {
         const nextFrames = Array.isArray(frames) ? frames : [];
+        if (totalFrames != null && Number.isFinite(Number(totalFrames))) {
+          state.totalFrames = Math.max(nextFrames.length, Number(totalFrames));
+        } else if (!nextFrames.length) {
+          state.totalFrames = 0;
+        } else {
+          state.totalFrames = Math.max(state.totalFrames, nextFrames.length);
+        }
+        updatePreviewStatus();
         const signature = nextFrames.map((frame) => imageUrl(frame)).join("|");
         if (signature === state.frameSignature) return;
 
@@ -428,7 +439,7 @@ app.registerExtension({
           if (!response.ok) throw new Error("Preview request failed");
           const payload = await response.json();
           if (requestToken === state.previewRequestToken) {
-            renderFrames(payload.frames ?? []);
+            renderFrames(payload.frames ?? [], payload.total_frames);
           }
         } catch (_error) {
           // Preserve the last valid preview across a transient poll/fetch
