@@ -18,6 +18,7 @@ import comfy.model_patcher
 import comfy.sd
 import comfy.utils
 import folder_paths
+from comfy.utils import ProgressBar
 
 
 def _load_diffusion_model_state_dict_fast(
@@ -26,6 +27,7 @@ def _load_diffusion_model_state_dict_fast(
     metadata=None,
     disable_dynamic=False,
     zero_copy=False,
+    progress=None,
 ):
     """Core diffusion loader with an opt-in assign=True weight path.
 
@@ -55,6 +57,9 @@ def _load_diffusion_model_state_dict_fast(
             state_dict, metadata = comfy.utils.convert_old_quants(
                 state_dict, "", metadata=metadata
             )
+
+    if progress is not None:
+        progress.update_absolute(2)
 
     parameters = comfy.utils.calculate_parameters(state_dict)
     weight_dtype = comfy.utils.weight_dtype(state_dict)
@@ -124,6 +129,8 @@ def _load_diffusion_model_state_dict_fast(
         model_config.optimizations["fp8"] = True
 
     model = model_config.get_model(new_state_dict, "")
+    if progress is not None:
+        progress.update_absolute(3)
     model_patcher_type = (
         comfy.model_patcher.ModelPatcher
         if disable_dynamic
@@ -145,6 +152,8 @@ def _load_diffusion_model_state_dict_fast(
         and model_config.quant_config is None
     )
     model.load_model_weights(new_state_dict, "", assign=assign)
+    if progress is not None:
+        progress.update_absolute(4)
     left_over = state_dict.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: %s", left_over)
@@ -155,16 +164,20 @@ def _load_diffusion_model_fast(
     model_path,
     model_options=None,
     zero_copy=False,
+    progress=None,
 ):
     model_options = {} if model_options is None else dict(model_options)
     state_dict, metadata = comfy.utils.load_torch_file(
         model_path, return_metadata=True
     )
+    if progress is not None:
+        progress.update_absolute(1)
     model = _load_diffusion_model_state_dict_fast(
         state_dict,
         model_options=model_options,
         metadata=metadata,
         zero_copy=zero_copy,
+        progress=progress,
     )
     if model is None:
         raise RuntimeError(f"ERROR: Could not detect model type of: {model_path}")
@@ -172,6 +185,8 @@ def _load_diffusion_model_fast(
         _load_diffusion_model_fast,
         (model_path, model_options, zero_copy),
     )
+    if progress is not None:
+        progress.update_absolute(5)
     return model
 
 
@@ -221,9 +236,12 @@ class LoadModel:
             model_options["fp8_optimizations"] = True
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+        progress = ProgressBar(5)
+        progress.update_absolute(0)
         model = _load_diffusion_model_fast(
             model_path,
             model_options=model_options,
             zero_copy=weight_dtype == "default",
+            progress=progress,
         )
         return (model,)
