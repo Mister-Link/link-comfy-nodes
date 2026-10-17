@@ -10,23 +10,16 @@ def _is_wan_valid(count: int) -> bool:
 def _unshift_rotation(work_count: int, value: int, is_loop: bool) -> int:
     """Resolve the rotation needed to restore the original first frame.
 
-    The shift node emits the rotation of the core sequence (the second half
-    plus blanks), while the returned sequence also contains two overlap frames
-    at its front.  Since unshift now preserves the complete sampled batch, the
-    overlap offset must be included in the rotation.  It is also natural to
-    enter the blank-frame amount manually in the unshift node, so smaller loop
-    values are interpreted as blank-frame counts.
+    Shift Pose Frames reports the rotation within the trimmed sequence,
+    while its actual output has two overlap frames at each edge.  Unshift
+    removes those overlap frames first, then applies this rotation.  Smaller
+    loop values are interpreted as manually supplied blank-frame counts.
     """
     value = max(0, int(value))
     if is_loop and value < work_count // 2:
         blank_frames = value
         source_count = work_count - blank_frames
         value = source_count - source_count // 2 + blank_frames
-    elif is_loop:
-        # ShiftPoseFrames reports the offset within the sequence after its
-        # two-frame prefix.  The prefix is retained in the sampler output, so
-        # rotate past it as well to put the original frame 1 first.
-        value += 2
     return value % work_count
 
 
@@ -117,8 +110,8 @@ class UnshiftPoseFramesNode:
     RETURN_TYPES = ("IMAGE", "INT")
     RETURN_NAMES = ("frames", "total_frames")
     OUTPUT_TOOLTIPS = (
-        "Original frame order restored from Shift Pose Frames output while preserving every sampled frame, including overlap and blank frames.",
-        "Actual total frame count after unshifting; it is preserved from the input.",
+        "Original frame order restored from Shift Pose Frames output, with the four overlap frames removed.",
+        "Actual total frame count after unshifting.",
     )
     FUNCTION = "calculate"
     CATEGORY = "animation/utils"
@@ -166,9 +159,18 @@ class UnshiftPoseFramesNode:
         # batches) at the front instead of restoring source frame 1.
         loop_layout = bool(is_loop) or shift > 0
 
+        if loop_layout:
+            if int(work.shape[0]) < 4:
+                raise ValueError(
+                    "Looped Shift Pose Frames input must include the 4 overlap frames."
+                )
+            # The first and last two frames are context overlap for the
+            # inpainting pass, not part of the restored output sequence.
+            work = work[2:-2]
+
         work_count = int(work.shape[0])
         if work_count == 0:
-            raise ValueError("Cannot unshift an empty frame sequence.")
+            raise ValueError("No frames remain after removing overlap frames.")
 
         shift_mod = _unshift_rotation(work_count, shift, loop_layout)
         if shift_mod:
