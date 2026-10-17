@@ -21,7 +21,7 @@ import comfy.ops
 import comfy.sd
 import comfy.utils
 import folder_paths
-from comfy.utils import ProgressBar
+
 
 
 def _runtime_memory():
@@ -446,12 +446,9 @@ class LoadModel:
             model_options["fp8_optimizations"] = True
 
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
-        progress = ProgressBar(100)
-        progress.update_absolute(0)
         model = _load_diffusion_model_fast(
             model_path,
             model_options=model_options,
             zero_copy=weight_dtype == "default",
-            progress=progress,
         )
         return (model,)
