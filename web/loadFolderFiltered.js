@@ -154,13 +154,21 @@ app.registerExtension({
           "appearance:none",
           "-webkit-appearance:none",
           "text-overflow:ellipsis",
+          "text-align:right",
           "outline:none",
           "color-scheme:dark",
         ].join(";");
 
         const arrow = document.createElement("span");
         arrow.textContent = "▾";
-        arrow.style.cssText = "color:#999999;flex:0 0 auto;padding-left:6px;pointer-events:none";
+        arrow.style.cssText = [
+          "flex:0 0 18px",
+          "width:18px",
+          "padding:0",
+          "color:#999999",
+          "text-align:center",
+          "pointer-events:none",
+        ].join(";");
 
         field.append(select, arrow);
         field.addEventListener("click", (event) => {
@@ -186,7 +194,7 @@ app.registerExtension({
           "min-width:0",
           "width:0",
           "height:20px",
-          "padding:0",
+          "padding:0 16px 0 0",
           "border:0",
           "outline:none",
           "background:transparent",
@@ -204,12 +212,14 @@ app.registerExtension({
           "right:6px",
           "top:50%",
           "transform:translateY(-50%)",
-          "padding:1px 4px",
+          "width:18px",
+          "padding:0",
           "border-radius:7px",
           "background:#68777a",
           "color:#eeeeee",
           "font:10px Arial,sans-serif",
           "line-height:14px",
+          "text-align:center",
           "pointer-events:none",
           "white-space:nowrap",
         ].join(";");
@@ -224,7 +234,7 @@ app.registerExtension({
         input.addEventListener("focus", () => {
           input.readOnly = false;
           input.value = committedValue();
-          input.style.paddingRight = "42px";
+          input.style.paddingRight = "16px";
           editBadge.style.display = "block";
           field.style.borderColor = "#9aaeb2";
           field.style.background = "#414646";
@@ -246,7 +256,7 @@ app.registerExtension({
         input.addEventListener("blur", () => {
           input.value = committedValue();
           input.readOnly = true;
-          input.style.paddingRight = "0";
+          input.style.paddingRight = "16px";
           editBadge.style.display = "none";
           field.style.borderColor = "#686868";
           field.style.background = "#3b3b3b";
