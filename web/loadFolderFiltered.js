@@ -46,6 +46,7 @@ function setSelectOptions(select, values, preferred) {
     select.appendChild(option);
   }
   select.value = values.includes(current) ? current : (values[0] || "");
+  select._lcSyncDisplay?.();
   return select.value;
 }
 
@@ -90,6 +91,7 @@ app.registerExtension({
         previewRequestToken: 0,
         pollTimer: null,
         removed: false,
+        dropdownCleanups: [],
       };
 
       hideWidget(prefixWidget);
@@ -143,20 +145,24 @@ app.registerExtension({
         const { field } = makeField(labelText);
         const select = document.createElement("select");
         select.style.cssText = [
+          "position:absolute",
+          "width:1px",
+          "height:1px",
+          "opacity:0",
+          "pointer-events:none",
+        ].join(";");
+
+        const value = document.createElement("span");
+        value.style.cssText = [
           "flex:1",
           "min-width:0",
-          "height:20px",
+          "overflow:hidden",
           "padding:0",
-          "border:0",
-          "background:transparent",
           "color:#dddddd",
           "font:14px Arial,sans-serif",
-          "appearance:none",
-          "-webkit-appearance:none",
-          "text-overflow:ellipsis",
           "text-align:right",
-          "outline:none",
-          "color-scheme:dark",
+          "text-overflow:ellipsis",
+          "white-space:nowrap",
         ].join(";");
 
         const arrow = document.createElement("span");
@@ -170,11 +176,93 @@ app.registerExtension({
           "pointer-events:none",
         ].join(";");
 
-        field.append(select, arrow);
+        const menu = document.createElement("div");
+        menu.setAttribute("role", "listbox");
+        menu.style.cssText = [
+          "position:fixed",
+          "display:none",
+          "z-index:100000",
+          "box-sizing:border-box",
+          "max-height:280px",
+          "overflow-y:auto",
+          "padding:3px 0",
+          "background:#30343f",
+          "border:1px solid #5f6875",
+          "border-radius:3px",
+          "box-shadow:0 5px 16px rgba(0,0,0,.45)",
+          "font:14px Arial,sans-serif",
+        ].join(";");
+
+        const syncDisplay = () => {
+          const option = [...select.options].find((item) => item.value === select.value);
+          value.textContent = option?.textContent || select.value || "";
+        };
+        select._lcSyncDisplay = syncDisplay;
+
+        let menuOpen = false;
+        const closeMenu = () => {
+          menuOpen = false;
+          menu.style.display = "none";
+          menu.replaceChildren();
+          if (state.closeDropdown === closeMenu) state.closeDropdown = null;
+        };
+        const openMenu = () => {
+          state.closeDropdown?.();
+          menu.replaceChildren();
+          for (const option of select.options) {
+            const item = document.createElement("div");
+            item.setAttribute("role", "option");
+            item.textContent = option.textContent;
+            item.style.cssText = [
+              "box-sizing:border-box",
+              "min-height:28px",
+              "padding:6px 10px",
+              "color:#cbd0dc",
+              "cursor:pointer",
+              "white-space:nowrap",
+            ].join(";");
+            if (option.value === select.value) item.style.background = "#465a85";
+            item.addEventListener("mouseenter", () => {
+              item.style.background = "#53627f";
+            });
+            item.addEventListener("mouseleave", () => {
+              item.style.background = option.value === select.value ? "#465a85" : "transparent";
+            });
+            item.addEventListener("mousedown", (event) => {
+              event.preventDefault();
+              select.value = option.value;
+              syncDisplay();
+              select.dispatchEvent(new Event("change", { bubbles: true }));
+              closeMenu();
+            });
+            menu.appendChild(item);
+          }
+          document.body.appendChild(menu);
+          const rect = field.getBoundingClientRect();
+          menu.style.left = `${rect.left}px`;
+          menu.style.width = `${rect.width}px`;
+          menu.style.display = "block";
+          const menuRect = menu.getBoundingClientRect();
+          const below = rect.bottom + 2;
+          const above = rect.top - menuRect.height - 2;
+          menu.style.top = `${below + menuRect.height <= window.innerHeight - 8 || above < 8 ? below : above}px`;
+          menuOpen = true;
+          state.closeDropdown = closeMenu;
+        };
+        const onDocumentPointerDown = (event) => {
+          if (!field.contains(event.target) && !menu.contains(event.target)) closeMenu();
+        };
+        document.addEventListener("pointerdown", onDocumentPointerDown, true);
+        state.dropdownCleanups.push(() => {
+          closeMenu();
+          document.removeEventListener("pointerdown", onDocumentPointerDown, true);
+        });
+
+        field.append(value, arrow, select);
         field.addEventListener("click", (event) => {
-          if (event.target === select) return;
-          select.focus();
-          select.click();
+          event.stopPropagation();
+          if (menuOpen) closeMenu();
+          else openMenu();
         });
         return { field, select };
       };
@@ -614,6 +702,8 @@ app.registerExtension({
         state.removed = true;
         stopAnimation();
         if (state.pollTimer) clearInterval(state.pollTimer);
+        for (const cleanup of state.dropdownCleanups) cleanup();
+        state.dropdownCleanups = [];
         originalOnRemoved?.apply(this, arguments);
       };
 
