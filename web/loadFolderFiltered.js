@@ -9,6 +9,7 @@ const PREVIEW_ROUTE = "/link_comfy/load_folder_preview";
 const PREVIEW_HEIGHT = 160;
 const PREVIEW_FPS = 12;
 const POLL_MS = 3000;
+const STATUS_HEIGHT = 18;
 const NODE_WIDTH = 270;
 const FIELD_HEIGHT = 22;
 const FIELD_GAP = 3;
@@ -244,14 +245,28 @@ app.registerExtension({
       preview.appendChild(previewImage);
       selector.appendChild(preview);
 
+      const previewStatus = document.createElement("div");
+      previewStatus.textContent = "0 frames";
+      previewStatus.style.cssText = [
+        `height:${STATUS_HEIGHT}px`,
+        "display:flex",
+        "align-items:center",
+        "justify-content:center",
+        "box-sizing:border-box",
+        "color:#999999",
+        "font:12px Arial,sans-serif",
+        "white-space:nowrap",
+      ].join(";");
+      selector.appendChild(previewStatus);
+
       const selectorWidget = this.addDOMWidget(
         "folder_selector",
         "customSelect",
         selector,
         { serialize: false, hideOnZoom: false },
       );
-      const controlsHeight = (FIELD_HEIGHT * 5) + (FIELD_GAP * 5) +
-        PREVIEW_MARGIN_TOP + CONTENT_PADDING_BOTTOM;
+      const controlsHeight = (FIELD_HEIGHT * 5) + (FIELD_GAP * 6) +
+        PREVIEW_MARGIN_TOP + STATUS_HEIGHT + CONTENT_PADDING_BOTTOM;
       const minimumSelectorHeight = controlsHeight + PREVIEW_HEIGHT;
       const updatePreviewLayout = () => {
         const widgetTop = Number(selectorWidget.y) || 0;
@@ -313,9 +328,21 @@ app.registerExtension({
         state.animationTimer = null;
       };
 
+      const updatePreviewStatus = (width = 0, height = 0) => {
+        const count = state.frames.length;
+        if (!count) {
+          previewStatus.textContent = "0 frames";
+        } else if (width && height) {
+          previewStatus.textContent = `${count} frames, ${width} x ${height}`;
+        } else {
+          previewStatus.textContent = `${count} frames`;
+        }
+      };
+
       const loadFrame = (index) => {
         if (!state.frames.length) {
           state.image = null;
+          updatePreviewStatus();
           this.setDirtyCanvas(true, true);
           return;
         }
@@ -326,6 +353,7 @@ app.registerExtension({
         const cached = state.imageCache.get(src);
         if (cached?.complete) {
           state.image = cached;
+          updatePreviewStatus(cached.naturalWidth || cached.width, cached.naturalHeight || cached.height);
           this.setDirtyCanvas(true, true);
           return;
         }
@@ -333,10 +361,12 @@ app.registerExtension({
         if (!cached) state.imageCache.set(src, image);
         image.onload = () => {
           state.image = image;
+          updatePreviewStatus(image.naturalWidth || image.width, image.naturalHeight || image.height);
           this.setDirtyCanvas(true, true);
         };
         image.onerror = () => {
           state.image = null;
+          updatePreviewStatus();
           previewImage.style.visibility = "hidden";
           this.setDirtyCanvas(true, true);
         };
@@ -354,6 +384,7 @@ app.registerExtension({
         state.imageIndex = 0;
         state.image = null;
         state.imageCache.clear();
+        updatePreviewStatus();
         if (!state.frames.length) {
           previewImage.removeAttribute("src");
           previewImage.style.visibility = "hidden";
