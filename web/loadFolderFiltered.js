@@ -122,6 +122,7 @@ app.registerExtension({
           "border:1px solid #686868",
           "border-radius:11px",
           "overflow:hidden",
+          "position:relative",
           "font:14px Arial,sans-serif",
         ].join(";");
 
@@ -176,6 +177,7 @@ app.registerExtension({
         input.type = "number";
         input.value = String(widget?.value ?? 0);
         input.readOnly = true;
+        input.title = "Press Enter to apply; Escape or blur to cancel";
         input.min = String(widget?.options?.min ?? 0);
         input.max = String(widget?.options?.max ?? 0);
         input.step = String(widget?.options?.step ?? 1);
@@ -194,6 +196,23 @@ app.registerExtension({
           "appearance:textfield",
           "-moz-appearance:textfield",
         ].join(";");
+        const editBadge = document.createElement("span");
+        editBadge.textContent = "↵ Enter";
+        editBadge.style.cssText = [
+          "display:none",
+          "position:absolute",
+          "right:6px",
+          "top:50%",
+          "transform:translateY(-50%)",
+          "padding:1px 4px",
+          "border-radius:7px",
+          "background:#68777a",
+          "color:#eeeeee",
+          "font:10px Arial,sans-serif",
+          "line-height:14px",
+          "pointer-events:none",
+          "white-space:nowrap",
+        ].join(";");
         const committedValue = () => String(widget?.value ?? 0);
         const parseDraft = () => {
           let value = Number(input.value);
@@ -205,6 +224,10 @@ app.registerExtension({
         input.addEventListener("focus", () => {
           input.readOnly = false;
           input.value = committedValue();
+          input.style.paddingRight = "42px";
+          editBadge.style.display = "block";
+          field.style.borderColor = "#9aaeb2";
+          field.style.background = "#414646";
           requestAnimationFrame(() => input.select());
         });
         input.addEventListener("keydown", (event) => {
@@ -223,8 +246,15 @@ app.registerExtension({
         input.addEventListener("blur", () => {
           input.value = committedValue();
           input.readOnly = true;
+          input.style.paddingRight = "0";
+          editBadge.style.display = "none";
+          field.style.borderColor = "#686868";
+          field.style.background = "#3b3b3b";
         });
-        field.appendChild(input);
+        field.append(input, editBadge);
+        field.addEventListener("click", (event) => {
+          if (event.target !== input) input.focus();
+        });
         return input;
       };
 
