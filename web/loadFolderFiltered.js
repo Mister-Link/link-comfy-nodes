@@ -139,17 +139,17 @@ app.registerExtension({
       };
       selector.addEventListener("wheel", forwardWheelToCanvas, { passive: false });
 
-      const makeField = (labelText) => {
+      const makeField = (labelText, width = "100%") => {
         const field = document.createElement("div");
         field.style.cssText = [
           "display:flex",
           "align-items:center",
-          "width:100%",
+          `width:${width}`,
           `height:${FIELD_HEIGHT}px`,
           "box-sizing:border-box",
           "padding:0 7px 0 9px",
-          "background:#3b3b3b",
-          "border:1px solid #686868",
+          "background:var(--comfy-input-bg,#3b3b3b)",
+          "border:1px solid var(--border-color,#686868)",
           "border-radius:11px",
           "overflow:hidden",
           "position:relative",
@@ -161,7 +161,7 @@ app.registerExtension({
         label.style.cssText = [
           "flex:0 0 auto",
           "margin-right:8px",
-          "color:#999999",
+          "color:var(--descrip-text,#999999)",
           "line-height:20px",
           "white-space:nowrap",
         ].join(";");
@@ -170,7 +170,8 @@ app.registerExtension({
       };
 
       const makeSelect = (labelText) => {
-        const { field } = makeField(labelText);
+        const { field } = makeField(labelText, "80%");
+        field.style.alignSelf = "center";
         const select = document.createElement("select");
         select.style.cssText = [
           "position:absolute",
@@ -186,7 +187,7 @@ app.registerExtension({
           "min-width:0",
           "overflow:hidden",
           "padding:0",
-          "color:#dddddd",
+          "color:var(--input-text,#dddddd)",
           "font:14px Arial,sans-serif",
           "text-align:right",
           "text-overflow:ellipsis",
@@ -199,7 +200,7 @@ app.registerExtension({
           "flex:0 0 22px",
           "width:22px",
           "padding:0 2px 0 4px",
-          "color:#999999",
+          "color:var(--descrip-text,#999999)",
           "text-align:center",
           "pointer-events:none",
         ].join(";");
@@ -214,8 +215,8 @@ app.registerExtension({
           "max-height:280px",
           "overflow-y:auto",
           "padding:3px 0",
-          "background:#30343f",
-          "border:1px solid #5f6875",
+          "background:var(--comfy-menu-bg,#30343f)",
+          "border:1px solid var(--border-color,#5f6875)",
           "border-radius:3px",
           "box-shadow:0 5px 16px rgba(0,0,0,.45)",
           "font:14px Arial,sans-serif",
@@ -245,16 +246,19 @@ app.registerExtension({
               "box-sizing:border-box",
               "min-height:28px",
               "padding:6px 10px",
-              "color:#cbd0dc",
+              "color:var(--input-text,#cbd0dc)",
               "cursor:pointer",
               "white-space:nowrap",
             ].join(";");
-            if (option.value === select.value) item.style.background = "#465a85";
+            if (option.value === select.value) {
+              item.style.background = "var(--interface-panel-selected-surface,#465a85)";
+            }
             item.addEventListener("mouseenter", () => {
-              item.style.background = "#53627f";
+              item.style.background = "var(--interface-panel-hover-surface,#53627f)";
             });
             item.addEventListener("mouseleave", () => {
-              item.style.background = option.value === select.value ? "#465a85" : "transparent";
+              item.style.background = option.value === select.value
+                ? "var(--interface-panel-selected-surface,#465a85)" : "transparent";
             });
             item.addEventListener("mousedown", (event) => {
               event.preventDefault();
