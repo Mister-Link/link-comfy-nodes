@@ -20,6 +20,7 @@ from .image import (
     SpriteScaleCalculatorNode,
     SpritesheetBuilderNode,
     StabilizeFramesNode,
+    UpscalerTensorrtVramSafe,
 )
 from .latent import AspectToResolution, SnapToDivisible
 from .motion import (
@@ -97,6 +98,7 @@ __all__ = [
     "SaveImageSequenceZip",
     "SpritesheetBuilderNode",
     "StabilizeFramesNode",
+    "UpscalerTensorrtVramSafe",
     "SpritesheetPreviewNode",
     "ShiftImageBatchNode",
     "UnshiftPoseFramesNode",
