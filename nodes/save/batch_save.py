@@ -14,6 +14,7 @@ from PIL import Image
 
 import folder_paths  # type: ignore[import-untyped]
 from comfy_execution.utils import get_executing_context
+from comfy.utils import ProgressBar
 
 _BATCH_IMAGE_SAVE_CACHE: dict[tuple[str, str], tuple[str, str]] = {}
 
@@ -58,6 +59,12 @@ class BatchImageSave:
                     {"default": False},
                 ),
             },
+            "optional": {
+                "create_zip": (
+                    "BOOLEAN",
+                    {"default": True},
+                ),
+            },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
@@ -69,19 +76,19 @@ class BatchImageSave:
         delimiter: str,
         extension: str,
         link_to_input: bool,
+        create_zip: bool = True,
         unique_id: str | None = None,
     ):
-        images_np = images.detach().cpu().numpy()
         timestamp_token = datetime.now().strftime("%m%d%y-%H%M%S")
 
-        if images_np.ndim != 4:
+        if images.ndim != 4:
             raise ValueError(
-                f"Expected images with shape (N, H, W, C), got shape {images_np.shape}"
+                f"Expected images with shape (N, H, W, C), got shape {tuple(images.shape)}"
             )
 
-        num_images = images_np.shape[0]
-        images_uint8 = (np.clip(images_np, 0.0, 1.0) * 255.0).astype(np.uint8)
+        num_images = int(images.shape[0])
         saved_files = []
+        progress = ProgressBar(num_images)
 
         output_dir = folder_paths.get_output_directory()
 
@@ -201,7 +208,12 @@ class BatchImageSave:
         digits = max(2, len(str(start_index + num_images - 1)))
 
         full_zip_path = f"{full_dir}.zip"
-        with zipfile.ZipFile(full_zip_path, "w", compression=zipfile.ZIP_STORED) as zipf:
+        zipf = (
+            zipfile.ZipFile(full_zip_path, "w", compression=zipfile.ZIP_STORED)
+            if create_zip
+            else None
+        )
+        try:
             for i in range(num_images):
                 index = start_index + i
                 filename = f"{resolved_filename_prefix}{delimiter}{index:0{digits}d}.{ext}"
@@ -210,7 +222,17 @@ class BatchImageSave:
                     os.path.join(resolved_path, filename) if resolved_path else filename
                 )
                 full_path = os.path.join(full_dir, filename)
-                frame = images_uint8[i]
+
+                # Keep only one frame's converted representation in memory. The
+                # IMAGE input is normally float32; materializing the whole batch
+                # as NumPy and uint8 arrays doubles/triples peak RAM for videos.
+                frame = (
+                    images[i]
+                    .detach()
+                    .to(device="cpu", dtype=torch.float32)
+                    .numpy()
+                )
+                frame = (np.clip(frame, 0.0, 1.0) * 255.0).astype(np.uint8)
 
                 if frame.shape[-1] == 1:
                     pil_img = Image.fromarray(frame[:, :, 0], mode="L")
@@ -224,27 +246,36 @@ class BatchImageSave:
                     raise ValueError(f"Unsupported number of channels: {frame.shape[-1]}")
 
                 image_buffer = BytesIO()
-                pil_img.save(image_buffer, format=pil_format)
+                save_options = {"compress_level": 1} if pil_format == "PNG" else {}
+                pil_img.save(image_buffer, format=pil_format, **save_options)
                 payload = image_buffer.getvalue()
                 with open(full_path, "wb") as image_file:
                     image_file.write(payload)
-                zipf.writestr(filename, payload)
+                if zipf is not None:
+                    # PNG/JPEG/WEBP are already compressed. ZIP_STORED avoids
+                    # spending CPU trying to compress those bytes again.
+                    zipf.writestr(filename, payload)
                 saved_files.append(relative_path)
+                progress.update(1)
+        finally:
+            if zipf is not None:
+                zipf.close()
 
         folder_path = resolved_path if resolved_path else ""
         file_names = "\n".join([os.path.basename(f) for f in saved_files])
 
-        zip_filename = os.path.basename(full_zip_path)
         zip_download_url = None
-        try:
-            zip_relative_path = os.path.relpath(full_zip_path, output_dir)
-        except ValueError:
-            zip_relative_path = None
-        if zip_relative_path and not zip_relative_path.startswith(".."):
-            zip_download_url = (
-                "/view?filename="
-                f"{quote(zip_relative_path.replace(os.sep, '/'))}&type=output"
-            )
+        zip_filename = os.path.basename(full_zip_path)
+        if create_zip:
+            try:
+                zip_relative_path = os.path.relpath(full_zip_path, output_dir)
+            except ValueError:
+                zip_relative_path = None
+            if zip_relative_path and not zip_relative_path.startswith(".."):
+                zip_download_url = (
+                    "/view?filename="
+                    f"{quote(zip_relative_path.replace(os.sep, '/'))}&type=output"
+                )
 
         ui_text = [f"Saved {num_images} images to {resolved_path or 'output'}"]
         if zip_download_url:
