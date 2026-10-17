@@ -7,6 +7,22 @@ def _is_wan_valid(count: int) -> bool:
     return count >= 1 and (count - 1) % 4 == 0
 
 
+def _unshift_rotation(work_count: int, value: int, is_loop: bool) -> int:
+    """Resolve the rotation needed to restore the original first frame.
+
+    The shift node emits the full rotation (the second half plus blanks), but
+    it is natural to enter the blank-frame amount manually in the unshift
+    node.  A real loop rotation is always at least half of the trimmed batch;
+    smaller loop values are therefore unambiguously blank-frame counts.
+    """
+    value = max(0, int(value))
+    if is_loop and value < work_count // 2:
+        blank_frames = value
+        source_count = work_count - blank_frames
+        value = source_count - source_count // 2 + blank_frames
+    return value % work_count
+
+
 class ShiftPoseFramesNode:
     RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "BOOLEAN")
     RETURN_NAMES = (
@@ -112,7 +128,7 @@ class UnshiftPoseFramesNode:
                         "min": 0,
                         "max": 9999,
                         "step": 1,
-                        "tooltip": "Shift value emitted by Shift Pose Frames.",
+                        "tooltip": "Connect the shift output from Shift Pose Frames. In loop mode, a small manual value is also accepted as the blank-frame count.",
                     },
                 ),
                 "is_loop": (
@@ -144,7 +160,7 @@ class UnshiftPoseFramesNode:
         if work_count == 0:
             raise ValueError("No frames remain after removing overlap frames.")
 
-        shift_mod = shift % work_count
+        shift_mod = _unshift_rotation(work_count, shift, is_loop)
         if shift_mod:
             work = torch.cat([work[shift_mod:], work[:shift_mod]], dim=0)
 

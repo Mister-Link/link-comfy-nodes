@@ -18,7 +18,6 @@ import comfy.model_patcher
 import comfy.sd
 import comfy.utils
 import folder_paths
-from comfy.cli_args import args
 
 
 def _load_diffusion_model_state_dict_fast(
@@ -155,22 +154,12 @@ def _load_diffusion_model_state_dict_fast(
 def _load_diffusion_model_fast(
     model_path,
     model_options=None,
-    extra_state_dict=None,
     zero_copy=False,
 ):
     model_options = {} if model_options is None else dict(model_options)
     state_dict, metadata = comfy.utils.load_torch_file(
         model_path, return_metadata=True
     )
-    if extra_state_dict:
-        extra = comfy.utils.load_torch_file(extra_state_dict)
-        state_dict.update(extra)
-        del extra
-        prefix = comfy.sd.model_detection.unet_prefix_from_state_dict(state_dict)
-        state_dict = comfy.utils.state_dict_prefix_replace(
-            state_dict, {prefix: ""}, filter_keys=False
-        )
-
     model = _load_diffusion_model_state_dict_fast(
         state_dict,
         model_options=model_options,
@@ -181,7 +170,7 @@ def _load_diffusion_model_fast(
         raise RuntimeError(f"ERROR: Could not detect model type of: {model_path}")
     model.cached_patcher_init = (
         _load_diffusion_model_fast,
-        (model_path, model_options, extra_state_dict, zero_copy),
+        (model_path, model_options, zero_copy),
     )
     return model
 
@@ -201,40 +190,7 @@ class LoadModel:
                         "fp8_e4m3fn",
                         "fp8_e4m3fn_fast",
                         "fp8_e5m2",
-                        "fp16",
-                        "bf16",
-                        "fp32",
                     ],
-                ),
-                "compute_dtype": (
-                    ["default", "fp16", "bf16", "fp32"],
-                    {
-                        "default": "default",
-                        "tooltip": "Compute dtype override; default lets ComfyUI choose.",
-                    },
-                ),
-                "patch_cublaslinear": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Enable ComfyUI's cublas linear operations.",
-                    },
-                ),
-                "enable_fp16_accumulation": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": "Enable CUDA FP16 accumulation when supported.",
-                    },
-                ),
-            },
-            "optional": {
-                "extra_state_dict": (
-                    "STRING",
-                    {
-                        "forceInput": True,
-                        "tooltip": "Optional full path to an additional state dict to merge.",
-                    },
                 ),
             },
         }
@@ -244,24 +200,17 @@ class LoadModel:
     CATEGORY = "loaders"
     DESCRIPTION = (
         "Loads a diffusion model with a zero-copy native-weight path. "
-        "Explicit dtype conversions use ComfyUI's standard loader path."
+        "Explicit FP8 weight choices use ComfyUI's standard conversion path."
     )
 
     def load(
         self,
         model_name,
         weight_dtype,
-        compute_dtype,
-        patch_cublaslinear,
-        enable_fp16_accumulation,
-        extra_state_dict=None,
     ):
         dtype_map = {
             "fp8_e4m3fn": torch.float8_e4m3fn,
             "fp8_e5m2": torch.float8_e5m2,
-            "fp16": torch.float16,
-            "bf16": torch.bfloat16,
-            "fp32": torch.float32,
         }
         model_options = {}
         if weight_dtype in dtype_map:
@@ -271,30 +220,10 @@ class LoadModel:
             model_options["dtype"] = torch.float8_e4m3fn
             model_options["fp8_optimizations"] = True
 
-        if enable_fp16_accumulation:
-            if not hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
-                raise RuntimeError(
-                    "FP16 accumulation requires a newer PyTorch build."
-                )
-            torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        elif hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
-            torch.backends.cuda.matmul.allow_fp16_accumulation = False
-
-        if patch_cublaslinear:
-            args.fast.add("cublas_ops")
-        else:
-            args.fast.discard("cublas_ops")
-
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
         model = _load_diffusion_model_fast(
             model_path,
             model_options=model_options,
-            extra_state_dict=extra_state_dict,
             zero_copy=weight_dtype == "default",
         )
-
-        if compute_dtype != "default":
-            model.set_model_compute_dtype(dtype_map[compute_dtype])
-            model.force_cast_weights = False
-            logging.info("Setting %s compute dtype to %s", model_name, compute_dtype)
         return (model,)
